@@ -1,0 +1,11 @@
+jadxmp — an experimental Kotlin Multiplatform reimplementation of the jadx decompiler.
+
+This project is developed with reference to jadx (https://github.com/skylot/jadx),
+Copyright 2015 Skylot, licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
+jadxmp is an independent clean-room reimplementation and does not incorporate jadx
+source code. Test inputs under corpus/ are derived from jadx's test suite and remain
+subject to jadx's Apache License, Version 2.0.
+
+jadxmp's own license is to be determined.
