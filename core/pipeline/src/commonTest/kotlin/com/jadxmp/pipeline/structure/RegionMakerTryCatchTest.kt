@@ -559,7 +559,11 @@ class RegionMakerTryCatchTest {
                 FakeTryBlock(
                     0, 0,
                     FakeCatchHandler(
-                        listOf("Ljava/lang/ClassNotFoundException;", "Ljava/lang/NoSuchMethodException;", "Ljava/lang/Exception;"),
+                        listOf(
+                            "Ljava/lang/ClassNotFoundException;",
+                            "Ljava/lang/NoSuchMethodException;",
+                            "Ljava/lang/Exception;",
+                        ),
                         listOf(2, 2, 2),
                         2, // catch-all → the same handler block
                     ),

@@ -120,7 +120,7 @@ class RegionMakerCoalescingTest {
         process(method)
 
         assertNull(method.region, "a copy read before its (relocated) definition must bail — region stays null")
-        assertTrue(method.contains(AttrFlag.HAS_ERROR), "the forward reference is flagged, never emitted clean-but-wrong")
+        assertTrue(method.contains(AttrFlag.HAS_ERROR), "the forward reference is flagged, not emitted clean-but-wrong")
     }
 
     @Test
