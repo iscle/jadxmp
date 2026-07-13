@@ -17,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -152,5 +153,65 @@ class OutOfSsaEscapeHoistTest {
                 else -> assertTrue(litType is IrType.Object, "an object escaping value's default must be an object type (renders `null`)")
             }
         }
+    }
+
+    @Test
+    fun loopDefinedValueUsedAfterLoopIsHoisted() {
+        // compute();                       (preheader, before the loop)
+        // while (true) { v0 = compute(); if (v0 != 0) break; }
+        // use(v0);                          (AFTER the loop — v0 escapes the loop body scope)
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, indexType = IndexType.METHOD_REF, methodRef = compute), // preheader
+                Insn(Opcode.INVOKE_STATIC, 1, indexType = IndexType.METHOD_REF, methodRef = compute), // loop header
+                Insn(Opcode.MOVE_RESULT, 2, intArrayOf(0)), // v0 = compute()  (def INSIDE the loop)
+                Insn(Opcode.IF_NEZ, 3, intArrayOf(0), target = 5), // if (v0 != 0) break
+                Insn(Opcode.GOTO, 4, target = 1), // back-edge (latch)
+                // use(v0) after the loop — v0 escapes the loop body
+                Insn(Opcode.INVOKE_STATIC, 5, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = use),
+                Insn(Opcode.RETURN_VOID, 6),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, methodName = "m")
+        process(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the loop-escape method must structure (not bail)")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR), "correct loop hoisting ⇒ no error flag")
+
+        // Evidence: a synthetic default-init whose result shares a >1-member local with the in-loop def —
+        // jadx's `int v = 0; while (…) { v = …; } … v`. And it sits OUTSIDE the loop, dominating the use.
+        val init = hoistedInit(method)
+        assertNotNull(init, "the loop-escaping value must be hoisted to a default init before the loop")
+        val initBlock = method.blocks.first { b -> b.instructions.any { it === init } }
+        val useBlock = method.blocks.first { b ->
+            b.instructions.any { it.opcode == IrOpcode.INVOKE && it.offset == 5 }
+        }
+        assertTrue(initBlock.id in useBlock.dominators, "the hoisted declaration must dominate the post-loop use")
+        // The hoist point is not itself part of the loop it escaped (it precedes the back-edge header).
+        assertTrue(initBlock.successors.none { it.id in initBlock.dominators }, "the hoist block is not a loop header")
+    }
+
+    @Test
+    fun loopLocalValueUsedOnlyInLoopIsNotHoisted() {
+        // while (true) { v0 = compute(); use(v0); if (v0 != 0) break; }   (v0 read ONLY inside the loop)
+        // A value that never escapes the loop keeps its natural in-loop declaration — no over-hoisting.
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, indexType = IndexType.METHOD_REF, methodRef = compute), // preheader
+                Insn(Opcode.INVOKE_STATIC, 1, indexType = IndexType.METHOD_REF, methodRef = compute), // header
+                Insn(Opcode.MOVE_RESULT, 2, intArrayOf(0)), // v0 = compute()  (def in loop)
+                // use(v0) INSIDE the loop
+                Insn(Opcode.INVOKE_STATIC, 3, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = use),
+                Insn(Opcode.IF_NEZ, 4, intArrayOf(0), target = 6), // if (v0 != 0) break
+                Insn(Opcode.GOTO, 5, target = 1), // back-edge
+                Insn(Opcode.RETURN_VOID, 6), // after loop — does NOT read v0
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, methodName = "m")
+        process(method)
+
+        assertNull(hoistedInit(method), "a loop-local value must NOT be hoisted (no post-loop escape)")
     }
 }

@@ -61,9 +61,11 @@ internal class OutOfSsa(
 
     fun run() {
         val phis = collectPhis()
-        // Fast path: nothing merges AND no try/catch — every value already has a single normal def/use
-        // whose declaration codegen can place on first assignment. Leave the 1:1 mapping to codegen.
-        if (phis.isEmpty() && blocks.none { isProtected(it) }) return
+        // Fast path: nothing merges, no try/catch, AND no loop — every value has a single normal def/use
+        // whose declaration codegen can place on first assignment. A loop breaks that: a value defined in
+        // a loop body but read after the loop needs its declaration hoisted OUT of the loop scope
+        // ([hoistLoopEscapingDeclarations]), so a looping method must take the full path even with no φ.
+        if (phis.isEmpty() && blocks.none { isProtected(it) } && !hasLoop()) return
         indexDefs()
         materializeSharedZeroConstMoves()
 
@@ -88,6 +90,10 @@ internal class OutOfSsa(
         // its declaration hoisted OUT of the try scope — source scope is narrower than dominance, so the
         // in-try declaration would be invisible outside. Without this the structuring stage bails.
         hoistTryEscapingDeclarations()
+        // Same narrowing for a loop: a value DEFINED inside a loop body but read AFTER the loop is
+        // dominated by its in-loop def, yet source-level loop scope hides it after the loop. Hoist its
+        // declaration to a default-init BEFORE the loop so the post-loop read is in scope.
+        hoistLoopEscapingDeclarations()
     }
 
     // ---- polymorphic-zero re-materialization -------------------------------
@@ -421,6 +427,102 @@ internal class OutOfSsa(
             if (hoisted.type == null) hoisted.type = value.type
             val common = deepestCommonDominator(occ, byId) ?: continue
             insertDeclInit(hoistOutOfProtected(common), hoisted)
+        }
+    }
+
+    /**
+     * Hoist the declaration of every **single-def** value that is defined inside a loop body and read
+     * AFTER the loop (outside its body) to a default-init BEFORE the loop, so the post-loop read is in
+     * scope — jadx's `T v = default; while (…) { v = …; } … v`. The in-loop def dominates the post-loop
+     * read (SSA guarantees it for a single-def value), so this is purely a source-scope fix, mirroring
+     * [hoistTryEscapingDeclarations].
+     *
+     * Rule 4: the value becomes a two-member local (the hoisted default + its in-loop assignment); the
+     * hoist point is walked OUT of every loop the read escapes and must dominate every occurrence (checked
+     * explicitly). A value already merged/hoisted (e.g. by the try-escape pass, whose hoist-out-of-try
+     * already lands before an enclosing loop) is left untouched. If no dominating out-of-loop point exists,
+     * we skip it — [RegionMaker.coalescingIsSound] is the backstop that catches any non-dominating result.
+     */
+    private fun hoistLoopEscapingDeclarations() {
+        val loops = computeLoops()
+        if (loops.isEmpty()) return
+        val byId = HashMap<Int, BasicBlock>(blocks.size)
+        for (b in blocks) byId[b.id] = b
+        for (value in method.ssaValues.toList()) {
+            cancellation.ensureActive()
+            val local = value.localVar
+            if (local != null && local.ssaValues.size > 1) continue // already merged/hoisted
+            val defParent = value.assign.parent ?: continue // params are declared in the signature
+            if (defParent.opcode == IrOpcode.MOVE_EXCEPTION) continue // the catch param
+            val defBlock = blockOfCached(defParent) ?: continue
+
+            val occ = HashSet<BasicBlock>()
+            occ.add(defBlock)
+            for (use in value.uses) use.parent?.let { blockOfCached(it) }?.let { occ.add(it) }
+
+            // The def must sit inside a loop that at least one occurrence escapes (a read after the loop).
+            val escapesSomeLoop = loops.any { (_, body) -> defBlock in body && occ.any { it !in body } }
+            if (!escapesSomeLoop) continue
+
+            val common = deepestCommonDominator(occ, byId) ?: continue
+            val hoisted = hoistOutOfEscapedLoops(common, occ, loops) ?: continue
+            // The hoist point must dominate every occurrence or the declaration would not be in scope.
+            if (occ.any { hoisted.id !in it.dominators }) continue
+
+            val target = local ?: LocalVar().also { it.addSsaValue(value) }
+            if (target.type == null) target.type = value.type
+            insertDeclInit(hoisted, target)
+        }
+    }
+
+    /** Whether the method contains a loop — a back-edge `tail → header` whose target dominates its source. */
+    private fun hasLoop(): Boolean =
+        blocks.any { tail -> tail.successors.any { header -> header.id in tail.dominators } }
+
+    /**
+     * Natural loops keyed by header: for every back-edge `tail → header` (a clean edge whose target
+     * dominates its source) the loop body is the header plus every block that reaches `tail` over clean
+     * (normal-flow) predecessors without passing through the header.
+     */
+    private fun computeLoops(): Map<BasicBlock, Set<BasicBlock>> {
+        val loops = HashMap<BasicBlock, MutableSet<BasicBlock>>()
+        for (tail in blocks) {
+            for (header in cleanSucc(tail)) {
+                if (header.id !in tail.dominators) continue // header does not dominate tail ⇒ not a back-edge
+                val body = loops.getOrPut(header) { hashSetOf(header) }
+                val stack = ArrayDeque<BasicBlock>()
+                if (tail !== header && body.add(tail)) stack.addLast(tail)
+                while (stack.isNotEmpty()) {
+                    val x = stack.removeLast()
+                    for (p in cleanPreds(x)) if (p !== header && body.add(p)) stack.addLast(p)
+                }
+            }
+        }
+        return loops
+    }
+
+    /** Walk up the dominator tree past the header of every loop the occurrences straddle, so the point is outside them. */
+    private fun hoistOutOfEscapedLoops(
+        block: BasicBlock,
+        occ: Set<BasicBlock>,
+        loops: Map<BasicBlock, Set<BasicBlock>>,
+    ): BasicBlock? {
+        var b: BasicBlock? = block
+        var guard = 0
+        while (b != null && guard++ <= blocks.size) {
+            val current = b
+            val escaped = loops.entries.firstOrNull { (_, body) -> current in body && occ.any { it !in body } }
+                ?: return current
+            b = escaped.key.immediateDominator // move above the loop header, out of the loop
+        }
+        return b
+    }
+
+    /** Clean (exception-free) predecessors — the normal-flow inverse of [cleanSucc]. */
+    private fun cleanPreds(block: BasicBlock): List<BasicBlock> {
+        if (exceptionEdges.isEmpty()) return block.predecessors
+        return block.predecessors.filter {
+            (it.id.toLong() shl 32 or (block.id.toLong() and 0xFFFFFFFFL)) !in exceptionEdges
         }
     }
 

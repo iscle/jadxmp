@@ -2,17 +2,24 @@ package com.jadxmp.pipeline.constructor
 
 import com.jadxmp.input.IndexType
 import com.jadxmp.input.Opcode
+import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.IrOpcode
+import com.jadxmp.ir.insn.PhiInstruction
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.type.IrType
+import com.jadxmp.pipeline.structure.ExpressionShaping
+import com.jadxmp.pipeline.structure.OutOfSsa
+import com.jadxmp.pipeline.structure.RegionMaker
 import com.jadxmp.pipeline.support.FakeCodeReader
 import com.jadxmp.pipeline.support.FakeMethodRef
 import com.jadxmp.pipeline.support.Insn
 import com.jadxmp.pipeline.support.TestPipeline
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -177,6 +184,97 @@ class ConstructorReconstructionTest {
         // Each arm's constructor has its OWN fresh result value (not the shared one) so its return is in scope.
         val resultValues = ctors.map { it.result!!.ssaValue }.toSet()
         assertEquals(2, resultValues.size, "each arm's construction is a distinct fresh object")
+    }
+
+    @Test
+    fun sharedNewInstancePostMergeUseMergedWithPhi() {
+        // The TestConstructorBranched shape: a single allocation constructed per-arm, whose result is used
+        // AFTER the arms rejoin.
+        //   v0 = new Foo
+        //   if (v1 == 0) goto ARM_B
+        //   ARM_A: v0.<init>(); goto JOIN
+        //   ARM_B: v0.<init>()
+        //   JOIN:  return v0            // <-- post-merge use, dominated by neither arm
+        // Each arm gets its OWN `new Foo()`; a fresh φ at JOIN merges the two per-arm results and the return
+        // reads the φ. Neither arm dominates JOIN, so without the φ the post-merge read is out of scope.
+        val reader = FakeCodeReader(
+            2, // v0 = obj, v1 = condition
+            listOf(
+                Insn(Opcode.NEW_INSTANCE, 0, intArrayOf(0), indexType = IndexType.TYPE_REF, typeValue = FOO),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(1), target = 4), // v1==0 -> ARM_B (off4); else ARM_A (off2)
+                Insn(Opcode.INVOKE_DIRECT, 2, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = ctorRef()), // ARM_A
+                Insn(Opcode.GOTO, 3, target = 5), // ARM_A -> JOIN
+                Insn(Opcode.INVOKE_DIRECT, 4, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = ctorRef()), // ARM_B, falls to JOIN
+                Insn(Opcode.RETURN, 5, intArrayOf(0)), // JOIN: post-merge use of v0
+            ),
+        )
+        val method = TestPipeline.buildMethod(
+            reader,
+            returnType = IrType.objectType("com.example.Foo"),
+            argTypes = listOf(IrType.INT),
+        )
+        run(method)
+
+        // The shared new-instance is gone; each arm has its own constructor with a distinct fresh object.
+        assertTrue(allInsns(method).none { it.opcode == IrOpcode.NEW_INSTANCE }, "shared new-instance fused away")
+        val ctors = allInsns(method).filter { it.opcode == IrOpcode.CONSTRUCTOR } as List<InvokeInstruction>
+        assertEquals(2, ctors.size, "one constructor per arm")
+        val freshResults = ctors.map { it.result!!.ssaValue!! }.toSet()
+        assertEquals(2, freshResults.size, "each arm's construction is a distinct fresh object")
+
+        // A φ at JOIN merges exactly the two per-arm fresh results, one operand per predecessor edge.
+        val phi = allInsns(method).filterIsInstance<PhiInstruction>().single()
+        assertEquals(2, phi.incoming.size, "one φ operand per predecessor edge of the join")
+        assertEquals(freshResults, phi.incoming.map { it.value.ssaValue }.toSet(), "φ merges the per-arm results")
+        // The post-merge use (the return) reads the φ result, typed to the constructed object.
+        val phiValue = phi.result!!.ssaValue!!
+        assertTrue(phiValue.type.isTypeKnown, "φ result carries the object's inferred type")
+        val ret = allInsns(method).single { it.opcode == IrOpcode.RETURN }
+        assertEquals(phiValue, (ret.getArg(0) as RegisterOperand).ssaValue, "post-merge use reads the φ")
+
+        // Downstream: out-of-SSA coalesces/removes the φ and structuring succeeds — no bail, no error marker.
+        OutOfSsa(method).run()
+        ExpressionShaping(method).run()
+        RegionMaker(method).run()
+        assertTrue(allInsns(method).none { it is PhiInstruction }, "out-of-SSA removes the inserted φ")
+        assertNotNull(method.region, "clean diamond structures without bailing")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR), "no honest-error marker on a correctly-merged diamond")
+    }
+
+    @Test
+    fun sharedNewInstancePostMergeUseNonDiamondBailsHonestly() {
+        // A non-diamond post-merge use: an OUTER guard reaches the join having constructed NOTHING.
+        //   v0 = new Foo
+        //   if (v1 == 0) goto RET        // skip both arms — v0 unconstructed on this edge
+        //   if (v2 == 0) goto ARM_B
+        //   ARM_A: v0.<init>(); goto RET
+        //   ARM_B: v0.<init>()
+        //   RET:   return v0             // post-merge use reached by an arm-less edge
+        // A φ here would read an undefined value on the skip edge. We MUST bail: leave the new-instance
+        // unfused so codegen emits its honest `// JADXMP ERROR` marker, never a malformed φ (rule 4).
+        val reader = FakeCodeReader(
+            3, // v0 = obj, v1 = outer guard, v2 = inner cond
+            listOf(
+                Insn(Opcode.NEW_INSTANCE, 0, intArrayOf(0), indexType = IndexType.TYPE_REF, typeValue = FOO),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(1), target = 6), // v1==0 -> RET (off6), skipping both arms
+                Insn(Opcode.IF_EQZ, 2, intArrayOf(2), target = 5), // v2==0 -> ARM_B (off5)
+                Insn(Opcode.INVOKE_DIRECT, 3, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = ctorRef()), // ARM_A
+                Insn(Opcode.GOTO, 4, target = 6), // ARM_A -> RET
+                Insn(Opcode.INVOKE_DIRECT, 5, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = ctorRef()), // ARM_B, falls to RET
+                Insn(Opcode.RETURN, 6, intArrayOf(0)), // RET: post-merge use of a possibly-unconstructed v0
+            ),
+        )
+        val method = TestPipeline.buildMethod(
+            reader,
+            returnType = IrType.objectType("com.example.Foo"),
+            argTypes = listOf(IrType.INT, IrType.INT),
+        )
+        run(method)
+
+        // Honest bail: nothing was rewritten — no φ, no partial fusion, the new-instance stays for the marker.
+        assertTrue(allInsns(method).any { it.opcode == IrOpcode.NEW_INSTANCE }, "bail leaves the new-instance unfused")
+        assertTrue(allInsns(method).none { it is PhiInstruction }, "no φ inserted on a non-diamond merge")
+        assertTrue(allInsns(method).none { it.opcode == IrOpcode.CONSTRUCTOR }, "no arm was partially materialized")
     }
 
     @Test

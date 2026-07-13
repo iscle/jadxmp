@@ -5,11 +5,13 @@ import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.Operand
+import com.jadxmp.ir.insn.PhiInstruction
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.insn.TypeInstruction
 import com.jadxmp.ir.node.BasicBlock
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.SsaValue
+import com.jadxmp.pipeline.PipelineAttrs
 import com.jadxmp.pipeline.pass.CancellationCheck
 
 /**
@@ -84,12 +86,27 @@ class ConstructorReconstruction(
         materializePerArm(newInsn, resultOperand, sites)
     }
 
+    /** A validated plan to merge the per-arm fresh constructor results at a join with a fresh φ. */
+    private class PhiJoinPlan(
+        /** The merge block that receives the φ (dominates every post-merge use). */
+        val join: BasicBlock,
+        /** One entry per predecessor edge of [join]: the arm whose construction reaches along that edge. */
+        val operands: List<Pair<BasicBlock, InitSite>>,
+        /** The post-merge uses to redirect onto the φ result. */
+        val uses: List<RegisterOperand>,
+    )
+
     /**
      * Give each `<init>` its own `new T(args)` in its own block, rewriting that arm's uses of the shared
-     * reference to the fresh object. Sound ONLY when the receiver is the shared value directly (no move
-     * alias) and every use of the shared reference is dominated by exactly ONE `<init>` (so it belongs to a
-     * single arm) — otherwise the reference escapes the arms (used before construction, or live across a
-     * merge that would need a φ) and we bail, leaving codegen's unfused-new-instance marker to fail honestly.
+     * reference to the fresh object. An in-arm use (dominated by exactly ONE `<init>`) is repointed to that
+     * arm's fresh object directly. A **post-merge** use — reached after the arms rejoin, dominated by no
+     * single arm — is served by a fresh φ inserted at the join that merges the per-arm fresh results
+     * ([resolvePhiJoin] validates a clean diamond first; a non-diamond bails).
+     *
+     * Sound ONLY when the receiver is the shared value directly (no move alias). If a post-merge use exists
+     * but the merge is not a clean diamond (some predecessor of the join reached no `<init>`, or two arms
+     * both dominate one edge), we bail, leaving codegen's unfused-new-instance marker to fail honestly —
+     * never a φ that reads an undefined value on some edge (rule 4).
      *
      * A construction whose result is never read renders as a bare `new T(args);` statement (mirrors the
      * single-`<init>` construct-and-discard). The construction runs ONLY on the arms that had an `<init>`:
@@ -103,18 +120,29 @@ class ConstructorReconstruction(
         val newValue = resultOperand.ssaValue ?: return
         if (sites.any { it.receiver.ssaValue !== newValue }) return // a move alias — not handled here
 
-        // Partition every non-<init> use of the shared reference to the single arm (site) that dominates it.
+        // Partition every non-<init> use of the shared reference into in-arm uses (dominated by exactly one
+        // arm) and post-merge uses (dominated by none). A use read by a pre-existing φ is out of scope for
+        // this dominance reasoning (a φ operand is live-out of its predecessor, not of the φ's block) — bail.
         val initInsns = sites.map { it.invoke }.toHashSet()
         val useOwner = HashMap<RegisterOperand, InitSite>()
+        val postMergeUses = ArrayList<RegisterOperand>()
         for (use in newValue.uses) {
             if (use.parent in initInsns) continue // the <init> receiver itself is consumed by the fusion
-            val owner = sites.singleOrNull { dominatesUse(it, use) } ?: return // escapes all arms ⇒ bail
-            useOwner[use] = owner
+            if (use.parent is PhiInstruction) return // φ-operand read: dominance below would be unsound
+            val owner = sites.singleOrNull { dominatesUse(it, use) }
+            if (owner != null) useOwner[use] = owner else postMergeUses.add(use)
         }
 
+        // Post-merge uses need a φ merging the per-arm fresh results. Validate a clean diamond BEFORE any
+        // mutation so a non-diamond bails with the method untouched (no half-transform, rule 4).
+        val plan = if (postMergeUses.isEmpty()) null else resolvePhiJoin(sites, postMergeUses) ?: return
+
+        val freshBySite = HashMap<InitSite, SsaValue>()
+        val ctorBySite = HashMap<InitSite, InvokeInstruction>()
         for (site in sites) {
             val freshOperand = RegisterOperand(newValue.regNum, resultOperand.type)
             val freshValue = SsaValue(newValue.regNum, method.ssaValues.size, freshOperand)
+            freshValue.typeCell.set(objectType(newValue, resultOperand))
             method.ssaValues.add(freshValue)
             val ctor = InvokeInstruction(
                 methodRef = site.invoke.methodRef,
@@ -128,6 +156,8 @@ class ConstructorReconstruction(
             if (idx < 0) return
             site.block.instructions[idx] = ctor
             site.receiver.ssaValue?.removeUse(site.receiver) // drop the <init>'s read of the shared ref
+            freshBySite[site] = freshValue
+            ctorBySite[site] = ctor
             for ((use, owner) in useOwner) {
                 if (owner === site) {
                     newValue.removeUse(use)
@@ -135,14 +165,105 @@ class ConstructorReconstruction(
                     freshValue.addUse(use)
                 }
             }
-            // Construct-and-discard: an arm whose fresh object is never read renders `new T(args);`.
+        }
+
+        // Insert the φ and redirect post-merge uses onto it BEFORE the construct-and-discard sweep, so an
+        // arm whose only reader is the φ keeps its result (a discarded ctor would strand the φ operand).
+        if (plan != null) insertPhiMerge(plan, newValue, resultOperand, freshBySite)
+
+        // Construct-and-discard: an arm whose fresh object is now read by nobody renders `new T(args);`.
+        for (site in sites) {
+            val freshValue = freshBySite[site] ?: continue
             if (freshValue.useCount == 0) {
-                ctor.result = null
+                ctorBySite[site]?.result = null
                 method.ssaValues.remove(freshValue)
             }
         }
         removeInstruction(newInsn)
         method.ssaValues.remove(newValue)
+    }
+
+    /**
+     * Validate that the [postMergeUses] are served by a single clean-diamond join and, if so, describe the
+     * φ to place there. Returns null (⇒ caller bails honestly) when the shape is NOT a clean diamond:
+     *  - the deepest block dominating every post-merge use can't be found, or
+     *  - some predecessor edge of that join is dominated by **≠ 1** arm's construction — i.e. a path reaches
+     *    the join having constructed nothing (undefined on that edge) or through two nested constructions
+     *    (ambiguous). Either would make a φ read an undefined/ambiguous value, a silent miscompile.
+     */
+    private fun resolvePhiJoin(sites: List<InitSite>, postMergeUses: List<RegisterOperand>): PhiJoinPlan? {
+        val useBlocks = HashSet<BasicBlock>()
+        for (use in postMergeUses) useBlocks.add(blockOf(use.parent ?: return null) ?: return null)
+        val join = deepestCommonDominator(useBlocks) ?: return null
+        if (join.predecessors.isEmpty()) return null
+
+        val operands = ArrayList<Pair<BasicBlock, InitSite>>(join.predecessors.size)
+        for (pred in join.predecessors) {
+            // Exactly one arm's construction must dominate this incoming edge; that arm's fresh result is
+            // the value flowing in. (A block dominates itself, so an arm whose <init> sits in `pred` counts.)
+            val arm = sites.singleOrNull { it.block.id in pred.dominators } ?: return null
+            operands.add(pred to arm)
+        }
+        return PhiJoinPlan(join, operands, postMergeUses)
+    }
+
+    /**
+     * Build the φ at [PhiJoinPlan.join] merging each predecessor edge's per-arm fresh result, then repoint
+     * the post-merge uses onto the φ result. The φ is registered in the block's [PipelineAttrs.PHI_LIST] so
+     * out-of-SSA processes (coalesces / removes) it exactly like a placement-pass φ; its result carries the
+     * object's inferred type (type inference has already run and won't revisit it).
+     */
+    private fun insertPhiMerge(
+        plan: PhiJoinPlan,
+        newValue: SsaValue,
+        resultOperand: RegisterOperand,
+        freshBySite: Map<InitSite, SsaValue>,
+    ) {
+        val objType = objectType(newValue, resultOperand)
+        val phiResult = RegisterOperand(newValue.regNum, objType)
+        val phi = PhiInstruction(phiResult)
+        phi.offset = plan.join.instructions.firstOrNull()?.offset ?: -1
+        val phiValue = SsaValue(newValue.regNum, method.ssaValues.size, phiResult)
+        phiValue.typeCell.set(objType)
+        method.ssaValues.add(phiValue)
+
+        for ((pred, arm) in plan.operands) {
+            val fresh = freshBySite[arm] ?: return // arm produced no fresh value — abort insertion defensively
+            val op = phi.addIncoming(newValue.regNum, objType, pred)
+            fresh.addUse(op)
+        }
+        plan.join.instructions.add(0, phi)
+        phiListOf(plan.join).add(phi)
+
+        for (use in plan.uses) {
+            newValue.removeUse(use)
+            use.ssaValue = phiValue
+            phiValue.addUse(use)
+        }
+    }
+
+    /** The φ list for [block], created (and attached) on first use — mirrors [SsaBuilder]'s placement. */
+    private fun phiListOf(block: BasicBlock): MutableList<Instruction> {
+        block[PipelineAttrs.PHI_LIST]?.let { return it }
+        val list = ArrayList<Instruction>(2)
+        block[PipelineAttrs.PHI_LIST] = list
+        return list
+    }
+
+    /** The object's inferred type, falling back to the new-instance operand's declared type. */
+    private fun objectType(newValue: SsaValue, resultOperand: RegisterOperand) =
+        if (newValue.type.isTypeKnown) newValue.type else resultOperand.type
+
+    /** The deepest block (by reverse-postorder position) that dominates every block in [blocks]. */
+    private fun deepestCommonDominator(blocks: Set<BasicBlock>): BasicBlock? {
+        val iter = blocks.iterator()
+        if (!iter.hasNext()) return null
+        val common = HashSet(iter.next().dominators)
+        while (iter.hasNext()) common.retainAll(iter.next().dominators)
+        if (common.isEmpty()) return null
+        val byId = HashMap<Int, BasicBlock>(method.blocks.size)
+        for (b in method.blocks) byId[b.id] = b
+        return common.mapNotNull { byId[it] }.maxByOrNull { it.order }
     }
 
     /** Whether the `<init>` at [site] dominates the instruction reading [use] (so [use] is in that arm). */
