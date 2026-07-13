@@ -70,7 +70,9 @@ internal class ExpressionShaping(
         // A coalesced (merged) variable is a real local, not an inlinable temporary.
         val local = value.localVar
         if (local != null && local.ssaValues.size > 1) return false
-        if (!isPure(def)) return false
+        val pure = isPure(def)
+        val effectful = isEffectSensitiveInlinable(def)
+        if (!pure && !effectful) return false
 
         // Coalesced-variable read hazard: a def that reads a multiply-assigned variable cannot be safely
         // sunk to a later point (the variable may be reassigned in between). Since out-of-SSA ran, such
@@ -84,6 +86,13 @@ internal class ExpressionShaping(
         if (useIndex <= defIndex) return false
         // Do not inline into a φ (should already be gone) or into another already-wrapped position.
         if (useInsn.opcode == IrOpcode.PHI) return false
+
+        // Order-preservation (rule 4): a memory READ, a CALL, or a CHECK_CAST observes/mutates memory or
+        // throws, so sinking it to its use may only cross INERT instructions — non-throwing, memory-
+        // independent, side-effect-free register computations. Then the reorder cannot change what the def
+        // reads, cannot reorder a side effect, and cannot reorder an exception. Bottom-up folding makes
+        // most cross-sets empty (adjacent reads/calls collapse first). Pure defs keep their prior envelope.
+        if (effectful && !crossSetIsInert(block, defIndex, useIndex)) return false
 
         // Fold: replace the reading operand with the def's instruction as a nested expression, and drop
         // the now-inlined statement. The wrapped instruction keeps its result (codegen renders the
@@ -121,5 +130,55 @@ internal class ExpressionShaping(
         IrOpcode.CMP, IrOpcode.ARRAY_LENGTH, IrOpcode.ONE_ARG,
         -> true
         else -> false
+    }
+
+    /**
+     * Effect-sensitive shapes that jadx inlines into their single use so conditions/expressions read
+     * `this.a == null`, `(T) x`, `a.equals(b)` instead of dangling `t = …` statements. Unlike [isPure]
+     * these observe/mutate memory or throw, so they are inlined ONLY when [crossSetIsInert] proves the
+     * sink is order-preserving. `CONSTRUCTOR` is deliberately excluded (object creation has its own
+     * reconstruction and per-arm materialization).
+     */
+    private fun isEffectSensitiveInlinable(insn: Instruction): Boolean = when (insn.opcode) {
+        IrOpcode.INSTANCE_GET, IrOpcode.STATIC_GET, IrOpcode.ARRAY_GET,
+        IrOpcode.CHECK_CAST, IrOpcode.INVOKE,
+        -> true
+        else -> false
+    }
+
+    /** Whether every instruction strictly between [defIndex] and [useIndex] in [block] is [isInert]. */
+    private fun crossSetIsInert(block: BasicBlock, defIndex: Int, useIndex: Int): Boolean {
+        val insns = block.instructions
+        for (i in defIndex + 1 until useIndex) {
+            if (!isInert(insns[i])) return false
+        }
+        return true
+    }
+
+    /**
+     * An **inert** instruction: a non-throwing, memory-independent, side-effect-free register computation
+     * (const, move, non-div arithmetic, comparison, primitive cast, …). Crossing only inert instructions
+     * cannot change what a sunk def reads, cannot reorder a side effect, and cannot reorder an exception.
+     * Recurses through wrapped sub-expressions — an ARITH that WRAPS a field-read/call is NOT inert.
+     * Deliberately excludes memory reads (field/array get), calls, `check-cast`/`instance-of`/`const-class`
+     * (throwing), `array-length` (NPE), div/rem (arithmetic exception), writes, monitors, and control flow.
+     */
+    private fun isInert(insn: Instruction): Boolean {
+        val opcodeInert = when (insn.opcode) {
+            IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.MOVE, IrOpcode.MOVE_RESULT,
+            IrOpcode.ONE_ARG, IrOpcode.NEG, IrOpcode.NOT, IrOpcode.CMP, IrOpcode.CAST,
+            -> true
+            IrOpcode.ARITH -> {
+                val op = (insn as? com.jadxmp.ir.insn.ArithInstruction)?.op
+                op != com.jadxmp.ir.insn.ArithOp.DIV && op != com.jadxmp.ir.insn.ArithOp.REM
+            }
+            else -> false
+        }
+        if (!opcodeInert) return false
+        for (k in 0 until insn.argCount) {
+            val arg = insn.getArg(k)
+            if (arg is InstructionOperand && !isInert(arg.instruction)) return false
+        }
+        return true
     }
 }
