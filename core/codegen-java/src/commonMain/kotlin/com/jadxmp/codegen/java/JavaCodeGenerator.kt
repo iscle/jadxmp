@@ -109,7 +109,11 @@ class JavaCodeGenerator {
             code.add(" {").newLine()
             code.incIndent()
 
-            if (enumInfo != null) emitEnumMembers(cls, enumInfo) else emitClassMembers(cls)
+            if (enumInfo != null) {
+                emitEnumMembers(cls, enumInfo, buildEnumContext(cls, enumInfo))
+            } else {
+                emitClassMembers(cls)
+            }
 
             code.decIndent()
             code.attachNodeEnd()
@@ -139,7 +143,31 @@ class JavaCodeGenerator {
 
         // ---------- enum members ----------
 
-        private fun emitEnumMembers(cls: IrClass, e: EnumReconstruction) {
+        /**
+         * Per-enum reference-rewrite context: the [MethodBodyWriter.EnumRefRewrites] applied inside every
+         * user-method body of an obfuscated enum, plus the identity-keyed rename map used to spell the
+         * DEFINITION name of a renamed method. Null for a plainly-shaped enum with nothing to rewrite.
+         */
+        private class EnumContext(
+            val refRewrites: MethodBodyWriter.EnumRefRewrites,
+            val renamedByMethod: Map<IrMethod, String>,
+        )
+
+        private fun buildEnumContext(cls: IrClass, e: EnumReconstruction): EnumContext {
+            val bySignature = e.renamedMethods.entries.associate { (m, newName) ->
+                MethodBodyWriter.EnumRefRewrites.signatureKey(m.name, m.argTypes) to newName
+            }
+            val rewrites = MethodBodyWriter.EnumRefRewrites(
+                enumClassName = cls.fullName,
+                valuesFieldName = e.valuesField.name,
+                cloneMethodName = e.syntheticValuesMethod?.name,
+                valueOfMethodName = e.syntheticValueOfMethod?.name,
+                methodRenames = bySignature,
+            )
+            return EnumContext(rewrites, e.renamedMethods)
+        }
+
+        private fun emitEnumMembers(cls: IrClass, e: EnumReconstruction, ctx: EnumContext) {
             val hasMore = enumHasMembersAfterConstants(cls, e)
             emitEnumConstants(cls, e, hasMore)
             var wrote = e.constants.isNotEmpty() || (e.constants.isEmpty() && hasMore)
@@ -156,19 +184,19 @@ class JavaCodeGenerator {
                 if (method.name == "<clinit>") {
                     if (e.dropClinit) continue
                     if (wrote) code.newLine()
-                    emitEnumClinit(cls, method, e)
+                    emitEnumClinit(cls, method, e, ctx)
                     wrote = true
                     continue
                 }
                 if (method.name == "<init>") {
                     if (EnumReconstruction.isDefaultEnumConstructor(method)) continue
                     if (wrote) code.newLine()
-                    emitEnumConstructor(cls, method)
+                    emitEnumConstructor(cls, method, ctx)
                     wrote = true
                     continue
                 }
                 if (wrote) code.newLine()
-                emitMethod(cls, method)
+                emitMethod(cls, method, ctx)
                 wrote = true
             }
             for (inner in cls.innerClasses) {
@@ -230,14 +258,14 @@ class JavaCodeGenerator {
             }
         }
 
-        private fun emitEnumClinit(cls: IrClass, method: IrMethod, e: EnumReconstruction) {
+        private fun emitEnumClinit(cls: IrClass, method: IrMethod, e: EnumReconstruction, ctx: EnumContext) {
             emitErrorComment(method)
             code.add("static ")
             code.add("{").newLine()
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(),
-                e.suppressedClinitInsns, e.constantResultFields,
+                e.suppressedClinitInsns, e.constantResultFields, ctx.refRewrites,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -249,7 +277,7 @@ class JavaCodeGenerator {
          * `super(name, ordinal)` call suppressed (jadx: markArgsForSkip + super removal). Visibility
          * modifiers are dropped — an `enum` constructor is implicitly private.
          */
-        private fun emitEnumConstructor(cls: IrClass, method: IrMethod) {
+        private fun emitEnumConstructor(cls: IrClass, method: IrMethod, ctx: EnumContext) {
             emitErrorComment(method)
             code.attachDefinition(MethodNodeRef(cls.fullName, method.name, method.argTypes.map { it.toString() }))
             code.add(JavaSourceName.sourceSimpleName(cls))
@@ -271,7 +299,10 @@ class JavaCodeGenerator {
             val suppressed = if (superCall != null) setOf(superCall) else emptySet()
             code.add("{").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, methodNames, paramNames, suppressed).writeBody()
+            MethodBodyWriter(
+                code, imports, method, methodNames, paramNames, suppressed,
+                enumRewrites = ctx.refRewrites,
+            ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()
@@ -313,7 +344,7 @@ class JavaCodeGenerator {
             is IrFieldConst.Str -> JavaLiterals.stringLiteral(const.value)
         }
 
-        private fun emitMethod(cls: IrClass, method: IrMethod) {
+        private fun emitMethod(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) {
             emitErrorComment(method)
             // Static initializer: `static { ... }`, no signature.
             if (method.name == "<clinit>") {
@@ -330,7 +361,14 @@ class JavaCodeGenerator {
             code.attachDefinition(MethodNodeRef(cls.fullName, method.name, method.argTypes.map { it.toString() }))
             // Constructor name must equal the emitted class name (same JavaSourceName source of truth);
             // other method names use the scope-unique alias so two methods colliding on name+params differ.
-            code.add(if (isConstructor) JavaSourceName.sourceSimpleName(cls) else JavaMemberAliases.aliasOf(method))
+            // An obfuscated-enum user method renamed to dodge a `values()`/`valueOf` collision is spelled
+            // with its new name at the definition site (call sites go through MethodBodyWriter).
+            val definitionName = when {
+                isConstructor -> JavaSourceName.sourceSimpleName(cls)
+                ctx?.renamedByMethod?.get(method) != null -> ctx.renamedByMethod.getValue(method)
+                else -> JavaMemberAliases.aliasOf(method)
+            }
+            code.add(definitionName)
 
             val methodNames = NameGenerator()
             val paramNames = resolveParamNames(method, methodNames)
@@ -352,7 +390,7 @@ class JavaCodeGenerator {
                 return
             }
             code.add(" ")
-            emitBody(method, methodNames, paramNames)
+            emitBody(method, methodNames, paramNames, ctx)
         }
 
         private fun emitThrows(method: IrMethod) {
@@ -379,10 +417,18 @@ class JavaCodeGenerator {
             emitBody(method, NameGenerator(), emptyList())
         }
 
-        private fun emitBody(method: IrMethod, methodNames: NameGenerator, paramNames: List<String>) {
+        private fun emitBody(
+            method: IrMethod,
+            methodNames: NameGenerator,
+            paramNames: List<String>,
+            ctx: EnumContext? = null,
+        ) {
             code.add("{").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, methodNames, paramNames).writeBody()
+            MethodBodyWriter(
+                code, imports, method, methodNames, paramNames,
+                enumRewrites = ctx?.refRewrites,
+            ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()

@@ -49,6 +49,29 @@ internal class EnumReconstruction private constructor(
      * the substitution is always faithful. Passed through to the residual-block [MethodBodyWriter].
      */
     val constantResultFields: Map<SsaValue, FieldRef>,
+    /**
+     * The synthetic backing array field (`$VALUES`, possibly obfuscated to e.g. `$VLS`). Hidden from the
+     * declaration, but any USER-method reference to it must be rewritten to a `values()` call, since the
+     * field itself is gone (jadx: EnumVisitor replaces `$VALUES` reads with `values()`).
+     */
+    val valuesField: IrField,
+    /**
+     * The synthetic `values()` clone method (`return ($VALUES).clone()`), possibly obfuscated (e.g.
+     * `vs()`). Hidden (Java regenerates `values()`); user references to it are rewritten to `values()`.
+     */
+    val syntheticValuesMethod: IrMethod?,
+    /**
+     * The synthetic `valueOf(String)` method (`return (T) Enum.valueOf(T.class, s)`), possibly obfuscated
+     * (e.g. `vo()`). Hidden (Java regenerates `valueOf`); user references are rewritten to `valueOf(...)`.
+     */
+    val syntheticValueOfMethod: IrMethod?,
+    /**
+     * User-declared methods whose signature collides with the compiler-regenerated `values()`/
+     * `valueOf(String)` (a Java `enum` may not re-declare them), mapped to the fresh name they are
+     * renamed to (jadx: RenameVisitor — the "custom values method kept and renamed" case). These methods
+     * are KEPT (never dropped — that would be silent code loss); only their name changes.
+     */
+    val renamedMethods: Map<IrMethod, String>,
 ) {
     /**
      * One reconstructed constant: its backing [field], the real (stripped) constructor [args], and the
@@ -137,7 +160,8 @@ internal class EnumReconstruction private constructor(
             if (allEnumCtors != orderedConstants.size) return null
 
             val hiddenFields = setOf(valuesField)
-            val hiddenMethods = cls.methods.filter { isSyntheticEnumMethod(it, clsType) }.toSet()
+            val (hiddenMethods, renamedMethods, syntheticValues, syntheticValueOf) =
+                classifyEnumMethods(cls, clsType, valuesField)
 
             val suppressed = if (clinit != null) {
                 computeSuppressed(statements, constructorInsns, locatedConstantStores(statements, cls), valuesField, cls)
@@ -168,8 +192,143 @@ internal class EnumReconstruction private constructor(
                 suppressedClinitInsns = suppressed,
                 fixedClassFlags = fixedFlags,
                 constantResultFields = constantResultFields,
+                valuesField = valuesField,
+                syntheticValuesMethod = syntheticValues,
+                syntheticValueOfMethod = syntheticValueOf,
+                renamedMethods = renamedMethods,
             )
         }
+
+        /** Result of [classifyEnumMethods]: which methods to hide, which to rename, and the two synthetics. */
+        private data class MethodClassification(
+            val hidden: Set<IrMethod>,
+            val renamed: Map<IrMethod, String>,
+            val syntheticValues: IrMethod?,
+            val syntheticValueOf: IrMethod?,
+        )
+
+        /**
+         * The rename map alone, derivable from a class's STRUCTURE (no `<clinit>` analysis) — used by the
+         * codegen backend to spell a CROSS-CLASS call to a renamed reserved-signature method with the same
+         * name the (owning class's) definition uses. The caller additionally confirms full reconstruction
+         * succeeds (`analyze(cls) != null`) before honoring it, so the two sides always agree.
+         */
+        fun plannedMemberRenames(cls: IrClass): Map<IrMethod, String> {
+            if (!JavaModifiers.has(cls.accessFlags, JavaModifiers.ENUM)) return emptyMap()
+            if ((cls.superType as? IrType.Object)?.className != ENUM_CLASS) return emptyMap()
+            val clsType = IrType.objectType(cls.fullName)
+            val valuesField = findValuesField(cls, clsType) ?: return emptyMap()
+            return classifyEnumMethods(cls, clsType, valuesField).renamed
+        }
+
+        /**
+         * Partition the class's methods into the compiler-synthesized enum helpers to HIDE (`values()`
+         * clone, `valueOf(String)`, Kotlin `$values()` builder) and any USER method that collides with a
+         * regenerated helper's signature and must be RENAMED rather than dropped.
+         *
+         * ## Detecting the synthetics without dropping a user method (CLAUDE rule 4)
+         * - **`values()` clone** — matched STRUCTURALLY (`$VALUES.clone()`), since the reserved *name*
+         *   `values` may belong to a genuine user method while the clone is obfuscated (`vs()`). The dual
+         *   read-`$VALUES`+`clone()` shape is tight. AMBIGUITY GUARD: a synthetic is hidden only when
+         *   EXACTLY ONE method matches; two matches ⇒ hide neither (leaking the real clone is uglier but
+         *   correct — hiding the wrong one is silent code loss).
+         * - **`valueOf(String)`** — matched by CANONICAL NAME first: `java.lang.Enum.valueOf` is a *public*
+         *   API a user may legally wrap, so a body-shape match is NOT proof of syntheticity. A Java `enum`
+         *   cannot re-declare `valueOf(String)`, so the method literally named `valueOf` (if any) is always
+         *   THE synthetic. Only when NO method is named `valueOf` (genuine obfuscation, e.g. `vo()`) do we
+         *   fall to the structural shape — again under the single-match ambiguity guard.
+         *
+         * A reserved-*signature* method that is NOT the chosen synthetic is a user method colliding with
+         * the regenerated helper and is RENAMED (kept), never hidden. When no clone exists at all (standard
+         * javac / body-less test fixtures) a canonical `values()` IS the synthetic and is hidden.
+         */
+        private fun classifyEnumMethods(cls: IrClass, clsType: IrType, valuesField: IrField): MethodClassification {
+            val enumArray = IrType.array(clsType)
+
+            // `values()` clone — structural, single-match only.
+            val cloneCandidates = cls.methods.filter { isValuesCloneShape(it, cls, clsType, valuesField) }
+            val syntheticValues = cloneCandidates.singleOrNull()
+
+            // `valueOf(String)` — canonical name wins; else structural, single-match only.
+            val syntheticValueOf = cls.methods.singleOrNull { isCanonicalValueOf(it, clsType) }
+                ?: cls.methods.filter { isValueOfShape(it, clsType) }.singleOrNull()
+
+            val hidden = HashSet<IrMethod>()
+            val renamed = HashMap<IrMethod, String>()
+            val usedNames = cls.methods.mapNotNull { if (isSpecialName(it.name)) null else it.name }.toHashSet()
+            for (m in cls.methods) {
+                when {
+                    m === syntheticValues || m === syntheticValueOf -> hidden.add(m)
+                    isDollarValuesBuilder(m, enumArray) -> hidden.add(m)
+                    isCanonicalValues(m, enumArray) ->
+                        // A `values()`-signature method that is not the chosen clone. If ANY clone exists,
+                        // m is a user method colliding with the regenerated `values()` ⇒ keep + rename. If
+                        // no clone exists at all, m IS the (standard/body-less) synthetic ⇒ hide.
+                        if (cloneCandidates.isEmpty()) hidden.add(m) else renamed[m] = freshName("valuesCustom", usedNames)
+                }
+            }
+            return MethodClassification(hidden, renamed, syntheticValues, syntheticValueOf)
+        }
+
+        private fun isSpecialName(name: String): Boolean = name == "<init>" || name == "<clinit>"
+
+        /** [base] if free within [used], else `base2`, `base3`, …; records and returns the pick. */
+        private fun freshName(base: String, used: MutableSet<String>): String {
+            if (used.add(base)) return base
+            var n = 2
+            while (!used.add("$base$n")) n++
+            return "$base$n"
+        }
+
+        private fun isCanonicalValues(m: IrMethod, enumArray: IrType): Boolean =
+            m.name == "values" && m.argTypes.isEmpty() && m.returnType == enumArray
+
+        private fun isCanonicalValueOf(m: IrMethod, clsType: IrType): Boolean =
+            m.name == "valueOf" && m.argTypes.size == 1 &&
+                (m.argTypes[0] as? IrType.Object)?.className == "java.lang.String" &&
+                m.returnType == clsType
+
+        private fun isDollarValuesBuilder(m: IrMethod, enumArray: IrType): Boolean =
+            m.name == "\$values" && m.argTypes.isEmpty() && m.returnType == enumArray &&
+                JavaModifiers.has(m.accessFlags, JavaModifiers.STATIC)
+
+        /**
+         * The `values()` clone shape: a `static T[] X()` whose body reads [valuesField] and calls
+         * `clone()`. The dual read+clone requirement is what makes this provable enough to hide (rule 4).
+         */
+        private fun isValuesCloneShape(m: IrMethod, cls: IrClass, clsType: IrType, valuesField: IrField): Boolean =
+            JavaModifiers.has(m.accessFlags, JavaModifiers.STATIC) &&
+                m.argTypes.isEmpty() &&
+                m.returnType == IrType.array(clsType) &&
+                readsValuesField(m, cls, valuesField) &&
+                callsClone(m)
+
+        /** The structural `valueOf(String)` shape: a `static T X(String)` whose body calls `Enum.valueOf`. */
+        private fun isValueOfShape(m: IrMethod, clsType: IrType): Boolean =
+            JavaModifiers.has(m.accessFlags, JavaModifiers.STATIC) &&
+                m.argTypes.size == 1 &&
+                (m.argTypes[0] as? IrType.Object)?.className == "java.lang.String" &&
+                m.returnType == clsType &&
+                callsEnumValueOf(m)
+
+        private fun readsValuesField(m: IrMethod, cls: IrClass, valuesField: IrField): Boolean =
+            flatten(m).any { insn ->
+                insn.opcode == IrOpcode.STATIC_GET &&
+                    (insn as? com.jadxmp.ir.insn.FieldInstruction)?.fieldRef?.let {
+                        it.name == valuesField.name &&
+                            (it.declaringType as? IrType.Object)?.className == cls.fullName
+                    } == true
+            }
+
+        private fun callsClone(m: IrMethod): Boolean =
+            flatten(m).any { (it as? InvokeInstruction)?.methodRef?.name == "clone" }
+
+        private fun callsEnumValueOf(m: IrMethod): Boolean =
+            flatten(m).any { insn ->
+                val inv = insn as? InvokeInstruction ?: return@any false
+                inv.methodRef.name == "valueOf" &&
+                    (inv.methodRef.declaringType as? IrType.Object)?.className == ENUM_CLASS
+            }
 
         // ---- field/method classification ----
 
@@ -193,31 +352,6 @@ internal class EnumReconstruction private constructor(
                 JavaModifiers.has(field.accessFlags, JavaModifiers.STATIC) &&
                 JavaModifiers.has(field.accessFlags, JavaModifiers.FINAL) &&
                 field.type == clsType
-
-        /**
-         * The compiler-synthesized members a Java `enum` regenerates or that only serve enum
-         * construction: `values()` (clone-based), `valueOf(String)`, and the Kotlin `$values()` array
-         * builder. Matched by exact signature so a user overload (`valueOf(int)`, `values(x)`) is NOT
-         * hidden. `$values()` is only ever called from the (suppressed) `<clinit>`, so hiding it is safe
-         * whenever reconstruction succeeds — [residualIsClean] would have bailed if a kept statement
-         * still read its result.
-         */
-        private fun isSyntheticEnumMethod(m: IrMethod, clsType: IrType): Boolean {
-            val enumArray = IrType.array(clsType)
-            if (m.name == "values" && m.argTypes.isEmpty() && m.returnType == enumArray) return true
-            if (m.name == "\$values" && m.argTypes.isEmpty() && m.returnType == enumArray &&
-                JavaModifiers.has(m.accessFlags, JavaModifiers.STATIC)
-            ) {
-                return true
-            }
-            if (m.name == "valueOf" && m.argTypes.size == 1 &&
-                (m.argTypes[0] as? IrType.Object)?.className == "java.lang.String" &&
-                m.returnType == clsType
-            ) {
-                return true
-            }
-            return false
-        }
 
         // ---- <clinit> tracing ----
 

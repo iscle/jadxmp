@@ -71,8 +71,37 @@ internal class MethodBodyWriter(
     // holds exactly that instance, making the substitution unconditionally faithful. See
     // [EnumReconstruction]. Empty for every non-enum-`<clinit>` body.
     private val enumConstantResultFields: Map<SsaValue, FieldRef> = emptyMap(),
+    // Reference rewrites for an enum whose synthetic `$VALUES` field / `values()` clone / `valueOf`
+    // helpers were obfuscated and hidden: a USER-method reference to any of them must be redirected to
+    // the compiler-regenerated `values()`/`valueOf` (the hidden originals are gone), and a user method
+    // renamed to dodge a `values()`/`valueOf` collision must be CALLED by its new name. Null off the enum
+    // path. See [EnumReconstruction] / [JavaCodeGenerator].
+    private val enumRewrites: EnumRefRewrites? = null,
 ) {
     private val types = JavaTypeRenderer(imports)
+
+    /**
+     * The enum-reference rewrites [MethodBodyWriter] applies while emitting an obfuscated enum's user
+     * methods. All matching is by the enum's own (class, member) identity so a same-named member of
+     * another type is never touched.
+     */
+    internal class EnumRefRewrites(
+        /** The reconstructed enum's binary name — the owner every rewrite is scoped to. */
+        val enumClassName: String,
+        /** The hidden `$VALUES`-style field name: a static read of it renders as `values()`. */
+        val valuesFieldName: String,
+        /** The hidden `values()` clone method name (may be obfuscated): a call renders as `values()`. */
+        val cloneMethodName: String?,
+        /** The hidden `valueOf(String)` method name (may be obfuscated): a call renders as `valueOf(...)`. */
+        val valueOfMethodName: String?,
+        /** User methods renamed to dodge a collision, keyed `name(paramSig)` → new name (for call sites). */
+        val methodRenames: Map<String, String>,
+    ) {
+        companion object {
+            fun signatureKey(name: String, paramTypes: List<IrType>): String =
+                "$name(${paramTypes.joinToString(",") { it.toString() }})"
+        }
+    }
 
     // When set, a RegisterOperand renders as its (inlined) defining expression rather than a variable
     // name — used to render enum-constant constructor arguments outside the `<clinit>` variable scope,
@@ -888,6 +917,16 @@ internal class MethodBodyWriter(
 
     private fun emitStaticGet(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
+        // Obfuscated-enum rewrite: a read of the hidden `$VALUES` backing array has no field to name, so
+        // it renders as a call to the compiler-regenerated `values()` (jadx: EnumVisitor). The array and
+        // `values()` agree in length/contents, so `$VALUES.length` etc. stays faithful.
+        if (field != null && enumRewrites != null &&
+            (field.declaringType as? IrType.Object)?.className == enumRewrites.enumClassName &&
+            field.name == enumRewrites.valuesFieldName
+        ) {
+            code.add("values()")
+            return
+        }
         if (field != null) {
             emitTypeRef(field.declaringType)
             code.add(".")
@@ -905,6 +944,10 @@ internal class MethodBodyWriter(
         }
         val method = invoke.methodRef
         val kind = invoke.invokeKind
+
+        // Obfuscated-enum rewrite: a call to a hidden synthetic helper is redirected to the
+        // compiler-regenerated `values()`/`valueOf(...)` (the obfuscated originals were hidden).
+        if (emitRewrittenEnumInvoke(invoke, method, kind)) return
 
         // A normalized constructor renders `new T(args)`; the new-instance is the result, not an arg.
         if (invoke.opcode == IrOpcode.CONSTRUCTOR) {
@@ -946,9 +989,73 @@ internal class MethodBodyWriter(
         }
         code.add(".")
         code.attachReference(MethodNodeRef(className(method.declaringType), method.name, method.paramTypes.map { it.toString() }))
-        code.add(JavaMemberAliases.aliasForMethodRef(root, method))
+        code.add(methodCallName(method))
         // Instance forms carry the receiver as arg 0; skip it when listing the actual arguments.
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1, method.paramTypes)
+    }
+
+    /**
+     * Emit a rewritten call to an obfuscated enum's hidden synthetic helper, returning true if handled.
+     * A static call to the hidden `values()` clone becomes `values()`; a call to the hidden
+     * `valueOf(String)` becomes `valueOf(args)` — both target the compiler-regenerated helper.
+     */
+    private fun emitRewrittenEnumInvoke(invoke: InvokeInstruction, method: com.jadxmp.ir.insn.MethodRef, kind: InvokeKind): Boolean {
+        val rw = enumRewrites ?: return false
+        if (kind != InvokeKind.STATIC) return false
+        if ((method.declaringType as? IrType.Object)?.className != rw.enumClassName) return false
+        if (rw.cloneMethodName != null && method.name == rw.cloneMethodName && method.paramTypes.isEmpty()) {
+            code.add("values()")
+            return true
+        }
+        // Match the EXACT synthetic `valueOf(String) -> EnumType` signature, not the name alone: a user
+        // overload sharing the obfuscated name (e.g. `vo(int)`) must NOT be rewritten to `valueOf(...)`.
+        if (rw.valueOfMethodName != null && method.name == rw.valueOfMethodName &&
+            method.paramTypes.size == 1 &&
+            (method.paramTypes[0] as? IrType.Object)?.className == "java.lang.String" &&
+            (method.returnType as? IrType.Object)?.className == rw.enumClassName
+        ) {
+            code.add("valueOf")
+            emitArgList(invoke, 0, method.paramTypes)
+            return true
+        }
+        return false
+    }
+
+    /** The identifier a call renders: a renamed-user-method's new name, else the resolved alias. */
+    private fun methodCallName(method: com.jadxmp.ir.insn.MethodRef): String {
+        val ownerName = (method.declaringType as? IrType.Object)?.className
+        val rw = enumRewrites
+        if (rw != null && ownerName == rw.enumClassName) {
+            // Same enum: consult only its precomputed rename map (fast path).
+            rw.methodRenames[EnumRefRewrites.signatureKey(method.name, method.paramTypes)]?.let { return it }
+        } else {
+            // A call into ANOTHER class: if the target is a reconstructable enum whose reserved-signature
+            // user method was renamed, spell the new name — otherwise the call would silently resolve to
+            // the compiler-regenerated `values()`/`valueOf()` (a wrong target that still compiles).
+            crossClassEnumRename(method, ownerName)?.let { return it }
+        }
+        return JavaMemberAliases.aliasForMethodRef(root, method)
+    }
+
+    /**
+     * The rename for a cross-class call to [ref] whose owner is a reconstructable enum that renamed a
+     * `values()`/`valueOf(String)`-signature user method — or null. Cheap-gated: only reserved-signature
+     * calls are considered, and the (heavier) full reconstruction check runs only once a rename is
+     * actually planned. Pure (read-only over the shared model), so it is safe on the parallel render path
+     * and always agrees with the owning class's definition site.
+     */
+    private fun crossClassEnumRename(ref: com.jadxmp.ir.insn.MethodRef, ownerName: String?): String? {
+        ownerName ?: return null
+        val reserved = (ref.name == "values" && ref.paramTypes.isEmpty()) ||
+            (ref.name == "valueOf" && ref.paramTypes.size == 1)
+        if (!reserved) return null
+        val cls = root.findClass(ownerName) ?: return null
+        val target = cls.methods.firstOrNull { it.name == ref.name && it.argTypes == ref.paramTypes } ?: return null
+        val planned = EnumReconstruction.plannedMemberRenames(cls)[target] ?: return null
+        // Honor the rename only when the class actually reconstructs as an enum (else its definition kept
+        // the original name); this mirrors the definition-site gate so both sides always agree.
+        if (EnumReconstruction.analyze(cls) == null) return null
+        return planned
     }
 
     private fun emitArgList(insn: Instruction, firstArgIndex: Int, paramTypes: List<IrType> = emptyList()) {
