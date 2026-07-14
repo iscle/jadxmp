@@ -16,10 +16,10 @@ jobs:
     name: Build & Test (JVM)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -27,10 +27,10 @@ jobs:
       # The engine modules use the Android Multiplatform Library plugin, so the whole
       # Gradle build needs the Android SDK to even configure — required for the JVM tests too.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Compile (all common + JVM)
         run: ./gradlew compileKotlinJvm --stacktrace
@@ -43,7 +43,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports
           path: '**/build/reports/tests/**'
@@ -58,28 +58,41 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux
+            java_arch: x64
           - os: windows-latest
             name: windows
-          - os: macos-latest
-            name: macos
+            java_arch: x64
+          # Apple Silicon (arm64): macos-14 is pinned to an arm64 image so it can't
+          # silently change; produces a native aarch64 .dmg / app image.
+          - os: macos-14
+            name: macos-arm64
+            java_arch: aarch64
+          # Intel (x64): macos-13 is the last Intel-based GitHub-hosted macOS image;
+          # produces a native x64 .dmg / app image.
+          - os: macos-13
+            name: macos-x64
+            java_arch: x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
+          # Match the JDK arch to the runner so Compose Desktop packages a genuinely
+          # arch-specific binary (never an x64 JDK on an arm64 runner, or vice versa).
+          architecture: ${{ matrix.java_arch }}
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Native installer for the current OS (Compose Desktop: .deb on Linux, .msi on Windows, .dmg on macOS).
       - name: Package native distribution
@@ -90,7 +103,7 @@ jobs:
         run: ./gradlew :desktopApp:createDistributable --stacktrace
 
       - name: Upload native installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jadxmp-desktop-installer-${{ matrix.name }}
           path: |
@@ -100,7 +113,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload app image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jadxmp-desktop-app-${{ matrix.name }}
           path: desktopApp/build/compose/binaries/main/app/**
