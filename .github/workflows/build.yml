@@ -67,6 +67,11 @@ jobs:
           - os: macos-latest
             name: macos-arm64
             java_arch: aarch64
+          # Intel (x64): macos-26-intel is an Intel-based macOS runner image;
+          # produces a native x64 .dmg / app image.
+          - os: macos-26-intel
+            name: macos-x64
+            java_arch: x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
