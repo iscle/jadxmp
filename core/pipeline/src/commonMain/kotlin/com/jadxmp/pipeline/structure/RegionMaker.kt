@@ -84,11 +84,17 @@ internal class RegionMaker(
      * loop's node set. [continueTarget] is null when `continue` is not modelled (do-while, whose latch
      * holds update code a `continue` must not skip) — an edge that would need it then fails edge
      * coverage and the method bails.
+     *
+     * [isSwitch] marks the context of a [makeSwitch] body (which reuses the loop break machinery: a
+     * case's edge to [follow] is a `break`). It is the ONE place the non-local-exit guard may permit a
+     * mutually-exclusive shared tail to be DUPLICATED into a case rather than bailing — switch cases are
+     * pairwise exclusive at runtime, whereas a loop's out-of-body exit is a genuine multi-level break.
      */
     private class LoopCtx(
         val continueTarget: BasicBlock?,
         val follow: BasicBlock?,
         val bodyNodes: Set<BasicBlock>,
+        val isSwitch: Boolean = false,
     )
 
     private val entry = method.entryBlock
@@ -608,8 +614,20 @@ internal class RegionMaker(
                 if (block in exitStack) break
                 // A block outside the enclosing loop that is not its follow is a non-local exit
                 // (multi-level break/continue) we do not model — bail rather than mis-structure it.
+                // ONE exception, only inside a SWITCH body: a straight-line duplicable tail whose sole
+                // successor IS the switch follow is a mutually-exclusive shared tail — e.g. a switch
+                // `default:` block that is ALSO the enclosing `if`'s else-arm (conditions/TestIfAndSwitch),
+                // not dominated by the switch so it fell outside [bodyNodes]. Because switch cases are
+                // pairwise exclusive at runtime, emitting a COPY of it in this case runs it on exactly one
+                // path and then breaks to the same merge — jadx's tail duplication, identical observable
+                // behaviour to a single placement (the sibling arm/case emits its own copy). Fall through to
+                // ordinary processing, which places the leaf and lets the follow-break fire on the next step.
+                // Restricted to `sole successor === follow` so it can never swallow a real cross-jump (a
+                // break to an ENCLOSING loop, a second unrelated merge): those still bail honestly.
                 if (loopCtx != null && block !== exit && block !in loopCtx.bodyNodes) {
-                    throw Bail("non-local exit from loop at B${block.id}")
+                    val isSwitchTail = loopCtx.isSwitch && isDuplicable(block) &&
+                        cleanSucc(block).singleOrNull() === loopCtx.follow
+                    if (!isSwitchTail) throw Bail("non-local exit from loop at B${block.id}")
                 }
                 // A duplicable straight-line block reached from several arms is DUPLICATED into each
                 // (jadx's return / tail-block duplication) rather than treated as an illegal shared merge.
@@ -1304,7 +1322,7 @@ internal class RegionMaker(
             if (b === follow || b === exit) continue
             if (switchBlock.id in b.dominators && follow.id !in b.dominators) bodyNodes.add(b)
         }
-        val ctx = LoopCtx(continueTarget = loopCtx?.continueTarget, follow = follow, bodyNodes = bodyNodes)
+        val ctx = LoopCtx(continueTarget = loopCtx?.continueTarget, follow = follow, bodyNodes = bodyNodes, isSwitch = true)
 
         // Group keys sharing one target into a single case, preserving key order.
         val byTarget = LinkedHashMap<BasicBlock, MutableList<Long>>()
