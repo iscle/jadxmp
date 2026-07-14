@@ -304,7 +304,7 @@ internal class MethodBodyWriter(
                 code.add(names.unique("e"))
             }
             code.add(": ")
-            emitTypeRef(type)
+            emitClassName(type)
             code.add(") ")
             openBrace()
             emitRegion(catch.body)
@@ -422,7 +422,12 @@ internal class MethodBodyWriter(
             // spelled out since inference from the RHS alone can be unsound (e.g. a null literal).
             code.add("var ")
             code.variable(ref, declaration = true)
-            code.add(": ").add(types.render(effectiveType(result)))
+            val declType = effectiveType(result)
+            // A local whose initializer is the `null` literal must be declared nullable, or kotlinc
+            // rejects `var x: T = null` ("null cannot be a value of a non-null type"). Only the literal-
+            // null case widens to `T?`; a non-null initializer keeps the precise non-null type.
+            val nullable = isReferenceType(declType) && isNullLiteralExpr(insn)
+            code.add(": ").add(types.render(declType)).add(if (nullable) "?" else "")
             declared.add(key)
         } else {
             code.variable(ref, declaration = false)
@@ -443,7 +448,7 @@ internal class MethodBodyWriter(
     private fun emitStaticPut(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         if (field != null) {
-            emitTypeRef(field.declaringType)
+            emitClassName(field.declaringType)
             code.add(".")
         }
         emitFieldName(field)
@@ -504,7 +509,7 @@ internal class MethodBodyWriter(
             IrOpcode.CONST_CLASS -> {
                 val t = referencedType(insn) ?: insn.result?.type ?: IrType.OBJECT
                 wrapped(KotlinPrec.POSTFIX, minPrec) {
-                    emitTypeRef(t)
+                    emitClassName(t) // `List::class.java`, never `List<*>::class.java`
                     code.add("::class.java")
                 }
             }
@@ -565,7 +570,7 @@ internal class MethodBodyWriter(
                 // silent miscompile. It is not faithfully renderable in codegen alone, so BAIL honestly.
                 code.emitErrorMarker(method, "unfused new-instance / constructor not reconstructed")
             }
-            IrOpcode.NEW_ARRAY -> emitNewArray(insn)
+            IrOpcode.NEW_ARRAY -> emitNewArray(insn, minPrec)
             IrOpcode.FILLED_NEW_ARRAY -> emitFilledNewArray(insn)
             IrOpcode.ARRAY_LENGTH -> {
                 emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
@@ -659,7 +664,7 @@ internal class MethodBodyWriter(
         }
     }
 
-    private fun emitNewArray(insn: Instruction) {
+    private fun emitNewArray(insn: Instruction, minPrec: Int) {
         // referencedType is the WHOLE array type. `new int[n]` → `IntArray(n)`; a reference (or
         // multi-dimensional) array → `arrayOfNulls<Element>(n)`.
         val arrayType = referencedType(insn) ?: insn.result?.type
@@ -675,11 +680,25 @@ internal class MethodBodyWriter(
             size()
             code.add(")")
         } else {
-            code.add("arrayOfNulls<")
-            emitTypeName(element ?: IrType.OBJECT)
-            code.add(">(")
-            size()
-            code.add(")")
+            // `arrayOfNulls<T>(n)` has type `Array<T?>`, but the value flows into non-null `Array<T>`
+            // positions (the declared local/param/field type is non-null, matching `new T[n]`'s Java
+            // type). Reconcile with a cast to the whole array type so the initializer type matches the
+            // declaration — otherwise kotlinc reports `expected 'Array<T>', actual 'Array<T?>'`. The
+            // (unchecked) cast is warning-only and semantically faithful: the runtime array is the same.
+            wrapped(KotlinPrec.AS, minPrec) {
+                code.add("arrayOfNulls<")
+                emitTypeName(element ?: IrType.OBJECT)
+                code.add(">(")
+                size()
+                code.add(") as ")
+                if (arrayType is IrType.ArrayType) {
+                    emitTypeName(arrayType)
+                } else {
+                    code.add("Array<")
+                    emitTypeName(element ?: IrType.OBJECT)
+                    code.add(">")
+                }
+            }
         }
     }
 
@@ -731,7 +750,7 @@ internal class MethodBodyWriter(
     private fun emitStaticGet(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         if (field != null) {
-            emitTypeRef(field.declaringType)
+            emitClassName(field.declaringType)
             code.add(".")
         }
         emitFieldName(field)
@@ -746,9 +765,9 @@ internal class MethodBodyWriter(
         val target = invoke.methodRef
         val kind = invoke.invokeKind
 
-        // A normalized constructor renders `T(args)` (Kotlin has no `new`).
+        // A normalized constructor renders `T(args)` (Kotlin has no `new`). The callee is a bare name.
         if (invoke.opcode == IrOpcode.CONSTRUCTOR) {
-            emitTypeRef(target.declaringType)
+            emitClassName(target.declaringType)
             emitArgList(invoke, 0)
             return
         }
@@ -764,14 +783,14 @@ internal class MethodBodyWriter(
                 // (a later pass reconstructs primary/secondary-constructor delegation).
                 code.add(if (targetName == enclosingName) "this" else "super")
             } else {
-                emitTypeRef(target.declaringType)
+                emitClassName(target.declaringType)
             }
             emitArgList(invoke, firstArg)
             return
         }
 
         when {
-            kind == InvokeKind.STATIC -> emitTypeRef(target.declaringType)
+            kind == InvokeKind.STATIC -> emitClassName(target.declaringType)
             kind == InvokeKind.SUPER -> code.add("super")
             else -> {
                 val receiver = invoke.instanceArg
@@ -814,6 +833,17 @@ internal class MethodBodyWriter(
     }
 
     private fun emitTypeName(type: IrType) = emitTypeRef(type)
+
+    /**
+     * A **bare class name** for a position where only a name is syntactically legal — a static receiver
+     * (`List.of`), a constructor callee (`ArrayList(..)`), `X::class`, or a catch type. Uses
+     * [KotlinTypeRenderer.classNameOf], which never emits a `<*>` raw-generic projection (that would be
+     * illegal here), so it stays byte-for-byte identical to the old behaviour for every non-raw type.
+     */
+    private fun emitClassName(type: IrType) {
+        classNameForRef(type)?.let { code.attachReference(com.jadxmp.codegen.ClassNodeRef(it)) }
+        code.add(types.classNameOf(type))
+    }
 
     // ---------- conditions ----------
 
@@ -903,6 +933,30 @@ internal class MethodBodyWriter(
         val svT = reg.ssaValue?.type
         if (svT != null && svT.isTypeKnown) return svT
         return lvT ?: svT ?: reg.type
+    }
+
+    /** A reference type (object/array/type-variable/wildcard, or an all-reference partial) — one that `?` applies to. */
+    private fun isReferenceType(type: IrType): Boolean = when (type) {
+        is IrType.Object, is IrType.ArrayType, is IrType.TypeVariable, is IrType.Wildcard -> true
+        is IrType.Unknown -> type.possible.all { it == TypeKind.OBJECT || it == TypeKind.ARRAY }
+        else -> false
+    }
+
+    /**
+     * True when [insn] renders to exactly the `null` literal — a CONST (or a MOVE/one-arg forwarding one)
+     * whose operand is the reference-typed zero constant. Reuses [KotlinLiterals.format] so the check
+     * agrees with what is actually emitted rather than re-deriving the "is this null" rule.
+     */
+    private fun isNullLiteralExpr(insn: Instruction): Boolean = when (insn.opcode) {
+        IrOpcode.CONST, IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG ->
+            insn.argCount > 0 && isNullOperand(insn.getArg(0))
+        else -> false
+    }
+
+    private fun isNullOperand(op: Operand): Boolean = when (op) {
+        is LiteralOperand -> KotlinLiterals.format(op) == "null"
+        is InstructionOperand -> isNullLiteralExpr(op.instruction)
+        is RegisterOperand -> false
     }
 
     private fun className(type: IrType): String = classNameForRef(type) ?: type.toString()

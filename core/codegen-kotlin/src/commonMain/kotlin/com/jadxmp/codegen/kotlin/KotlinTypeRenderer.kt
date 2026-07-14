@@ -53,8 +53,20 @@ internal class KotlinTypeRenderer(private val imports: ImportCollector) {
     private fun renderObject(type: IrType.Object): String {
         if (type.isRootObject) return "Any"
         val name = KotlinIdentifiers.sanitizeQualified(imports.useClass(type.className))
-        if (type.generics.isEmpty()) return name
-        return name + type.generics.joinToString(", ", "<", ">") { render(it) }
+        if (type.generics.isNotEmpty()) {
+            return name + type.generics.joinToString(", ", "<", ">") { render(it) }
+        }
+        // A raw use of a type that Kotlin maps to a generic (`java.util.List`→`List<E>`,
+        // `java.util.Map`→`Map<K, V>`, …) is rejected ("one type argument expected"). Bytecode carries
+        // no generic arguments for such a raw reference, so project every parameter to `*` — the faithful
+        // "unknown argument" rendering. This applies only in TYPE positions (via [render]); a bare-name
+        // position (a static receiver, a constructor callee, `X::class`) goes through [classNameOf], which
+        // never adds projections, because `List<*>.of(..)` / `Map<*, *>(..)` are illegal there.
+        val requiredArgs = KOTLIN_MAPPED_GENERIC_ARITY[type.className]
+        if (requiredArgs != null && requiredArgs > 0) {
+            return name + (1..requiredArgs).joinToString(", ", "<", ">") { "*" }
+        }
+        return name
     }
 
     private fun renderWildcard(type: IrType.Wildcard): String = when (type.bound) {
@@ -102,5 +114,37 @@ internal class KotlinTypeRenderer(private val imports: ImportCollector) {
             TypeKind.INT, TypeKind.LONG, TypeKind.DOUBLE, TypeKind.FLOAT,
             TypeKind.BOOLEAN, TypeKind.CHAR, TypeKind.BYTE, TypeKind.SHORT,
         )
+
+        /**
+         * JDK types that Kotlin maps onto a generic declaration, keyed to the number of type parameters
+         * the mapped Kotlin type requires. A *raw* use of any of these (no generic arguments in the
+         * bytecode) must be projected to `<*>`×arity or kotlinc rejects it. Only well-known JDK generics
+         * are listed — an unknown user type's arity is not recoverable in the backend, so it is left raw
+         * (rendering `<*>` for a non-generic type would itself be an error). **jadx: no direct analogue.**
+         */
+        val KOTLIN_MAPPED_GENERIC_ARITY: Map<String, Int> = buildMap {
+            // Single-parameter collection & utility types.
+            for (n in listOf(
+                "java.lang.Iterable", "java.lang.Comparable", "java.lang.Class", "java.lang.ThreadLocal",
+                "java.lang.ref.Reference", "java.lang.ref.WeakReference", "java.lang.ref.SoftReference",
+                "java.util.Collection", "java.util.AbstractCollection",
+                "java.util.List", "java.util.AbstractList", "java.util.ArrayList", "java.util.LinkedList",
+                "java.util.Vector", "java.util.Stack",
+                "java.util.Set", "java.util.AbstractSet", "java.util.HashSet", "java.util.LinkedHashSet",
+                "java.util.SortedSet", "java.util.NavigableSet", "java.util.TreeSet",
+                "java.util.Queue", "java.util.Deque", "java.util.ArrayDeque", "java.util.PriorityQueue",
+                "java.util.Iterator", "java.util.ListIterator", "java.util.Enumeration",
+                "java.util.Optional", "java.util.stream.Stream",
+                "java.util.concurrent.Callable", "java.util.concurrent.Future",
+                "java.util.concurrent.atomic.AtomicReference",
+            )) put(n, 1)
+            // Two-parameter map types.
+            for (n in listOf(
+                "java.util.Map", "java.util.AbstractMap", "java.util.HashMap", "java.util.LinkedHashMap",
+                "java.util.SortedMap", "java.util.NavigableMap", "java.util.TreeMap",
+                "java.util.Hashtable", "java.util.IdentityHashMap", "java.util.WeakHashMap",
+                "java.util.concurrent.ConcurrentMap", "java.util.concurrent.ConcurrentHashMap",
+            )) put(n, 2)
+        }
     }
 }
