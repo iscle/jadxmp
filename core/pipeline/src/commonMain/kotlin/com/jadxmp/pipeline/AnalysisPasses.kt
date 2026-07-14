@@ -6,6 +6,7 @@ import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.pipeline.cfg.CfgBuilder
 import com.jadxmp.pipeline.cfg.Dominators
+import com.jadxmp.pipeline.constructor.ConstructorArgTernaryFold
 import com.jadxmp.pipeline.constructor.ConstructorReconstruction
 import com.jadxmp.pipeline.decode.MethodDecoder
 import com.jadxmp.pipeline.pass.MethodPass
@@ -30,6 +31,7 @@ object PassNames {
     const val OUT_OF_SSA = "OutOfSsa"
     const val EXPRESSION_SHAPING = "ExpressionShaping"
     const val REGION_MAKER = "RegionMaker"
+    const val CONSTRUCTOR_ARG_TERNARY_FOLD = "ConstructorArgTernaryFold"
 }
 
 /**
@@ -161,6 +163,21 @@ class RegionMakerPass : MethodPass {
 }
 
 /**
+ * Fold the default-arguments synthetic-constructor shape (`if (mask&n) arg = c;` guards before a
+ * `this()`/`super()` delegation) into ternary delegation arguments. Runs after structuring so it reads
+ * the region tree; a no-op unless the exact, provably-faithful shape is present.
+ */
+class ConstructorArgTernaryFoldPass : MethodPass {
+    override val name: String get() = PassNames.CONSTRUCTOR_ARG_TERNARY_FOLD
+    override val runAfter: List<String> get() = listOf(PassNames.REGION_MAKER)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        if (method.entryBlock == null) return
+        ConstructorArgTernaryFold(method, context.cancellation).run()
+    }
+}
+
+/**
  * The standard analysis pipeline: decode → CFG → dominators → SSA → type inference → **out-of-SSA →
  * expression shaping → region structuring**. The output is a method with a nested region tree over a
  * fully de-SSA'd body (`region != null` ⇒ φ-free, renderable), or — for irreducible/unsupported
@@ -177,6 +194,7 @@ object AnalysisPipeline {
         OutOfSsaPass(),
         ExpressionShapingPass(),
         RegionMakerPass(),
+        ConstructorArgTernaryFoldPass(),
         // Absorb <clinit> static-field init into the field model (declaration initializers / static { })
         // after the body is fully structured, so it reads the same statements codegen renders.
         StaticFieldInitPass(),
