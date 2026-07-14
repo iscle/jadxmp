@@ -502,13 +502,24 @@ internal class RegionMaker(
     }
 
     /**
-     * The block a pure-test [header] branches to when it LEAVES the loop — its single successor outside the
-     * natural-loop [base]. Null unless the header is a two-way pure test with exactly one in-loop and one
+     * The block a two-way [header] branches to when it LEAVES the loop — its single successor outside the
+     * natural-loop [base]. Null unless the header is a two-way branch with exactly one in-loop and one
      * out-of-loop successor (any other shape is not a plain multi-exit `while` and bails). Never the method
      * exit (a header that branches straight to the exit is a `return`/`throw`, not a loop follow).
+     *
+     * The header need NOT be a *pure* test: a header carrying an emittable statement before its exit branch
+     * (its condition depends on per-iteration work, e.g. `v = -1; if (i < n) …`) still has its out-of-loop
+     * edge as the loop follow — the statement executes inside the loop body (the header is a body node,
+     * re-emitted at the top of the loop by [buildInfiniteLoop]), so it is not skipped. The caller
+     * ([loopBody]) still validates the collapse: after [includeTails] pulls the terminal side-exits in,
+     * EXACTLY ONE external non-exit target must remain and it must equal this follow, else it keeps the
+     * natural loop and [loopFollow] bails honestly. Widening past `headerIsPureTest` therefore only ever
+     * converts a shape that previously multi-exit-bailed into one that structures — a currently-clean method
+     * cannot reach this path with a different body (its single clean follow is handled by the ordinary
+     * post-dominator case above, before any multi-exit collapse).
      */
     private fun multiExitFollow(header: BasicBlock, base: Set<BasicBlock>): BasicBlock? {
-        if (branchKind(header) != BranchKind.TWO_WAY || !headerIsPureTest(header)) return null
+        if (branchKind(header) != BranchKind.TWO_WAY) return null
         val succ = cleanSucc(header)
         if (succ.size != 2) return null
         val external = succ.filter { it !in base }
