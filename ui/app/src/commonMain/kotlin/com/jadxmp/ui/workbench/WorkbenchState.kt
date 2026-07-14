@@ -37,6 +37,17 @@ private const val PROGRESS_PUSH_STRIDE = 12
 /** Debounce before a code scan launches, so per-keystroke typing doesn't queue whole-program scans. */
 private const val CODE_SEARCH_DEBOUNCE_MS = 250L
 
+/** Well-known Resources-tree id of the decoded manifest (mirrors ResourceSurface's MANIFEST_ID). */
+private const val MANIFEST_NODE_ID = "res:AndroidManifest.xml"
+
+/** Locates the launcher `<activity>`/`<activity-alias>` name in decoded manifest text (best-effort). */
+private val LAUNCHER_ACTIVITY_REGEX = Regex(
+    """<activity(?:-alias)?\b[^>]*?android:name\s*=\s*"([^"]+)"[\s\S]*?android\.intent\.category\.LAUNCHER""",
+)
+
+/** Extracts the `<manifest package="…">` app package for resolving a relative activity name. */
+private val MANIFEST_PACKAGE_REGEX = Regex("""<manifest\b[^>]*?package\s*=\s*"([^"]+)"""")
+
 /** The full observable UI state of the workbench. Derived render lists are computed in composables. */
 @Immutable
 data class WorkbenchUiState(
@@ -60,9 +71,15 @@ data class WorkbenchUiState(
      * unchanged). A one-shot navigation token — its value is meaningless, only its changes matter.
      */
     val codeNavNonce: Int = 0,
+    /** Preferred source view for newly opened class tabs (Settings → Decompiler default). */
+    val preferredView: CodeView = CodeView.JAVA,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
+
+    /** The Resources-tree manifest node, when the open container carries an AndroidManifest.xml. */
+    val manifestNode: TreeNode?
+        get() = roots[TreeKind.RESOURCES]?.firstOrNull { it.id.value == MANIFEST_NODE_ID }
 
     val activeDocument: CodeDocument?
         get() = tabs.active?.let { documents[DocKey(it.nodeId, it.view)] }
@@ -107,6 +124,13 @@ class WorkbenchState(
      * project, so it cannot distinguish the two; this can. All access is on [scope]'s single dispatcher.
      */
     private var codeSearchGeneration = 0
+
+    /**
+     * Node ids whose child-load launched by [ensureChildrenLoaded] is still in flight. Guards against
+     * relaunching the same eager load on every recomposition while the first load resolves. Accessed
+     * only from the UI dispatcher (the same single dispatcher [scope] runs on), so no atomics.
+     */
+    private val inFlightChildLoads = mutableSetOf<NodeId>()
 
     /** The in-flight member (Methods/Fields) scan. Symmetric to [codeSearchJob]; see [runMemberSearch]. */
     private var memberSearchJob: Job? = null
@@ -173,6 +197,69 @@ class WorkbenchState(
         _ui.update { it.copy(tree = it.tree.setFlatten(value)) }
     }
 
+    /** Set the preferred default source view for newly opened class tabs (Settings). */
+    fun setPreferredView(view: CodeView) {
+        _ui.update { it.copy(preferredView = view) }
+    }
+
+    /**
+     * jadx "Open AndroidManifest.xml" quick action: switch to the Resources tree and open the decoded
+     * manifest. A no-op when the container carries no manifest (the toolbar button is disabled then).
+     */
+    fun openManifest() {
+        val manifest = _ui.value.manifestNode ?: return
+        switchTree(TreeKind.RESOURCES)
+        openDocument(manifest.id, manifest.label, kind = manifest.kind)
+    }
+
+    /**
+     * jadx "Go to main activity" quick action (best-effort). Decodes the manifest, finds the launcher
+     * activity's class name, resolves it to a loaded class node, and opens it. If anything can't be
+     * resolved — no manifest, no launcher entry, or the class isn't in the tree — it falls back to
+     * opening the manifest, never an error (rule 4). All parsing is guarded so it can't throw.
+     */
+    fun jumpToMainActivity() {
+        val manifest = _ui.value.manifestNode ?: return
+        val epoch = openEpoch
+        scope.launch {
+            val text = runCatching { client.code(manifest.id, CodeView.JAVA).plainText() }.getOrNull()
+            if (epoch != openEpoch) return@launch
+            val activity = text?.let { resolveLauncherActivity(it) }
+            if (activity == null) {
+                openManifest()
+                return@launch
+            }
+            val classNode = findClassNode(activity)
+            if (epoch != openEpoch) return@launch
+            if (classNode != null) {
+                switchTree(TreeKind.CLASSES)
+                openDocument(classNode.id, classNode.label, kind = classNode.kind)
+            } else {
+                openManifest()
+            }
+        }
+    }
+
+    /** Parse the launcher activity's fully-qualified class name from decoded manifest [text], or null. */
+    private fun resolveLauncherActivity(text: String): String? = runCatching {
+        val name = LAUNCHER_ACTIVITY_REGEX.find(text)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+            ?: return@runCatching null
+        val pkg = MANIFEST_PACKAGE_REGEX.find(text)?.groupValues?.getOrNull(1).orEmpty()
+        when {
+            name.startsWith(".") -> pkg + name
+            !name.contains('.') && pkg.isNotEmpty() -> "$pkg.$name"
+            else -> name
+        }
+    }.getOrNull()
+
+    /** Find the loaded class node matching fully-qualified [fqcn] (exact `cls:` id or fq-name suffix). */
+    private suspend fun findClassNode(fqcn: String): TreeNode? {
+        val classes = runCatching { client.classNodes() }.getOrNull() ?: return null
+        val exactId = "cls:$fqcn"
+        return classes.firstOrNull { it.id.value == exactId }
+            ?: classes.firstOrNull { it.id.value.removePrefix("cls:") == fqcn }
+    }
+
     fun toggleExpand(node: TreeNode) {
         if (!node.hasChildren) return
         val willExpand = node.id !in _ui.value.tree.expanded
@@ -228,7 +315,9 @@ class WorkbenchState(
         pushHistory: Boolean = true,
         kind: NodeKind? = null,
     ) {
-        val view = client.availableViews(nodeId).firstOrNull() ?: CodeView.JAVA
+        val available = client.availableViews(nodeId)
+        val preferred = _ui.value.preferredView
+        val view = if (preferred in available) preferred else (available.firstOrNull() ?: CodeView.JAVA)
         _ui.update { state ->
             state.copy(
                 tabs = state.tabs.open(nodeId, label, view, kind),
@@ -518,6 +607,30 @@ class WorkbenchState(
         val base = "${summary.matches} member ${if (summary.matches == 1) "match" else "matches"}"
         val trunc = if (summary.truncated) " (capped)" else ""
         return base + trunc
+    }
+
+    /**
+     * Eagerly load a node's children into [WorkbenchUiState.childrenCache] **without** expanding it, so
+     * the flatten toggle can compact a single-child package chain (`a.b.c`) before the user ever clicks.
+     * Idempotent and safe to call on every recomposition: it no-ops when the children are already cached
+     * or a load for this id is already in flight, so it never launches duplicate loads. Epoch-guarded
+     * like [loadChildren] — results for a superseded project are dropped. All access is on [scope]'s
+     * single dispatcher (see [inFlightChildLoads]).
+     */
+    fun ensureChildrenLoaded(id: NodeId) {
+        if (id in _ui.value.childrenCache || id in inFlightChildLoads) return
+        inFlightChildLoads += id
+        val epoch = openEpoch
+        scope.launch {
+            try {
+                val kids = client.childNodes(id)
+                // Drop children resolved against a project that has since been replaced.
+                if (epoch != openEpoch) return@launch
+                _ui.update { it.copy(childrenCache = it.childrenCache + (id to kids)) }
+            } finally {
+                inFlightChildLoads -= id
+            }
+        }
     }
 
     // ── internals ──────────────────────────────────────────────────────────────

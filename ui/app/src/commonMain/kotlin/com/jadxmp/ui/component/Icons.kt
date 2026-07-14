@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.sp
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.theme.JadxTheme
 import com.jadxmp.ui.theme.MonoFontFamily
+import kotlin.math.cos
+import kotlin.math.sin
 
 // Self-contained vector glyphs drawn with Canvas — no icon-font or drawable dependency, so the module
 // stays asset-free and wasm-safe. These are the small set the chrome needs; richer icons can arrive
@@ -123,6 +125,83 @@ fun FolderGlyph(tint: Color, modifier: Modifier = Modifier) {
             close()
         }
         drawPath(path, tint, style = Stroke(width = 1.3.dp.toPx(), join = StrokeJoin.Round))
+    }
+}
+
+/** Settings gear/cog: a toothed ring around a hollow hub, stroke-drawn. */
+@Composable
+fun GearGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(15.dp)) {
+        val s = 1.4.dp.toPx()
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val ring = size.minDimension * 0.30f
+        val tooth = size.minDimension * 0.44f
+        // Eight radial teeth around the body.
+        for (i in 0 until 8) {
+            val a = (i * 45f) * (3.14159265f / 180f)
+            val dx = cos(a)
+            val dy = sin(a)
+            drawLine(
+                tint,
+                Offset(cx + dx * ring, cy + dy * ring),
+                Offset(cx + dx * tooth, cy + dy * tooth),
+                strokeWidth = s,
+                cap = StrokeCap.Round,
+            )
+        }
+        drawCircle(tint, radius = ring, center = Offset(cx, cy), style = Stroke(width = s))
+        drawCircle(tint, radius = ring * 0.42f, center = Offset(cx, cy), style = Stroke(width = s))
+    }
+}
+
+/** Document/file glyph with a folded corner and text lines — the "Open AndroidManifest.xml" affordance. */
+@Composable
+fun ManifestGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(14.dp)) {
+        val w = size.width
+        val h = size.height
+        val s = 1.3.dp.toPx()
+        val fold = w * 0.28f
+        val body = Path().apply {
+            moveTo(w * 0.22f, h * 0.14f)
+            lineTo(w * 0.66f, h * 0.14f)
+            lineTo(w * 0.80f, h * 0.14f + fold)
+            lineTo(w * 0.80f, h * 0.86f)
+            lineTo(w * 0.22f, h * 0.86f)
+            close()
+        }
+        drawPath(body, tint, style = Stroke(width = s, join = StrokeJoin.Round))
+        // Folded corner.
+        val corner = Path().apply {
+            moveTo(w * 0.66f, h * 0.14f)
+            lineTo(w * 0.66f, h * 0.14f + fold)
+            lineTo(w * 0.80f, h * 0.14f + fold)
+        }
+        drawPath(corner, tint, style = Stroke(width = s, join = StrokeJoin.Round))
+        // Two text lines.
+        for (fy in listOf(0.54f, 0.70f)) {
+            drawLine(tint, Offset(w * 0.34f, h * fy), Offset(w * 0.68f, h * fy), strokeWidth = s, cap = StrokeCap.Round)
+        }
+    }
+}
+
+/** Crosshair/target glyph — the "Jump to main activity" affordance. */
+@Composable
+fun TargetGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(15.dp)) {
+        val s = 1.4.dp.toPx()
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val r = size.minDimension * 0.34f
+        drawCircle(tint, radius = r, center = Offset(cx, cy), style = Stroke(width = s))
+        drawCircle(tint, radius = r * 0.26f, center = Offset(cx, cy), style = Stroke(width = s))
+        val outer = size.minDimension * 0.48f
+        // Four crosshair ticks reaching past the ring.
+        drawLine(tint, Offset(cx, cy - outer), Offset(cx, cy - r * 0.9f), strokeWidth = s, cap = StrokeCap.Round)
+        drawLine(tint, Offset(cx, cy + r * 0.9f), Offset(cx, cy + outer), strokeWidth = s, cap = StrokeCap.Round)
+        drawLine(tint, Offset(cx - outer, cy), Offset(cx - r * 0.9f, cy), strokeWidth = s, cap = StrokeCap.Round)
+        drawLine(tint, Offset(cx + r * 0.9f, cy), Offset(cx + outer, cy), strokeWidth = s, cap = StrokeCap.Round)
     }
 }
 

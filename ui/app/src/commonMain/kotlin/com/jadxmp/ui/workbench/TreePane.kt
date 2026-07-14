@@ -11,7 +11,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import com.jadxmp.ui.client.NodeId
+import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.TreeKind
 import com.jadxmp.ui.client.TreeNode
 import com.jadxmp.ui.component.PaneHeader
@@ -34,6 +37,7 @@ fun TreePane(
     onToggleFlatten: () -> Unit,
     onActivate: (TreeNode) -> Unit,
     onToggle: (TreeNode) -> Unit,
+    onEnsureChildrenLoaded: (NodeId) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val tree = state.tree
@@ -45,6 +49,34 @@ fun TreePane(
         flattenPackages = tree.flattenPackages,
         filter = tree.filter,
     )
+
+    // Eager package-chain compaction: with Flatten on (and no filter), a single-child package chain
+    // must collapse into one dotted row without a click. buildVisibleRows only folds through children
+    // already cached, but children load lazily on expand — so here we walk each package root's
+    // single-child chain and pull the next uncached hop into the cache, one hop per recomposition.
+    // The effect re-runs when the cache grows (a key), resuming the walk until the chain ends at a
+    // branch point or a class. Only single-child package chains are loaded — never the whole tree.
+    LaunchedEffect(tree.flattenPackages, tree.filter, roots, state.childrenCache) {
+        if (!tree.flattenPackages || tree.filter.isNotBlank()) return@LaunchedEffect
+        for (root in roots) {
+            if (root.kind != NodeKind.PACKAGE) continue
+            var node = root
+            while (node.hasChildren) {
+                val cached = state.childrenCache[node.id]
+                if (cached == null) {
+                    // Not loaded yet: pull this hop in and stop; the walk resumes next recomposition.
+                    onEnsureChildrenLoaded(node.id)
+                    break
+                }
+                val onlyChild = cached.singleOrNull()
+                if (onlyChild != null && onlyChild.kind == NodeKind.PACKAGE) {
+                    node = onlyChild // single package child — keep folding down the chain.
+                } else {
+                    break // branch point (0 or many children) or a class reached — chain ends.
+                }
+            }
+        }
+    }
 
     val kinds = listOf(TreeKind.CLASSES, TreeKind.RESOURCES)
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {

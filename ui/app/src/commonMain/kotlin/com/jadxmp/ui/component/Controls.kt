@@ -7,8 +7,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -279,6 +281,35 @@ fun VDivider(modifier: Modifier = Modifier) {
             .height(22.dp)
             .background(MaterialTheme.colorScheme.outline),
     )
+}
+
+/**
+ * A settings row: a label (with optional secondary caption) on the left and a trailing control
+ * (toggle, segmented pill, …) on the right. Keeps grouped preference rows aligned and in-style.
+ */
+@Composable
+fun LabeledRow(
+    label: String,
+    modifier: Modifier = Modifier,
+    caption: String? = null,
+    control: @Composable () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = JadxTheme.spacing.controlHeight),
+        horizontalArrangement = Arrangement.spacedBy(JadxTheme.spacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface)
+            if (caption != null) {
+                Text(caption, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            }
+        }
+        control()
+    }
 }
 
 /** A horizontal group with tight spacing, the default layout for toolbar clusters. */

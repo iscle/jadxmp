@@ -2,6 +2,9 @@ package com.jadxmp.ui.component
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -11,12 +14,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -52,7 +60,16 @@ fun HorizontalSplitPane(
         Row(Modifier.fillMaxSize()) {
             Box(Modifier.width(firstWidth).fillMaxHeight()) { first() }
             ResizeHandleV(
-                onDrag = { deltaPx -> fraction = (clamped + deltaPx / totalPx).coerceIn(0f, 1f) },
+                onDrag = { deltaPx ->
+                    // Accumulate onto the live stored fraction (not the display-coerced `clamped`), so a
+                    // continuous drag tracks the pointer instead of snapping back to the start position.
+                    val next = fraction + deltaPx / totalPx
+                    fraction = if (lowerBound <= upperBound) {
+                        next.coerceIn(lowerBound, upperBound)
+                    } else {
+                        next.coerceIn(0f, 1f)
+                    }
+                },
             )
             Box(Modifier.weight(1f).fillMaxHeight()) { second() }
         }
@@ -87,7 +104,16 @@ fun VerticalSplitPane(
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.height(firstHeight).fillMaxWidth()) { first() }
             ResizeHandleH(
-                onDrag = { deltaPx -> fraction = (clamped + deltaPx / totalPx).coerceIn(0f, 1f) },
+                onDrag = { deltaPx ->
+                    // Accumulate onto the live stored fraction (not the display-coerced `clamped`), so a
+                    // continuous drag tracks the pointer instead of snapping back to the start position.
+                    val next = fraction + deltaPx / totalPx
+                    fraction = if (lowerBound <= upperBound) {
+                        next.coerceIn(lowerBound, upperBound)
+                    } else {
+                        next.coerceIn(0f, 1f)
+                    }
+                },
             )
             Box(Modifier.weight(1f).fillMaxWidth()) { second() }
         }
@@ -96,46 +122,76 @@ fun VerticalSplitPane(
 
 @Composable
 private fun ResizeHandleV(onDrag: (Float) -> Unit) {
+    // rememberUpdatedState keeps the drag callback fresh even though pointerInput(Unit) never restarts,
+    // so each event uses the latest totalPx/bounds and reads the live fraction.
+    val currentOnDrag by rememberUpdatedState(onDrag)
+    val interactionSource = remember { MutableInteractionSource() }
+    val hovered by interactionSource.collectIsHoveredAsState()
     Box(
         Modifier
-            .width(6.dp)
+            .width(10.dp) // wide invisible hit area around the hairline; easy to grab
             .fillMaxHeight()
+            .hoverable(interactionSource)
+            // No horizontal-resize PointerIcon exists in Compose Multiplatform commonMain; Hand is the
+            // best cross-platform signal that the divider is interactive (no-op on web, compiles for all).
+            .pointerHoverIcon(PointerIcon.Hand)
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
-                    onDrag(dragAmount.x)
+                    currentOnDrag(dragAmount.x)
                 }
             },
     ) {
         Box(
             Modifier
-                .width(1.dp)
+                .width(if (hovered) 3.dp else 1.dp)
                 .fillMaxHeight()
-                .align(androidx.compose.ui.Alignment.Center)
-                .background(androidx.compose.material3.MaterialTheme.colorScheme.outline),
+                .align(Alignment.Center)
+                .background(
+                    if (hovered) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outline
+                    },
+                ),
         )
     }
 }
 
 @Composable
 private fun ResizeHandleH(onDrag: (Float) -> Unit) {
+    // rememberUpdatedState keeps the drag callback fresh even though pointerInput(Unit) never restarts,
+    // so each event uses the latest totalPx/bounds and reads the live fraction.
+    val currentOnDrag by rememberUpdatedState(onDrag)
+    val interactionSource = remember { MutableInteractionSource() }
+    val hovered by interactionSource.collectIsHoveredAsState()
     Box(
         Modifier
-            .height(6.dp)
+            .height(10.dp) // wide invisible hit area around the hairline; easy to grab
             .fillMaxWidth()
+            .hoverable(interactionSource)
+            // No vertical-resize PointerIcon exists in Compose Multiplatform commonMain; Hand is the
+            // best cross-platform signal that the divider is interactive (no-op on web, compiles for all).
+            .pointerHoverIcon(PointerIcon.Hand)
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
-                    onDrag(dragAmount.y)
+                    currentOnDrag(dragAmount.y)
                 }
             },
     ) {
         Box(
             Modifier
-                .height(1.dp)
+                .height(if (hovered) 3.dp else 1.dp)
                 .fillMaxWidth()
-                .align(androidx.compose.ui.Alignment.Center)
-                .background(androidx.compose.material3.MaterialTheme.colorScheme.outline),
+                .align(Alignment.Center)
+                .background(
+                    if (hovered) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outline
+                    },
+                ),
         )
     }
 }

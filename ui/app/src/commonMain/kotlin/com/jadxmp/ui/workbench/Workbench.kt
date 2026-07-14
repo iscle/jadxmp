@@ -38,8 +38,12 @@ import com.jadxmp.ui.client.StubDecompilerClient
 import com.jadxmp.ui.component.BrandMark
 import com.jadxmp.ui.component.EditorTabStrip
 import com.jadxmp.ui.component.EmptyState
+import com.jadxmp.ui.component.GearGlyph
 import com.jadxmp.ui.component.HorizontalSplitPane
 import com.jadxmp.ui.component.Kbd
+import com.jadxmp.ui.component.ManifestGlyph
+import com.jadxmp.ui.component.SettingsPanel
+import com.jadxmp.ui.component.TargetGlyph
 import com.jadxmp.ui.component.SearchGlyph
 import com.jadxmp.ui.component.SegmentedToggle
 import com.jadxmp.ui.component.StatusDot
@@ -82,6 +86,7 @@ fun Workbench(
     val ui by state.ui.collectAsState()
     val session by state.session.collectAsState()
     var showSearch by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -92,8 +97,13 @@ fun Workbench(
                 onBack = state::goBack,
                 onForward = state::goForward,
                 onOpen = state::requestOpen,
+                hasManifest = ui.manifestNode != null,
+                onOpenManifest = state::openManifest,
+                onJumpMainActivity = state::jumpToMainActivity,
                 searchActive = showSearch,
                 onToggleSearch = { showSearch = !showSearch },
+                settingsActive = showSettings,
+                onToggleSettings = { showSettings = !showSettings },
                 deobfuscated = session is SessionState.Ready,
                 dark = dark,
                 onToggleTheme = onToggleTheme,
@@ -118,6 +128,7 @@ fun Workbench(
                                 onToggleFlatten = { state.setFlatten(!ui.tree.flattenPackages) },
                                 onActivate = state::onNodeActivated,
                                 onToggle = state::toggleExpand,
+                                onEnsureChildrenLoaded = state::ensureChildrenLoaded,
                             )
                         },
                         second = { EditorArea(state, ui) },
@@ -148,6 +159,23 @@ fun Workbench(
                         )
                     }
                 }
+
+                if (showSettings) {
+                    Box(
+                        Modifier.fillMaxSize().padding(JadxTheme.spacing.lg),
+                        contentAlignment = Alignment.TopEnd,
+                    ) {
+                        SettingsPanel(
+                            dark = dark,
+                            onToggleTheme = onToggleTheme,
+                            flattenPackages = ui.tree.flattenPackages,
+                            onFlattenChange = state::setFlatten,
+                            defaultView = ui.preferredView,
+                            onDefaultViewChange = state::setPreferredView,
+                            onClose = { showSettings = false },
+                        )
+                    }
+                }
             }
 
             val ready = session as? SessionState.Ready
@@ -172,8 +200,13 @@ private fun WorkbenchToolbar(
     onBack: () -> Unit,
     onForward: () -> Unit,
     onOpen: () -> Unit,
+    hasManifest: Boolean,
+    onOpenManifest: () -> Unit,
+    onJumpMainActivity: () -> Unit,
     searchActive: Boolean,
     onToggleSearch: () -> Unit,
+    settingsActive: Boolean,
+    onToggleSettings: () -> Unit,
     deobfuscated: Boolean,
     dark: Boolean,
     onToggleTheme: () -> Unit,
@@ -195,6 +228,10 @@ private fun WorkbenchToolbar(
         VDivider()
         ToolbarButton(onClick = onBack, enabled = canBack, square = true) { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
         ToolbarButton(onClick = onForward, enabled = canForward, square = true) { tint -> DirectionCaret(pointsLeft = false, tint = tint) }
+        VDivider()
+        // jadx quick actions: open the manifest and jump to the launcher activity (disabled with no manifest).
+        ToolbarButton(onClick = onOpenManifest, enabled = hasManifest, square = true) { tint -> ManifestGlyph(tint = tint) }
+        ToolbarButton(onClick = onJumpMainActivity, enabled = hasManifest, square = true) { tint -> TargetGlyph(tint = tint) }
 
         // Centered command/search box.
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -237,6 +274,7 @@ private fun WorkbenchToolbar(
             }
         }
         ToolbarTextButton(if (dark) "Light" else "Dark", onClick = onToggleTheme)
+        ToolbarButton(onClick = onToggleSettings, selected = settingsActive, square = true) { tint -> GearGlyph(tint = tint) }
     }
 }
 

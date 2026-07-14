@@ -11,6 +11,7 @@ import web.events.addEventListener
 import web.events.removeEventListener
 import web.file.File
 import web.focus.FocusEvent
+import web.html.HTMLInputElement
 import web.html.HtmlTagName
 import web.html.InputType
 import web.html.file
@@ -35,6 +36,23 @@ import kotlin.coroutines.resume
  *    non-blocking. The bytes are then handed to [CoreApiDecompilerClient], which decompiles on the
  *    (single) wasm dispatcher.
  *
+ * ## Making the native picker actually open (the browser rules)
+ * Two browser constraints govern whether `<input>.click()` shows the dialog at all:
+ *  1. **The element must be in the document.** Firefox/Safari won't show the picker for a detached
+ *     `<input>`. So a single hidden [input] is created and appended to `document.body` **once**, up
+ *     front, and reused for every pick (its `value` is reset each time so re-selecting the same file
+ *     still fires `change`). It's positioned offscreen — never `display:none`, which can also
+ *     suppress the dialog — so it takes no visible space yet remains clickable.
+ *  2. **The click needs transient activation.** The picker only opens while the user-gesture
+ *     activation is still live. The workbench invokes [choose] from `scope.launch { … }`, i.e. one
+ *     coroutine-dispatch after the Compose "Open" click, so the click here is not in the gesture's
+ *     synchronous call stack — but it runs within the same event-loop turn, well inside the browser's
+ *     transient-activation window, so Chromium/Firefox still open the dialog. Keeping a pre-built,
+ *     pre-attached element (no per-click DOM creation) minimizes the work between gesture and
+ *     `click()`, giving that window the best chance. (Safari is stricter — it can require the click
+ *     to be synchronous with the gesture — which the shell can't guarantee while the opener is driven
+ *     from a launched coroutine; see the class KDoc note in [FileOpener] / docs/UI-DESIGN.md.)
+ *
  * ## Graceful failure (mirrors desktop)
  * A cancelled picker and a failed read both resolve to `null`, which the workbench treats as a clean
  * no-op open — the current project is left untouched, never an uncaught throw. The byte read is
@@ -56,6 +74,14 @@ import kotlin.coroutines.resume
  */
 class BrowserFileOpener : FileOpener {
 
+    /**
+     * The single hidden `<input type="file">`, created and attached to the document once (see the
+     * class KDoc). Reused for every [pickFile]; kept offscreen rather than `display:none` so the
+     * native picker still opens. Created eagerly at construction (during composition, when
+     * `document.body` already exists) so no DOM work sits between the user gesture and `click()`.
+     */
+    private val input: HTMLInputElement = createHiddenFileInput()
+
     override suspend fun choose(): OpenRequest? {
         val file = pickFile() ?: return null
         // Blob.arrayBuffer() → ByteArray, awaited (non-blocking). File is a Blob. Guard the read: a
@@ -66,36 +92,41 @@ class BrowserFileOpener : FileOpener {
 
     /**
      * Show the browser file picker and suspend until the user selects a file (returns it) or
-     * dismisses the dialog (returns `null`). The `<input>` is created detached; modern browsers open
-     * the picker from `click()` without it being in the DOM, so there's no visible chrome and nothing
-     * to clean up from the page. The continuation keeps the element alive until it settles.
-     *
-     * Resume is driven by three signals, whichever fires first, guarded so it resolves exactly once:
+     * dismisses the dialog (returns `null`). Reuses the pre-attached [input]; its `value` is cleared
+     * first so choosing the same file twice in a row still fires `change`. The continuation resumes
+     * exactly once, driven by whichever of these fires first:
      *  - `change` — a file was chosen (resumes with it);
      *  - `cancel` — the dialog was dismissed (resumes `null`); reliable only on Chrome 113+/
      *    Firefox 109+/Safari 16.4+;
      *  - a `window` `focus` fallback — on older browsers dismissing the picker fires neither `change`
-     *    nor `cancel`, which would park this coroutine forever and hang the "Open" gesture. So when
-     *    focus returns to the window we start a short debounce; if no `change` lands within it (a real
-     *    pick fires `change` right after focus) we treat it as a cancel and resume `null`.
+     *    nor `cancel`, which would park this coroutine forever and hang the "Open" gesture. Opening
+     *    the native dialog blurs the window; only after that `blur` (the dialog really opened) do we
+     *    treat a returning `focus` as a possible cancel, and only after a short debounce — a real
+     *    pick's `change` fires right after focus and wins the race. Gating on the prior `blur` stops
+     *    an unrelated `focus` (e.g. the Compose canvas regaining focus) from firing a false cancel.
      *
-     * [kotlinx.coroutines.CancellableContinuation.invokeOnCancellation] detaches the focus listener
-     * and timer if the workbench cancels the open while the picker is still open.
+     * [kotlinx.coroutines.CancellableContinuation.invokeOnCancellation] detaches the listeners and
+     * timer if the workbench cancels the open while the picker is still open.
      */
     private suspend fun pickFile(): File? = suspendCancellableCoroutine { continuation ->
-        val input = document.createElement(HtmlTagName.input)
-        input.type = InputType.file
-        input.accept = ACCEPT
+        // Reset so selecting the previously chosen file again still fires `change`.
+        input.value = ""
 
         var settled = false
+        var dialogOpened = false
         var focusTimeout: Timeout? = null
+        val blurType = EventType<FocusEvent>("blur")
         val focusType = EventType<FocusEvent>("focus")
-        // Held so cleanup can removeEventListener the exact same reference it registered.
+        // Held so cleanup can removeEventListener the exact same references it registered.
+        var blurListener: ((FocusEvent) -> Unit)? = null
         var focusListener: ((FocusEvent) -> Unit)? = null
 
         fun cleanup() {
+            blurListener?.let { window.removeEventListener(blurType, it) }
             focusListener?.let { window.removeEventListener(focusType, it) }
             clearTimeout(focusTimeout)
+            input.onchange = null
+            input.oncancel = null
         }
 
         fun settle(file: File?) {
@@ -105,19 +136,39 @@ class BrowserFileOpener : FileOpener {
             continuation.resume(file)
         }
 
-        val onFocus: (FocusEvent) -> Unit = {
-            // `change` fires just after focus on a real pick, so debounce to let it win the race.
-            clearTimeout(focusTimeout)
-            focusTimeout = setTimeout({ settle(null) }, FOCUS_CANCEL_DEBOUNCE_MS)
+        val onBlur: (FocusEvent) -> Unit = {
+            // The picker is open now; a later focus return may be a cancel.
+            dialogOpened = true
         }
+        val onFocus: (FocusEvent) -> Unit = {
+            // Only a focus that follows the dialog's own blur can be a cancel; ignore spurious ones.
+            // `change` fires just after focus on a real pick, so debounce to let it win the race.
+            if (dialogOpened) {
+                clearTimeout(focusTimeout)
+                focusTimeout = setTimeout({ settle(null) }, FOCUS_CANCEL_DEBOUNCE_MS)
+            }
+        }
+        blurListener = onBlur
         focusListener = onFocus
 
         input.onchange = EventHandler { settle(input.files?.item(0)) }
         input.oncancel = EventHandler { settle(null) }
+        window.addEventListener(blurType, onBlur)
         window.addEventListener(focusType, onFocus)
         continuation.invokeOnCancellation { cleanup() }
 
         input.click()
+    }
+
+    /** Build the reusable hidden file `<input>` and attach it to the document (see class KDoc). */
+    private fun createHiddenFileInput(): HTMLInputElement {
+        val el = document.createElement(HtmlTagName.input)
+        el.type = InputType.file
+        el.accept = ACCEPT
+        // Offscreen + zero-size rather than display:none, which can suppress the native picker.
+        el.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;"
+        document.body.appendChild(el)
+        return el
     }
 
     private companion object {

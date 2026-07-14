@@ -208,11 +208,10 @@ public object ResourceSurface {
         if (text == null) {
             return placeholder(node, view, title, "// Could not decode $path")
         }
-        val lines = ArrayList<CodeLine>()
-        var n = 1
-        for (raw in text.split('\n')) {
-            lines += CodeLine(n++, listOf(CodeToken(raw.trimEnd('\r'), TokenKind.PLAIN)))
-        }
+        // Syntax-highlight the decoded XML (manifest and every res/…xml flow through here). The colorizer
+        // returns 1-based lines; the decode-notes footer below continues from where it leaves off.
+        val lines = ArrayList<CodeLine>(XmlColorizer.colorize(text))
+        var n = lines.size + 1
         // A partial/best-effort decode is still returned, but its diagnostics (prefixed with the path by
         // the engine) must surface so the reader knows the file isn't wholly decoded.
         val notes = diagnostics.filter { it.startsWith("$path:") }
