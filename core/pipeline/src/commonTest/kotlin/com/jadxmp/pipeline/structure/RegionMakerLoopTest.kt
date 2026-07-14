@@ -3,13 +3,19 @@ package com.jadxmp.pipeline.structure
 import com.jadxmp.input.IndexType
 import com.jadxmp.input.Opcode
 import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.InstructionOperand
+import com.jadxmp.ir.insn.IrOpcode
+import com.jadxmp.ir.insn.Operand
+import com.jadxmp.ir.region.Condition
 import com.jadxmp.ir.region.IfRegion
 import com.jadxmp.ir.region.LoopKind
 import com.jadxmp.ir.region.LoopRegion
 import com.jadxmp.ir.region.Region
 import com.jadxmp.ir.region.SequenceRegion
+import com.jadxmp.ir.type.IrType
 import com.jadxmp.pipeline.PipelineAttrs
 import com.jadxmp.pipeline.support.FakeCodeReader
+import com.jadxmp.pipeline.support.FakeFieldRef
 import com.jadxmp.pipeline.support.FakeMethodRef
 import com.jadxmp.pipeline.support.Insn
 import com.jadxmp.pipeline.support.TestPipeline
@@ -17,6 +23,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -103,6 +110,54 @@ class RegionMakerLoopTest {
     }
 
     @Test
+    fun degenerateIfWithThrowingConditionKeepsTheReadAsEmptyIf() {
+        // `Node t = recv.next; if (t == null) goto F;` whose FALL-THROUGH also targets F (the return) — so
+        // the `if`'s two arms share one CFG successor: a DEGENERATE branch whose condition is dead. But the
+        // condition MAY THROW: ExpressionShaping inlined the field-read (an `iget` that NPEs on a null
+        // receiver) into it. Dropping the `if` (as the pure degenerate path does) would silently lose that
+        // read's exception — so the old code BAILED (region == null → the oracle sees `// JADXMP ERROR`).
+        // The faithful structuring keeps the read: an empty-body `if (recv.next == null) { }` that still
+        // EVALUATES the read exactly once, with both identical paths reaching the shared follow (matches
+        // jadx's rendering of a degenerate throwing if). See RegionMaker BranchKind.NONE.
+        val field = FakeFieldRef("Lcom/example/Node;", "next", "Lcom/example/Node;")
+        val reader = FakeCodeReader(
+            2,
+            listOf(
+                // v1 (the sole param, seeded into the HIGH register) is the receiver; v0 is the read's dest.
+                Insn(Opcode.IGET, 0, intArrayOf(0, 1), indexType = IndexType.FIELD_REF, fieldRef = field),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 2), // fall-through (offset 2) == target ⇒ degenerate
+                Insn(Opcode.RETURN_VOID, 2),
+            ),
+        )
+        val method = TestPipeline.buildMethod(
+            reader,
+            methodName = "m",
+            argTypes = listOf(IrType.objectType("com.example.Node")),
+        )
+        TestPipeline.structured(method)
+
+        // The fix: a may-throw degenerate if STRUCTURES instead of bailing.
+        assertNotNull(method.region, "a degenerate if whose condition may throw must structure, not bail")
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the may-throw degenerate if structures cleanly")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR))
+        // The dead comparison is consumed, never leaked as a bare `recv.next == null;` non-statement.
+        assertNoLeakedBranch(method)
+        // The field read is preserved EXACTLY once — never dropped (rule 4), never duplicated. It lives
+        // nested inside the `if`'s condition operand (ExpressionShaping inlined it), so count recursively.
+        val fieldReads = method.blocks.flatMap { it.instructions }.sumOf { countFieldReads(it) }
+        assertEquals(1, fieldReads, "the may-throw field read must survive exactly once")
+        // It is structured as an empty-body `if` whose condition still evaluates the read; both paths join.
+        val ifRegion = findIf(method.region)
+        assertNotNull(ifRegion, "the degenerate throwing if is structured as a real IfRegion")
+        assertTrue(isEmptyRegion(ifRegion.thenRegion), "its then-arm is empty (both arms reach the shared follow)")
+        assertNull(ifRegion.elseRegion, "a degenerate if has no distinct else arm")
+        assertTrue(
+            conditionHasFieldRead(ifRegion.condition),
+            "the condition WRAPS the inlined field read, so codegen still evaluates it (preserving the NPE)",
+        )
+    }
+
+    @Test
     fun neverExitingInnerLoopArmStructuresOrBailsButNeverLeaks() {
         // while (true) { if (v1 == 0) break; if (v2 == 0) { while (true) {} } }   — one arm of the inner
         // `if` enters a never-exiting loop. Whatever the outcome, it must be correct (the while(true) arm
@@ -148,6 +203,50 @@ class RegionMakerLoopTest {
                 !last.contains(AttrFlag.DONT_GENERATE)
             assertFalse(leaks, "block B${b.id} leaks an un-consumed branch as a bare statement")
         }
+    }
+
+    private fun findIf(region: Region?): IfRegion? {
+        val out = ArrayList<IfRegion>()
+        fun visit(c: com.jadxmp.ir.node.IrContainer?) {
+            when (c) {
+                is IfRegion -> { out.add(c); visit(c.thenRegion); c.elseRegion?.let { visit(it) } }
+                is SequenceRegion -> c.children.forEach { visit(it) }
+                is LoopRegion -> visit(c.body)
+                else -> {}
+            }
+        }
+        visit(region)
+        return out.firstOrNull()
+    }
+
+    private fun isEmptyRegion(region: Region): Boolean =
+        region is SequenceRegion && region.children.isEmpty()
+
+    /** Count INSTANCE_GET occurrences in [insn] and every nested (inlined) operand instruction. */
+    private fun countFieldReads(insn: com.jadxmp.ir.insn.Instruction): Int {
+        var n = if (insn.opcode == IrOpcode.INSTANCE_GET) 1 else 0
+        for (k in 0 until insn.argCount) {
+            val arg = insn.getArg(k)
+            if (arg is InstructionOperand) n += countFieldReads(arg.instruction)
+        }
+        return n
+    }
+
+    private fun operandHasFieldRead(op: Operand): Boolean {
+        if (op is InstructionOperand) {
+            val insn = op.instruction
+            if (insn.opcode == IrOpcode.INSTANCE_GET) return true
+            for (k in 0 until insn.argCount) if (operandHasFieldRead(insn.getArg(k))) return true
+        }
+        return false
+    }
+
+    private fun conditionHasFieldRead(cond: Condition): Boolean = when (cond) {
+        is Condition.Compare -> operandHasFieldRead(cond.left) || operandHasFieldRead(cond.right)
+        is Condition.BoolTest -> operandHasFieldRead(cond.operand)
+        is Condition.Not -> conditionHasFieldRead(cond.negated)
+        is Condition.And -> cond.terms.any { conditionHasFieldRead(it) }
+        is Condition.Or -> cond.terms.any { conditionHasFieldRead(it) }
     }
 
     private fun collectOpcodes(region: Region): List<com.jadxmp.ir.insn.IrOpcode> {

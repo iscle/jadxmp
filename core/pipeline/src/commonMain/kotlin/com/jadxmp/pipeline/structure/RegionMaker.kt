@@ -665,17 +665,23 @@ internal class RegionMaker(
                     // A block ending in a two-way `if` whose BOTH arms are the same target collapses to a
                     // single successor at the CFG level (raw successors == 1) — a DEGENERATE branch whose
                     // condition is dead. Consume the `if` (mark DONT_GENERATE) so it does not leak as a bare
-                    // comparison, provided the condition has no side effect (`!mayThrow`: a register/const
-                    // comparison — the value it tests is computed in a predecessor). A throwing/effectful
-                    // condition (an inlined call/field-read) keeps the honest leaked-branch bail — dropping
-                    // it would lose the effect. Such a block bails today either way, so this is flip-only.
+                    // comparison. When the condition is side-effect-free (`!mayThrow`: a register/const
+                    // comparison whose value is computed in a predecessor) there is nothing to preserve, so
+                    // the branch is simply dropped. When it MAY THROW (ExpressionShaping inlined a call or a
+                    // field-read into it — the wrapped-operand hazard), dropping it would silently lose that
+                    // read's potential exception (rule 4). Instead of bailing, structure it faithfully as an
+                    // empty-body `if (cond) { }`: the condition (with its inlined read) is still evaluated
+                    // exactly once, and BOTH the taken and the identical fall-through path reach the shared
+                    // follow — matching jadx's rendering of a degenerate throwing if.
                     val last = block.instructions.lastOrNull()
+                    var degenerateIf: IfRegion? = null
                     if (last is IfInstruction && block.successors.size == 1) {
-                        if (mayThrow(last)) throw Bail("degenerate if with a side-effecting condition in B${block.id}")
-                        last.add(AttrFlag.DONT_GENERATE)
+                        if (mayThrow(last)) degenerateIf = IfRegion(branchCondition(block), SequenceRegion())
+                        markConditionConsumed(block)
                     }
                     placeLeaf(block)
                     seq.add(block)
+                    degenerateIf?.let { seq.add(it) }
                     val s = cleanSucc(block).firstOrNull()
                     if (s != null) recordEdge(block, s)
                     cur = s
