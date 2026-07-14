@@ -629,6 +629,18 @@ internal class RegionMaker(
                     cur = built.follow
                 }
                 BranchKind.NONE -> {
+                    // A block ending in a two-way `if` whose BOTH arms are the same target collapses to a
+                    // single successor at the CFG level (raw successors == 1) — a DEGENERATE branch whose
+                    // condition is dead. Consume the `if` (mark DONT_GENERATE) so it does not leak as a bare
+                    // comparison, provided the condition has no side effect (`!mayThrow`: a register/const
+                    // comparison — the value it tests is computed in a predecessor). A throwing/effectful
+                    // condition (an inlined call/field-read) keeps the honest leaked-branch bail — dropping
+                    // it would lose the effect. Such a block bails today either way, so this is flip-only.
+                    val last = block.instructions.lastOrNull()
+                    if (last is IfInstruction && block.successors.size == 1) {
+                        if (mayThrow(last)) throw Bail("degenerate if with a side-effecting condition in B${block.id}")
+                        last.add(AttrFlag.DONT_GENERATE)
+                    }
                     placeLeaf(block)
                     seq.add(block)
                     val s = cleanSucc(block).firstOrNull()
@@ -856,17 +868,22 @@ internal class RegionMaker(
             }
         }
 
-        // Both arms are ordinary: reconverge at the immediate post-dominator (the merge). But when that
-        // post-dominator is the method exit — i.e. one arm TERMINATES (return/throw) and the other flows on
-        // — the arms only "reconverge" at the exit, so ipostdom would pull the entire enclosing tail into
-        // the non-terminal arm. If the enclosing chain has a real continuation ([chainFollow]), that IS the
-        // if's follow: the non-terminal arm runs to it, the terminal arm returns/throws inside its branch.
-        // Clamping here is what lets `synchronized(l){ if (c) return; … }` (an in-body return, whose
-        // MONITOR_EXIT is implicit in the SyncRegion) NOT absorb the block after the synchronized — the
-        // revisit that otherwise bails a multi-exit sync body. Only triggers when ipostdom == exit AND a
-        // real follow exists; every other if is unchanged.
+        // Both arms are ordinary: reconverge at the immediate post-dominator (the merge). When that
+        // post-dominator is a real block, it IS the merge (the clean diamond). When it collapses to the
+        // method exit — a sub-path returns/throws early, so post-dominance can't see the reconvergence — the
+        // true merge is the DOMINANCE-FRONTIER INTERSECTION of the arms ([findOutBlock]): a block that
+        // returns early still carries the real merge in its dominance frontier (jadx's IfRegionMaker.
+        // findOutBlock). Use it ONLY when provably a genuine single merge ([isGenuineMerge]) — the honesty
+        // nets don't check placement position, so that dominance proof is the rule-4 correctness guarantee.
+        // Otherwise fall back to the iter-34 in-body-return clamp: an in-body `return` inside a
+        // `synchronized`/single-non-terminal-exit body whose follow is the enclosing [chainFollow]. Phase 1's
+        // active-exit stack (below) is what lets the resulting merge partition a chain+siblings of diamonds.
         val ipd = ipostdom(folded.lastBlock)
-        val merge = if (ipd === exit && chainFollow != null && chainFollow !== exit) chainFollow else ipd
+        val merge = when {
+            ipd != null && ipd !== exit -> ipd
+            else -> findOutBlock(condBlock, thenTarget, elseTarget)
+                ?: if (chainFollow != null && chainFollow !== exit) chainFollow else ipd
+        }
         val thenIsMerge = thenTarget === merge
         val elseIsMerge = elseTarget === merge
         // The merge is this if's follow — an active exit while its arms are built, so an arm that reaches it
@@ -886,6 +903,96 @@ internal class RegionMaker(
             }
         }
         return BuiltIf(region, merge)
+    }
+
+    /**
+     * jadx's `IfRegionMaker.findOutBlock` (dominance-frontier intersection). The arms reconverge somewhere
+     * in `(DF(then) ∪ {then}) ∩ (DF(else) ∪ {else})` minus the method exit. Unlike the post-dominator this
+     * survives an early `return`/`throw` on a sub-path (the returning block still carries the true merge in
+     * its dominance frontier), which is exactly why it flips the diamond/short-circuit cluster whose
+     * post-dominator collapses to the exit.
+     *
+     * The intersection may hold MORE than one block — a diamond whose arms can both `return false` OR both
+     * continue yields two: the shared `return` tail (the false-paths merge) AND the real continue merge.
+     * We disambiguate by the correctness proof itself: keep only candidates that are a PROVABLY genuine
+     * single merge ([isGenuineMerge] — which rejects a duplicable shared `return` tail, leaving it to the
+     * duplication path) and require EXACTLY ONE to survive. Zero (both arms terminate) or two-or-more
+     * genuine (truly ambiguous) ⇒ null, and the caller keeps the honest clamp/bail rather than guess (the DF
+     * fallbacks jadx uses — getPathCross / union candidates — can pick a wrong out-block, rule 4).
+     */
+    private fun findOutBlock(condBlock: BasicBlock, thenBlock: BasicBlock, elseBlock: BasicBlock): BasicBlock? {
+        val elseSet = HashSet<BasicBlock>(elseBlock.dominanceFrontier).apply { add(elseBlock) }
+        val e = exit
+        val nonDup = ArrayList<BasicBlock>()
+        val dup = ArrayList<BasicBlock>()
+        for (b in HashSet<BasicBlock>(thenBlock.dominanceFrontier).apply { add(thenBlock) }) {
+            if (b === e || b !in elseSet) continue
+            if (!isGenuineMerge(condBlock, b)) continue
+            (if (isDuplicable(b)) dup else nonDup).add(b)
+        }
+        // A diamond whose arms can both `return false` OR both continue yields TWO genuine candidates: the
+        // shared `return` tail (duplicable) and the real continuation block (a branch, not duplicable).
+        // Prefer the unique NON-duplicable merge (the continuation). A duplicable shared tail is the follow
+        // only when it is the SOLE genuine reconvergence (the last diamond in a chain, whose merge IS the
+        // shared `return` — jadx dedups these via `isEqualReturnBlocks`), placed once instead of duplicated.
+        // Ambiguity within the chosen tier (>1) ⇒ null (bail) — never guess between two real merges.
+        return nonDup.singleOrNull() ?: dup.singleOrNull()?.takeIf { nonDup.isEmpty() }
+    }
+
+    /**
+     * Whether [outBlock] (a [findOutBlock] candidate) is a PROVABLY genuine single merge of the branch at
+     * [condBlock] — the rule-4 proof that placing it ONCE as the follow drops no code (the honesty nets
+     * only check a block is placed *somewhere*, not that post-branch code is on every path):
+     *  1. [condBlock] dominates [outBlock] — it sits under this branch.
+     *  2. every clean predecessor of [outBlock] is dominated by [condBlock] — NO path enters it from
+     *     outside the branch's region (an external predecessor would mean placing it as the follow drops
+     *     that path's structure).
+     *  3. every non-terminating path out of [condBlock] reaches [outBlock] ([provenPostDominatesModuloTerminals]):
+     *     terminal sub-paths `return`/`throw` inside their branch; no path escapes to a second merge.
+     * Any failure ⇒ not a follow (the caller keeps the honest bail).
+     */
+    private fun isGenuineMerge(condBlock: BasicBlock, outBlock: BasicBlock): Boolean {
+        if (outBlock === exit || outBlock in loopHeaders) return false
+        // A DUPLICABLE shared tail (a straight-line `return z` / forwarding block) reached from several arms
+        // is left to jadx-style duplication at the revisit guard — never placed once as a follow here. This
+        // also disambiguates the common two-candidate diamond (a shared `return` tail + the real branch
+        // merge): only the non-duplicable branch survives, so [findOutBlock] resolves to it.
+        if (isDuplicable(outBlock)) return false
+        if (condBlock.id !in outBlock.dominators) return false
+        val preds = cleanPreds(outBlock)
+        if (preds.size < 2) return false // a genuine merge has ≥2 incoming clean paths
+        if (preds.any { condBlock.id !in it.dominators }) return false // an external predecessor
+        return provenPostDominatesModuloTerminals(condBlock, outBlock)
+    }
+
+    /** A block that transfers straight to the method exit: its code cannot fall past the branch. */
+    private fun isTerminal(block: BasicBlock): Boolean {
+        val last = block.instructions.lastOrNull()?.opcode
+        return last == IrOpcode.RETURN || last == IrOpcode.THROW
+    }
+
+    /**
+     * Clause 3 of [isGenuineMerge]: every block strictly between [condBlock] and [merge] (dominated by
+     * [condBlock] but not by [merge]) that is not a `return`/`throw` sends ALL its clean successors into
+     * that between-region or straight to [merge] — so every non-terminating path out of [condBlock] reaches
+     * [merge] and none escapes to a different target (which would be a second, dropped exit). A non-terminal
+     * successor to the raw exit, a back edge to [condBlock], or any successor outside the region falsifies it.
+     */
+    private fun provenPostDominatesModuloTerminals(condBlock: BasicBlock, merge: BasicBlock): Boolean {
+        val e = exit
+        val between = method.blocks.filter {
+            it !== condBlock && it !== merge && it !== e &&
+                condBlock.id in it.dominators && merge.id !in it.dominators
+        }
+        for (x in listOf(condBlock) + between) {
+            if (x !== condBlock && isTerminal(x)) continue // a terminal sub-path returns inside its branch
+            for (s in cleanSucc(x)) {
+                if (s === merge) continue
+                if (s in between) continue
+                return false // escapes to the exit, back to the branch, or to a second merge ⇒ not provable
+            }
+        }
+        return true
     }
 
     private fun armKind(target: BasicBlock, loopCtx: LoopCtx?): ArmKind = when {
