@@ -580,7 +580,7 @@ internal class RegionMaker(
             }
             when (branchKind(block)) {
                 BranchKind.TWO_WAY -> {
-                    val built = makeIf(block, loopCtx)
+                    val built = makeIf(block, loopCtx, chainFollow)
                     seq.add(block) // the condition block's straight-line prefix (its `if` is DONT_GENERATE)
                     seq.add(built.region)
                     cur = built.follow
@@ -796,7 +796,7 @@ internal class RegionMaker(
 
     private enum class ArmKind { NORMAL, BREAK, CONTINUE }
 
-    private fun makeIf(condBlock: BasicBlock, loopCtx: LoopCtx?): BuiltIf {
+    private fun makeIf(condBlock: BasicBlock, loopCtx: LoopCtx?, chainFollow: BasicBlock?): BuiltIf {
         placeLeaf(condBlock)
         val folded = foldCondition(condBlock)
         val thenTarget = folded.trueTarget
@@ -819,8 +819,17 @@ internal class RegionMaker(
             }
         }
 
-        // Both arms are ordinary: reconverge at the immediate post-dominator (the merge).
-        val merge = ipostdom(folded.lastBlock)
+        // Both arms are ordinary: reconverge at the immediate post-dominator (the merge). But when that
+        // post-dominator is the method exit — i.e. one arm TERMINATES (return/throw) and the other flows on
+        // — the arms only "reconverge" at the exit, so ipostdom would pull the entire enclosing tail into
+        // the non-terminal arm. If the enclosing chain has a real continuation ([chainFollow]), that IS the
+        // if's follow: the non-terminal arm runs to it, the terminal arm returns/throws inside its branch.
+        // Clamping here is what lets `synchronized(l){ if (c) return; … }` (an in-body return, whose
+        // MONITOR_EXIT is implicit in the SyncRegion) NOT absorb the block after the synchronized — the
+        // revisit that otherwise bails a multi-exit sync body. Only triggers when ipostdom == exit AND a
+        // real follow exists; every other if is unchanged.
+        val ipd = ipostdom(folded.lastBlock)
+        val merge = if (ipd === exit && chainFollow != null && chainFollow !== exit) chainFollow else ipd
         val thenIsMerge = thenTarget === merge
         val elseIsMerge = elseTarget === merge
         val region: Region = when {

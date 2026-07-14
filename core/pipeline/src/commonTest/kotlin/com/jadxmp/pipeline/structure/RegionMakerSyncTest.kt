@@ -239,6 +239,101 @@ class RegionMakerSyncTest {
     }
 
     @Test
+    fun multiExitSyncWithInBodyReturnStructuresWithSingleFollow() {
+        // `synchronized (lock) { if (p) return; work(); }` — the sync body has TWO exits: an in-body
+        // `return` (one arm) and the normal fall-through to a block AFTER the lock (the single follow).
+        // Each exit path carries its OWN monitor-exit in the bytecode (the release before the in-body
+        // return, and the normal release), and Java's synchronized{} auto-unlocks on every exit, so those
+        // monitor-exits are implicit and never rendered. The in-body return must render INSIDE the lock,
+        // the follow block OUTSIDE it, and the synthetic release catch-all is consumed — one monitor-enter,
+        // one SyncRegion, unlock-once-per-path. (This is the TestSynchronized5 shape.)
+        val reader = FakeCodeReader(
+            3, // v0 = lock, v1 = exc, v2 = boolean param (the condition)
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = getLock),
+                Insn(Opcode.MOVE_RESULT, 1, intArrayOf(0)), // v0 = getLock()
+                Insn(Opcode.MONITOR_ENTER, 2, intArrayOf(0)),
+                Insn(Opcode.IF_EQZ, 3, intArrayOf(2), target = 6), // try_start = 3; if (p == 0) goto normal
+                Insn(Opcode.MONITOR_EXIT, 4, intArrayOf(0)), // p != 0: release then in-body return
+                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.INVOKE_STATIC, 6, intArrayOf(), methodRef = work), // p == 0: normal work
+                Insn(Opcode.MONITOR_EXIT, 7, intArrayOf(0)), // normal release
+                Insn(Opcode.GOTO, 8, target = 12), // jump over the handler to the follow
+                Insn(Opcode.MOVE_EXCEPTION, 9, intArrayOf(1)), // handler = 9
+                Insn(Opcode.MONITOR_EXIT, 10, intArrayOf(0)), // try_end after this
+                Insn(Opcode.THROW, 11, intArrayOf(1)),
+                Insn(Opcode.RETURN_VOID, 12), // FOLLOW — the single normal exit, OUTSIDE the lock
+            ),
+            tries = listOf(FakeTryBlock(3, 10, FakeCatchHandler(emptyList(), emptyList(), 9))),
+        )
+        val method = TestPipeline.buildMethod(reader, methodName = "sync", argTypes = listOf(IrType.BOOLEAN), isStatic = true)
+        TestPipeline.structured(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "a multi-exit sync with an in-body return must structure")
+        val sync = firstSync(method)
+        assertNotNull(sync, "a SyncRegion is produced")
+
+        // The in-body return renders INSIDE the synchronized body.
+        val bodyBlocks = HashSet<BasicBlock>().also { blocksInTree(sync.body, it) }
+        val inBodyReturn = method.blocks.first { b -> b.instructions.any { it.opcode == IrOpcode.RETURN && it.offset == 5 } }
+        assertTrue(inBodyReturn in bodyBlocks, "the in-body return renders inside the lock")
+
+        // The follow (offset 12) renders OUTSIDE the synchronized body (the makeIf chain-follow clamp keeps
+        // the sync-body if from absorbing the post-lock block).
+        val follow = method.blocks.first { b -> b.instructions.any { it.offset == 12 } }
+        assertTrue(follow !in bodyBlocks, "the post-lock follow renders outside the lock")
+        val allTree = HashSet<BasicBlock>().also { blocksInTree(method.region, it) }
+        assertTrue(follow in allTree, "the follow is still emitted (not dropped)")
+
+        // Monitor-balance / no-leak: exactly one monitor-enter, consumed into the single SyncRegion; the
+        // cleanup handler's re-throw is not emitted (release is implicit via synchronized{}).
+        assertTrue(
+            allTree.none { b -> b.instructions.any { it.opcode == IrOpcode.THROW } },
+            "the cleanup handler's re-throw is not emitted (unlock is implicit on every exit)",
+        )
+        assertTrue(
+            allTree.none { b -> b.contains(PipelineAttrs.EXC_HANDLER) },
+            "the synthetic release handler is consumed, not in the tree",
+        )
+    }
+
+    @Test
+    fun multiExitSyncWithSharedInBodyReturnMergeBailsHonestly() {
+        // The TestSynchronized4 shape: TWO paths converge on a SHARED in-body `monitor-exit; return` block
+        // (`goto_1d`), reached both by fall-through and via a `goto` from another arm. That shared block is
+        // PROTECTED (inside the critical section) and contains a monitor-exit (which may throw), so it
+        // cannot be duplicated into each arm — and structuring it as a single-follow would misplace the
+        // second exit. There is no single-follow proof here, so structuring must BAIL honestly (region
+        // stays null) rather than emit a synchronized whose auto-unlock doesn't match the bytecode's paths
+        // (rule 4). This locks in the shared-merge honest bail.
+        val reader = FakeCodeReader(
+            3, // v0 = lock, v1 = exc, v2 = boolean param
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = getLock),
+                Insn(Opcode.MOVE_RESULT, 1, intArrayOf(0)), // v0 = getLock()
+                Insn(Opcode.MONITOR_ENTER, 2, intArrayOf(0)),
+                Insn(Opcode.IF_EQZ, 3, intArrayOf(2), target = 6), // try_start = 3; if (p == 0) goto 6
+                Insn(Opcode.MONITOR_EXIT, 4, intArrayOf(0)), // p != 0: release then return
+                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.IF_NEZ, 6, intArrayOf(2), target = 12), // p == 0; if (p != 0) goto cond_22
+                Insn(Opcode.MONITOR_EXIT, 7, intArrayOf(0)), // SHARED block: reached from 6-fallthrough AND 12
+                Insn(Opcode.RETURN_VOID, 8),
+                Insn(Opcode.MOVE_EXCEPTION, 9, intArrayOf(1)), // handler = 9
+                Insn(Opcode.MONITOR_EXIT, 10, intArrayOf(0)), // try_end after this
+                Insn(Opcode.THROW, 11, intArrayOf(1)),
+                Insn(Opcode.GOTO, 12, target = 7), // cond_22 → the SHARED in-body return block
+            ),
+            tries = listOf(FakeTryBlock(3, 10, FakeCatchHandler(emptyList(), emptyList(), 9))),
+        )
+        val method = TestPipeline.buildMethod(reader, methodName = "sync", argTypes = listOf(IrType.BOOLEAN), isStatic = true)
+        TestPipeline.structured(method)
+        assertNull(
+            method.region,
+            "a shared in-body return merge inside the lock has no single-follow proof — it must bail, not miscompile",
+        )
+    }
+
+    @Test
     fun multiBlockCatchAllRethrowRendersAsExplicitCatch() {
         // A multi-block catch-all whose ENTRY does not end in THROW but a later block re-throws, with real
         // cleanup in between (`move-exception; cleanup(); goto; throw`). It renders faithfully as
