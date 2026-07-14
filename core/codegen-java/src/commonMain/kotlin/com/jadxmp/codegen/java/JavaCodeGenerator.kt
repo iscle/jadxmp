@@ -13,12 +13,14 @@ import com.jadxmp.ir.attr.AttrKey
 import com.jadxmp.ir.attr.AttrNode
 import com.jadxmp.ir.attr.DecompileError
 import com.jadxmp.ir.attr.IrAttrs
+import com.jadxmp.ir.insn.FieldInstruction
 import com.jadxmp.ir.insn.LiteralOperand
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrFieldConst
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.type.IrType
+import com.jadxmp.ir.type.TypeKind
 
 /**
  * Set on a node whose error is ALREADY shown inline at its source site (an enum constant's arg marker),
@@ -335,9 +337,17 @@ class JavaCodeGenerator {
             // The metadata ref above keeps the binary name (jump-to-def identity); the emitted text uses
             // the scope-unique alias so a name duplicated with another field is disambiguated.
             code.add(JavaMemberAliases.aliasOf(field))
-            // A `static final` field's compile-time constant is emitted as a declaration initializer
-            // (so `static final int X;` doesn't fail as "might not have been initialized").
-            field.constValue?.let { code.add(" = ").add(renderFieldConst(it)) }
+            val const = field.constValue
+            when {
+                // A `static final` field's compile-time constant is emitted as a declaration initializer
+                // (so `static final int X;` doesn't fail as "might not have been initialized").
+                const != null -> code.add(" = ").add(renderFieldConst(const))
+                // A `final` field with NO constant that is never assigned anywhere (no `<clinit>`/ctor put
+                // is reconstructed for it) would otherwise emit as a blank final — which javac rejects
+                // ("variable might not have been initialized"). An unassigned field holds exactly its
+                // type's default value, so emitting that default explicitly is faithful AND compiles.
+                needsBlankFinalDefault(cls, field) -> code.add(" = ").add(defaultValueLiteral(field.type))
+            }
             code.add(";").newLine()
         }
 
@@ -345,6 +355,41 @@ class JavaCodeGenerator {
             is IrFieldConst.Primitive -> JavaLiterals.format(LiteralOperand(const.bits, const.type))
             is IrFieldConst.Str -> JavaLiterals.stringLiteral(const.value)
         }
+
+        /**
+         * True when [field] is a `final` field the codegen would otherwise leave as a blank final
+         * (`final T x;`): it carries no declaration constant (checked by the caller) AND no put to it
+         * exists in the class, so no `x = …;` is reconstructed in any `<clinit>`/constructor. javac
+         * rejects a blank final, so the caller supplies the type's default. A non-final field is fine
+         * left uninitialized (`int i;`), and a final that IS assigned elsewhere must NOT be given a
+         * redundant default (that would be a double-init of a final) — both return false here.
+         */
+        private fun needsBlankFinalDefault(cls: IrClass, field: IrField): Boolean {
+            if (field.accessFlags and JavaModifiers.FINAL == 0) return false
+            return !isAssignedInClass(cls, field)
+        }
+
+        /** True when any method in [cls] stores into [field] (a put the codegen renders as `x = …;`). */
+        private fun isAssignedInClass(cls: IrClass, field: IrField): Boolean =
+            cls.methods.any { method ->
+                method.blocks.any { block ->
+                    block.instructions.any { insn ->
+                        insn is FieldInstruction && insn.isPut &&
+                            insn.fieldRef.name == field.name &&
+                            (insn.fieldRef.declaringType as? IrType.Object)?.className == cls.fullName
+                    }
+                }
+            }
+
+        /**
+         * The Java literal for [type]'s default value — exactly the value an unassigned field of that
+         * type already holds. Reuses [JavaLiterals] so it matches how jadxmp renders any other constant
+         * of the type, except `char`: the JVM default `` is a non-printable control character, so
+         * (like jadx) we emit the numeric `0`, which also compiles as a `char`.
+         */
+        private fun defaultValueLiteral(type: IrType): String =
+            if ((type as? IrType.Primitive)?.kind == TypeKind.CHAR) "0"
+            else JavaLiterals.format(LiteralOperand(0L, type))
 
         private fun emitMethod(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) {
             emitErrorComment(method)

@@ -32,7 +32,8 @@ class JavaClassTest {
             .containsOne("public final class Outer {")
             // Nested one indent level in, emitted by its SIMPLE name with member modifiers intact.
             .containsLine(1, "private static final class Inner {")
-            .containsLine(2, "public static final int VALUE;")
+            // A blank `static final` gets its type's default initializer so the class recompiles.
+            .containsLine(2, "public static final int VALUE = 0;")
             // The binary `Outer$Inner` name never appears in the emitted source text.
             .doesNotContain("Outer\$Inner")
             .doesNotContain("class Inner extends")
@@ -99,7 +100,8 @@ class JavaClassTest {
         cls.fields.add(IrField(cls, "NAME", IrType.STRING, Flags.PUBLIC or Flags.STATIC or Flags.FINAL))
         assertThatCode(generate(cls))
             .containsOne("private int count;")
-            .containsOne("public static final String NAME;")
+            // A blank `static final` gets its type's default initializer (here `null`) so it recompiles.
+            .containsOne("public static final String NAME = null;")
     }
 
     @Test
