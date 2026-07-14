@@ -131,12 +131,16 @@ class KotlinReviewFixesTest {
 
     @Test
     fun constructorDelegationIsMarked() {
-        val cls = irClass("a.Foo")
+        // A `super(args)` to a REAL base can't be hoisted to the Kotlin secondary-constructor header without
+        // colliding with the class-header supertype parens (`: Base()`), so it BAILS — it must still fail
+        // honestly with the marker (rule 4), never a silently-invalid body-position `super(...)` call.
         val self = IrType.objectType("a.Foo")
+        val base = IrType.objectType("a.Base")
+        val cls = irClass("a.Foo", superType = base)
         val thisLocal = com.jadxmp.codegen.kotlin.Local(0, self, isThis = true)
         cls.method("<init>", argTypes = emptyList()) {
             val delegation = InvokeInstruction(
-                MethodRef(self, MethodRef.CONSTRUCTOR_NAME, IrType.VOID, listOf(IrType.INT)),
+                MethodRef(base, MethodRef.CONSTRUCTOR_NAME, IrType.VOID, listOf(IrType.INT)),
                 InvokeKind.DIRECT,
                 result = null,
                 args = listOf(thisLocal.ref(), intLit(1)),
@@ -146,6 +150,6 @@ class KotlinReviewFixesTest {
         }
         assertThatCode(generate(cls))
             .containsOne("// JADXMP ERROR: constructor delegation not reconstructed (Kotlin header-only)")
-            .containsOne("this(1)")
+            .containsOne("super(1)")
     }
 }

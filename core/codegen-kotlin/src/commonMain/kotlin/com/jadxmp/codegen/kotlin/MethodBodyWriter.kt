@@ -73,8 +73,98 @@ internal class MethodBodyWriter(
     // loop (top of stack) is the one an unlabeled `continue` targets — see [emitForLoop] / M1.
     private val loopUpdateStack = ArrayDeque<Instruction?>()
 
+    // A constructor delegation instruction already consumed into the Kotlin secondary-constructor header
+    // (`: this(args)` / omitted implicit super) by [emitConstructorDelegationHeader]. It must NOT be
+    // re-emitted as a body statement. Identity-compared; null when nothing was hoisted.
+    private var headerDelegation: Instruction? = null
+
     init {
         for (p in paramNames) names.reserve(p)
+    }
+
+    // ---------- constructor delegation header ----------
+
+    /**
+     * Render a Kotlin secondary-constructor delegation into the header (`… : this(args)`) when this method
+     * is a `<init>` whose body begins with a clean, faithfully-hoistable delegation, marking that
+     * instruction to be skipped by [writeBody]. Called by the class emitter AFTER the parameter list and
+     * BEFORE the opening brace, using the same writer instance so header/body variable naming stays in sync.
+     *
+     * ### Rule 4 — a constructor is high-risk, so we only touch a provably-safe shape and BAIL otherwise
+     * (leaving the body's honest `// JADXMP ERROR` marker, never an invalid header or a dropped call):
+     *  - **Only when the class extends `Object`/`Any`.** A real superclass is rendered on the class header
+     *    WITH constructor parens (`: Base()`), which implies a primary constructor; a competing
+     *    secondary-header `: super(...)` would conflict. Those (and enums, whose super is `java.lang.Enum`)
+     *    are left to the marker.
+     *  - **Only a genuine FIRST emittable statement.** If any statement precedes the delegation (Kotlin
+     *    forbids code before a delegation) or it is nested/conditional, we bail.
+     *  - A no-arg `super()` (the implicit `Any` super) is OMITTED — Kotlin supplies it. A `this(args)`
+     *    delegation moves to `: this(args)`; its args are the constructor's params/constants (no local can
+     *    precede a first-statement delegation), so they render identically to the body.
+     */
+    fun emitConstructorDelegationHeader() {
+        if (method.name != "<init>") return
+        // Gate on an Object/Any superclass (see kdoc): a real base or enum super stays with the marker.
+        val superType = method.declaringClass.superType
+        if (superType != null && superType != IrType.OBJECT) return
+
+        val first = firstEmittableTopLevel() ?: return
+        if (!isConstructorDelegation(first)) return
+        val invoke = first as InvokeInstruction
+        val firstArg = if (invoke.hasInstance) 1 else 0
+        val delegationArgs = invoke.argCount - firstArg
+
+        val targetName = (invoke.methodRef.declaringType as? IrType.Object)?.className
+        val isThisCall = targetName == method.declaringClass.fullName
+
+        when {
+            // `this(args)` → header `: this(args)`.
+            isThisCall -> {
+                code.add(" : this")
+                emitArgList(invoke, firstArg)
+                headerDelegation = first
+            }
+            // A no-arg super to Object/Any is implicit in Kotlin → omit the delegation entirely.
+            delegationArgs == 0 -> headerDelegation = first
+            // A super WITH args cannot reach here for an Object super (Object's ctor is no-arg); if it
+            // somehow does, don't guess — leave the honest body marker.
+            else -> return
+        }
+    }
+
+    /**
+     * The first instruction [writeBody] would emit as a top-level statement, or null when it is nested in a
+     * region (conditional/loop) or there is none. Only a straight top-level sequence of blocks is
+     * considered — a nested region as the first child means the leading statement is conditional, so we
+     * return null (⇒ no clean leading delegation).
+     */
+    private fun firstEmittableTopLevel(): Instruction? {
+        val region = method.region
+        val containers: List<IrContainer> = when {
+            region is SequenceRegion -> region.children
+            region == null -> method.blocks
+            else -> return null // an If/Loop/etc. directly at the top: the first statement is conditional
+        }
+        for (c in containers) {
+            when (c) {
+                is BasicBlock -> for (insn in c.instructions) {
+                    if (!isSkippedStatement(insn)) return insn
+                }
+                else -> return null // a nested region before any statement ⇒ leading stmt is conditional
+            }
+        }
+        return null
+    }
+
+    /** Whether [emitStatement] would emit nothing for [insn] (so it does not count as a leading statement). */
+    private fun isSkippedStatement(insn: Instruction): Boolean {
+        if (insn.contains(AttrFlag.DONT_GENERATE)) return true
+        return when (insn.opcode) {
+            IrOpcode.NOP, IrOpcode.PHI, IrOpcode.MOVE_EXCEPTION,
+            IrOpcode.MONITOR_ENTER, IrOpcode.MONITOR_EXIT, IrOpcode.GOTO,
+            -> true
+            else -> false
+        }
     }
 
     // ---------- body entry ----------
@@ -326,6 +416,7 @@ internal class MethodBodyWriter(
     // ---------- statements ----------
 
     private fun emitStatement(insn: Instruction) {
+        if (insn === headerDelegation) return // already rendered in the constructor header
         if (insn.contains(AttrFlag.DONT_GENERATE)) return
         when (insn.opcode) {
             IrOpcode.NOP, IrOpcode.PHI, IrOpcode.MOVE_EXCEPTION,

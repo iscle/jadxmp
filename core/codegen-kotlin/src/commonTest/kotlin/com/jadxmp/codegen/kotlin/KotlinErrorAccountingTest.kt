@@ -51,13 +51,16 @@ class KotlinErrorAccountingTest {
 
     @Test
     fun constructorDelegationNotReconstructedFlagsMethod() {
-        // A body-position `this(...)`/`super(...)` delegation hits the S2 honesty marker branch.
-        val cls = irClass("a.Foo")
+        // A body-position delegation that CANNOT be hoisted to the Kotlin header (here a `super(args)` to a
+        // real base — hoisting it would collide with the class-header `: Base()` parens) hits the S2 honesty
+        // marker branch; the marker must flag HAS_ERROR on the owning method so error accounting sees it.
         val self = IrType.objectType("a.Foo")
+        val base = IrType.objectType("a.Base")
+        val cls = irClass("a.Foo", superType = base)
         val thisLocal = Local(0, self, isThis = true)
         val ctor = cls.method("<init>", argTypes = emptyList()) {
             val delegation = InvokeInstruction(
-                MethodRef(self, MethodRef.CONSTRUCTOR_NAME, IrType.VOID, listOf(IrType.INT)),
+                MethodRef(base, MethodRef.CONSTRUCTOR_NAME, IrType.VOID, listOf(IrType.INT)),
                 InvokeKind.DIRECT,
                 result = null,
                 args = listOf(thisLocal.ref(), intLit(1)),

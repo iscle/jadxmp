@@ -558,8 +558,16 @@ class KotlinCodeGenerator {
                 code.newLine()
                 return
             }
+            // A constructor's `this(...)`/`super(...)` delegation is header-only in Kotlin. The body writer,
+            // reused for the body, first renders the header delegation (` : this(args)`) — or omits an
+            // implicit no-arg super — and marks that instruction to be skipped in the body. It BAILS to the
+            // honest body marker when the delegation can't be faithfully hoisted (rule 4), leaving the body
+            // path unchanged. The SAME writer must render header then body so variable naming/ids stay in
+            // sync between the two.
+            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames)
+            if (isConstructor) writer.emitConstructorDelegationHeader()
             code.add(" ")
-            emitBody(method, methodNames, paramNames)
+            emitBody(writer)
         }
 
         private fun methodRef(cls: IrClass, method: IrMethod) =
@@ -633,10 +641,10 @@ class KotlinCodeGenerator {
             }
         }
 
-        private fun emitBody(method: IrMethod, methodNames: NameGenerator, paramNames: List<String>) {
+        private fun emitBody(writer: MethodBodyWriter) {
             code.add("{").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, methodNames, paramNames).writeBody()
+            writer.writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()
