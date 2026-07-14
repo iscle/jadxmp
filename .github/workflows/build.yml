@@ -62,9 +62,9 @@ jobs:
           - os: windows-latest
             name: windows
             java_arch: x64
-          # Apple Silicon (arm64): macos-14 is pinned to an arm64 image so it can't
-          # silently change; produces a native aarch64 .dmg / app image.
-          - os: macos-14
+          # Apple Silicon (arm64): macos-latest currently points to an arm64 image;
+          # produces a native aarch64 .dmg / app image.
+          - os: macos-latest
             name: macos-arm64
             java_arch: aarch64
           # Intel (x64): macos-13 is the last Intel-based GitHub-hosted macOS image;
@@ -102,6 +102,11 @@ jobs:
       - name: Create distributable app image
         run: ./gradlew :desktopApp:createDistributable --stacktrace
 
+      # Runnable `java -jar` uber jar. Compose bundles only the current runner's OS/arch skiko
+      # native, so each matrix runner produces a jar valid for its own platform (hence per-OS name).
+      - name: Build runnable uber jar
+        run: ./gradlew :desktopApp:packageUberJarForCurrentOS --stacktrace
+
       - name: Upload native installer
         uses: actions/upload-artifact@v7
         with:
@@ -117,4 +122,12 @@ jobs:
         with:
           name: jadxmp-desktop-app-${{ matrix.name }}
           path: desktopApp/build/compose/binaries/main/app/**
+          if-no-files-found: warn
+
+      # Runnable `java -jar` JVM artifact (uber jar). Per-OS because the bundled skiko native is OS/arch-specific.
+      - name: Upload runnable jvm jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: jadxmp-jvm-${{ matrix.name }}
+          path: desktopApp/build/compose/jars/*.jar
           if-no-files-found: warn
