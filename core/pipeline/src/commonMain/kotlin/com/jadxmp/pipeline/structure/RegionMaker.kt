@@ -159,6 +159,18 @@ internal class RegionMaker(
      */
     private val consumedMonitorEnters = HashSet<Instruction>()
 
+    /**
+     * The blocks of a partial-join subtree currently authorized for **duplication** (see
+     * [tryDuplicatePartialJoin]). While a block is in this set, the revisit guard and [placeLeaf] permit it
+     * to be re-placed/re-structured (emitted a second time in a mutually-exclusive arm). Populated strictly
+     * LIFO around one duplication (add the proven-safe subtree, build the copy, remove it), so it is empty
+     * on every method that structures without ever revisit-bailing — the change is inert on such methods.
+     */
+    private val duplicatingSubtree = HashSet<BasicBlock>()
+
+    /** Total re-emissions performed by partial-join duplication; capped to bound output size (rule 4). */
+    private var duplicatedEmissions = 0
+
     fun run() {
         val start = entry ?: return
         if (hasResidualPhi()) return
@@ -601,9 +613,19 @@ internal class RegionMaker(
                 }
                 // A duplicable straight-line block reached from several arms is DUPLICATED into each
                 // (jadx's return / tail-block duplication) rather than treated as an illegal shared merge.
-                // Any other revisit is a real unstructured shape and bails.
-                if (block in placed && !isDuplicable(block)) {
-                    throw Bail("unexpected revisit of placed B${block.id}")
+                // A revisited block that is NOT a single-block duplicable tail may still be a bounded, acyclic,
+                // single-entry PARTIAL-JOIN subtree (a shared branch reached from both arms, bypassed by a
+                // non-terminal third path) — jadx duplicates that subtree into the revisiting arm. It is
+                // semantically faithful because the arms are mutually exclusive (each copy runs on exactly one
+                // path), and [analyzeDuplicableSubtree] proves per-copy renderability. Any other revisit — or a
+                // subtree outside the safe envelope — is a real unstructured shape and bails. When the block is
+                // already inside an authorized subtree ([duplicatingSubtree]) the guard is skipped so the
+                // ordinary machinery re-emits it.
+                if (block in placed && !isDuplicable(block) && block !in duplicatingSubtree) {
+                    val dup = tryDuplicatePartialJoin(block, chainFollow, loopCtx)
+                        ?: throw Bail("unexpected revisit of placed B${block.id}")
+                    seq.add(dup)
+                    break
                 }
             }
 
@@ -715,8 +737,14 @@ internal class RegionMaker(
 
     private fun placeLeaf(block: BasicBlock) {
         // A duplicable block may legitimately appear in more than one arm (jadx: return / tail-block
-        // duplication). Any other second placement is a real unstructured shape.
-        if (!placed.add(block) && !isDuplicable(block)) throw Bail("block B${block.id} placed twice")
+        // duplication), as may a block inside an authorized partial-join subtree. Any other second placement
+        // is a real unstructured shape.
+        if (placed.add(block)) return
+        if (block in duplicatingSubtree) {
+            if (++duplicatedEmissions > MAX_DUP_EMISSIONS) throw Bail("partial-join duplication exceeded emission cap")
+            return
+        }
+        if (!isDuplicable(block)) throw Bail("block B${block.id} placed twice")
     }
 
     /**
@@ -846,6 +874,122 @@ internal class RegionMaker(
                 is InstructionOperand -> if (readsSsaValue(arg.instruction, value)) return true
                 else -> {}
             }
+        }
+        return false
+    }
+
+    // ---- partial-join condition duplication ---------------------------------
+
+    /**
+     * Duplicate the partial-join subtree rooted at [m] into the revisiting arm and return its region, or
+     * null to bail. Fires ONLY from the revisit guard (a block reached a second time that is not a single-
+     * block duplicable tail) — a shape that bails today — so it can never alter a method that already
+     * structures cleanly ([duplicatingSubtree] is otherwise empty).
+     *
+     * **jadx's condition duplication.** When [m] is a branch shared by both arms of an enclosing `if` yet
+     * bypassed by a non-terminal third path (so it does not post-dominate the branch and [isGenuineMerge]
+     * rightly refused it as a single-placement follow), the arms are mutually exclusive at runtime, so
+     * emitting [m]'s subtree in each arm executes it on exactly one path per run — identical observable
+     * behavior to a single shared placement. We re-run the ordinary recursion over [m] with its proven-safe
+     * subtree authorized for re-placement; the recursion stops at the same follow/active exits it would have,
+     * so the reconvergence is still placed once by the enclosing chain and every honesty net still holds.
+     *
+     * Safety is entirely carried by [analyzeDuplicableSubtree] (the honesty nets confirm coverage, not
+     * per-copy renderability). Termination: the subtree is acyclic (no loop header), so the forward walk over
+     * a finite DAG terminates; [MAX_DUP_SUBTREE] caps distinct blocks and [MAX_DUP_EMISSIONS] caps total
+     * re-emissions (a Bail discards the whole tree, so a cap breach is safe, never partial output).
+     */
+    private fun tryDuplicatePartialJoin(m: BasicBlock, chainFollow: BasicBlock?, loopCtx: LoopCtx?): Region? {
+        val subtree = analyzeDuplicableSubtree(m) ?: return null
+        duplicatingSubtree.addAll(subtree)
+        try {
+            return makeRegion(m, chainFollow = chainFollow, loopCtx = loopCtx, bodyRootHeader = null)
+        } finally {
+            duplicatingSubtree.removeAll(subtree)
+        }
+    }
+
+    /**
+     * The proven-safe partial-join subtree rooted at [m], or null if [m] is outside the duplication envelope.
+     *
+     * **S = [m] and every block [m] dominates** (its dominance subtree), excluding the method exit. Because
+     * [m] dominates them, EVERY path reaching an S block passes through [m]: the subtree has a single entry
+     * ([m]) and the only external predecessors are [m]'s own (the enclosing `if`'s arms). The reconvergence
+     * carries a bypassing predecessor NOT dominated by [m], so it is not in S — it stays the single follow,
+     * placed once by the enclosing chain.
+     *
+     * The envelope (bail on ANY violation — a mis-duplication that still recompiles is the worst outcome):
+     *  - **single-exit (SESE)**: [m] has a real post-dominator (not the method exit) — its paths reconverge
+     *    at one point, so it is a hammock, not an ambiguous fan-out to independent merges;
+     *  - **bounded** `|S| ≤ [MAX_DUP_SUBTREE]`;
+     *  - **acyclic**: no S block is a loop header (⇒ termination and no back edge duplicated);
+     *  - **no monitor / try boundary**: no S block starts/holds a monitor op or is try-protected (a copy could
+     *    escape the lock/handler, rule 4);
+     *  - **supported branches only** (a NONE fall-through or a TWO_WAY `if`; no switch, no irreducible fan-out);
+     *  - **no stranded dead throwing read** (reuses [isGenuinelyDeadResult]);
+     *  - **single-entry** confirmed against clean edges (dominance already implies it);
+     *  - **value-flow safe**: every value DEFINED in S is either a coalesced (multi-version) local — whose one
+     *    hoisted declaration dominates [m] and hence both copies ([coalescingIsSound] already proved it
+     *    renderable) — or a temp read ONLY within its own block (codegen re-declares it per copy). A single-def
+     *    value read in another block would be declared in one copy and left an out-of-scope use in the sibling
+     *    copy: refuse. A value the subtree merely READS but does not define is produced by a block dominating
+     *    [m] (since [m] dominates the reader, that def dominates [m]), so it is in scope at both copies with no
+     *    further check — including a merged variable, whose per-arm assignment sits in the mutually-exclusive
+     *    predecessor and is exactly the value each path uses (the φ never resolves wrongly).
+     */
+    private fun analyzeDuplicableSubtree(m: BasicBlock): Set<BasicBlock>? {
+        if (m in loopHeaders) return null
+        // [m] must head a SINGLE-EXIT region: every path out of [m] reconverges at one real post-dominator.
+        // This is the classic safe-to-duplicate unit (a SESE hammock). When [m]'s post-dominator collapses to
+        // the method exit, its paths diverge to INDEPENDENT terminal points with no common reconvergence (an
+        // ambiguous multi-merge fan-out, e.g. two arms each reaching two unrelated `return`s) — copying it
+        // could misplace the code a second, unrelated merge dominates, so we refuse. The bypassing third path
+        // rejoins AT or AFTER this post-dominator; [m] still does not post-dominate the ENCLOSING branch (that
+        // is what made it a partial join), only its own subtree.
+        val postDom = ipostdom(m)
+        if (postDom == null || postDom === exit) return null
+        val s = HashSet<BasicBlock>()
+        for (b in method.blocks) {
+            if (b === exit) continue
+            if (b === m || m.id in b.dominators) s.add(b)
+        }
+        if (s.size > MAX_DUP_SUBTREE) return null
+        for (b in s) {
+            if (b in loopHeaders) return null
+            if (startsSynchronized(b)) return null
+            if (isProtected(b)) return null
+            if (b.instructions.any { it.opcode == IrOpcode.MONITOR_ENTER || it.opcode == IrOpcode.MONITOR_EXIT }) return null
+            val kind = branchKind(b)
+            if (kind != BranchKind.NONE && kind != BranchKind.TWO_WAY) return null
+            if (b.instructions.any { isGenuinelyDeadResult(it) }) return null
+            // Single-entry (dominance already guarantees it; verify against the clean CFG to be safe).
+            if (b !== m && cleanPreds(b).any { it !in s }) return null
+            for (insn in b.instructions) {
+                val v = insn.result?.ssaValue ?: continue
+                val lv = v.localVar
+                // Coalesced local: skip the escape check. Codegen declares such a local at its FIRST
+                // assignment in emission order (not a hoisted declaration). A read that compiles at all
+                // necessarily has a declaring def dominating it (enforced by coalescingIsSound), which is
+                // either inside S (copied verbatim) or dominates M (in scope in both arms) — so both copies
+                // resolve it faithfully. If no dominating def exists, the sibling copy's use is out-of-scope
+                // and FAILS TO COMPILE (oracle-caught), never a silent miscompile. Do NOT loosen this guard
+                // on a "hoisted declaration" premise — the safety rests on compiles-implies-correct.
+                if (lv != null && lv.ssaValues.size > 1) continue
+                // A single-def value read OUTSIDE its defining block escapes: duplicating declares it in one
+                // copy and strands an out-of-scope use in the sibling copy. The read test recurses through
+                // inlined (wrapped) operands — an escaping value's only read may sit nested inside a top-level
+                // instruction of another block (the wrapped-operand hazard) — so it mirrors [readsSsaValue].
+                if (escapesDefiningBlock(v, b)) return null
+            }
+        }
+        return s
+    }
+
+    /** Whether [value] is read (recursively, through wrapped operands) by a top-level instruction outside [b]. */
+    private fun escapesDefiningBlock(value: SsaValue, b: BasicBlock): Boolean {
+        for (blk in method.blocks) {
+            if (blk === b) continue
+            for (insn in blk.instructions) if (readsSsaValue(insn, value)) return true
         }
         return false
     }
@@ -1825,5 +1969,11 @@ internal class RegionMaker(
     private companion object {
         /** Id for synthetic break/continue leaves; identity (not id) distinguishes them. */
         const val SYNTHETIC_ID = -1
+
+        /** Max distinct blocks in a duplicated partial-join subtree — keeps duplication small and bounded. */
+        const val MAX_DUP_SUBTREE = 6
+
+        /** Hard cap on total partial-join re-emissions; a breach bails (whole tree discarded), never partial. */
+        const val MAX_DUP_EMISSIONS = 48
     }
 }
