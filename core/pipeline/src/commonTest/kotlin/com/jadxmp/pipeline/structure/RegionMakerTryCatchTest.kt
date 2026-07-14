@@ -66,6 +66,27 @@ class RegionMakerTryCatchTest {
     private inline fun <reified T : Region> firstRegion(method: IrMethod): T? =
         allRegions(method).filterIsInstance<T>().firstOrNull()
 
+    /** Every [BasicBlock] anywhere under [c], recursing through ALL region kinds (including if-arms). */
+    private fun deepBlocks(c: IrContainer?): List<com.jadxmp.ir.node.BasicBlock> =
+        ArrayList<com.jadxmp.ir.node.BasicBlock>().also { deepBlocksInto(c, it) }
+
+    private fun deepBlocksInto(c: IrContainer?, out: MutableList<com.jadxmp.ir.node.BasicBlock>) {
+        when (c) {
+            is com.jadxmp.ir.node.BasicBlock -> out.add(c)
+            is SequenceRegion -> c.children.forEach { deepBlocksInto(it, out) }
+            is TryCatchRegion -> {
+                deepBlocksInto(c.tryRegion, out)
+                c.catches.forEach { deepBlocksInto(it.body, out) }
+                c.finallyRegion?.let { deepBlocksInto(it, out) }
+            }
+            is IfRegion -> {
+                deepBlocksInto(c.thenRegion, out)
+                c.elseRegion?.let { deepBlocksInto(it, out) }
+            }
+            else -> {}
+        }
+    }
+
     /** Children of the try body region (a [SequenceRegion]) as a flat list. */
     private fun tryBodyChildren(tc: TryCatchRegion): List<IrContainer> =
         (tc.tryRegion as? SequenceRegion)?.children ?: emptyList()
@@ -467,6 +488,215 @@ class RegionMakerTryCatchTest {
         // The synthetic re-throw and move-exception are consumed (hidden), not emitted as a real catch.
         val throwHidden = method.blocks.flatMap { it.instructions }
             .single { it.opcode == com.jadxmp.ir.insn.IrOpcode.THROW }.contains(AttrFlag.DONT_GENERATE)
+        assertTrue(throwHidden, "the synthetic re-throw is hidden by the finally")
+    }
+
+    // ---- multi-exit try/finally (TestFinally3 / TestTypeResolver17 family) ----
+
+    private val mCleanup = FakeMethodRef("Lcom/example/Foo;", "cleanup", "V", emptyList())
+
+    /**
+     * The essential single-try-range multi-exit try/finally shape: one protected body ending in an `if`
+     * whose TWO arms each fall to an unprotected `[cleanup(); return]` copy, plus the catch-all
+     * `[move-exception; cleanup(); throw]`. javac inlined the cleanup on all THREE exit paths (two normal
+     * returns + the exceptional re-throw). The three identical copies must collapse into ONE
+     * `finally { cleanup(); }` with the two returns kept inside the `try {}` — cleanup runs exactly once per
+     * path, never dropped, never doubled.
+     */
+    @Test
+    fun multiExitFinallyReconstructsFromInlinedCleanupCopies() {
+        val reader = FakeCodeReader(
+            2, // v0 = cond/param, v1 = exception var
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall), // T0 try body: sink()
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4), // T0 end: if v0==0 -> exit2(off4) else exit1
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = mCleanup), // exit1: cleanup copy
+                Insn(Opcode.RETURN_VOID, 3), // exit1 return
+                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(), methodRef = mCleanup), // exit2: cleanup copy
+                Insn(Opcode.RETURN_VOID, 5), // exit2 return
+                Insn(Opcode.MOVE_EXCEPTION, 6, intArrayOf(1)), // catch-all handler
+                Insn(Opcode.INVOKE_STATIC, 7, intArrayOf(), methodRef = mCleanup), // handler cleanup copy
+                Insn(Opcode.THROW, 8, intArrayOf(1)), // re-throw
+            ),
+            tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(emptyList(), emptyList(), 6))), // catch-all over T0
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the multi-exit try/finally must structure")
+        assertNoPhi(method)
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc, "a try/finally region must be built")
+        assertTrue(tc.catches.isEmpty(), "a pure finally has no catch clauses")
+        assertNotNull(tc.finallyRegion, "the cleanup is hoisted into a finally region")
+        // The two normal returns stay inside the try body (each ends its arm), reached via the branch.
+        assertNotNull(firstRegion<IfRegion>(method), "the branch to the two returns is kept in the try body")
+        // Exactly ONE cleanup INVOKE survives across the whole method — the two inlined copies and the
+        // handler copy collapse to the single finally copy. Never dropped (>=1), never doubled (==1).
+        val liveCleanups = method.blocks.sumOf { b ->
+            b.instructions.count { insn ->
+                insn is com.jadxmp.ir.insn.InvokeInstruction && insn.methodRef.name == "cleanup" &&
+                    !insn.contains(AttrFlag.DONT_GENERATE)
+            }
+        }
+        assertEquals(1, liveCleanups, "cleanup emitted exactly once (in the finally) on every path")
+        // The surviving cleanup lives in the finally region.
+        val finallyLive = ArrayList<com.jadxmp.ir.node.BasicBlock>().also { collectBlocks(tc.finallyRegion, it) }
+            .sumOf { b -> b.instructions.count { it.opcode == IrOpcode.INVOKE && !it.contains(AttrFlag.DONT_GENERATE) } }
+        assertEquals(1, finallyLive, "the one surviving cleanup is the finally's")
+        // Both normal `return`s survive (nothing dropped), plus the hidden synthetic re-throw.
+        assertEquals(2, method.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.RETURN })
+        val throwHidden = method.blocks.flatMap { it.instructions }
+            .single { it.opcode == IrOpcode.THROW }.contains(AttrFlag.DONT_GENERATE)
+        assertTrue(throwHidden, "the synthetic re-throw is hidden by the finally")
+    }
+
+    /**
+     * Rule-4 drop guard: if ONE normal exit is missing its inlined cleanup, the copies must NOT be factored
+     * (factoring would emit cleanup on that path where the bytecode did not — changing behavior). The
+     * method must bail honestly (region==null), never a wrong finally.
+     */
+    @Test
+    fun multiExitFinallyWithOneExitMissingCleanupBails() {
+        val reader = FakeCodeReader(
+            2,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4),
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = mCleanup), // exit1: HAS cleanup
+                Insn(Opcode.RETURN_VOID, 3),
+                Insn(Opcode.RETURN_VOID, 4), // exit2: NO cleanup (bare return) — must prevent factoring
+                Insn(Opcode.MOVE_EXCEPTION, 5, intArrayOf(1)),
+                Insn(Opcode.INVOKE_STATIC, 6, intArrayOf(), methodRef = mCleanup),
+                Insn(Opcode.THROW, 7, intArrayOf(1)),
+            ),
+            tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(emptyList(), emptyList(), 5))),
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(method)
+        assertNull(method.region, "an exit lacking the cleanup must bail, never factor a finally that adds it")
+        assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true)
+    }
+
+    /**
+     * A catch-all whose cleanup READS the caught exception is a real `catch`, not a finally — collapsing it
+     * into a `finally {}` (which has no exception in scope) would be wrong. Even with the multi-exit
+     * inlined-copy shape, such a handler must NOT be treated as a finally: the method bails honestly.
+     */
+    @Test
+    fun multiExitCatchallThatUsesTheExceptionIsNotFinally() {
+        val logExc = FakeMethodRef("Lcom/example/Foo;", "log", "V", listOf("Ljava/lang/Throwable;"))
+        val reader = FakeCodeReader(
+            2,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4),
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = mCleanup), // exit1 cleanup copy
+                Insn(Opcode.RETURN_VOID, 3),
+                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(), methodRef = mCleanup), // exit2 cleanup copy
+                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.MOVE_EXCEPTION, 6, intArrayOf(1)), // catch-all binds e
+                Insn(Opcode.INVOKE_STATIC, 7, intArrayOf(1), methodRef = logExc), // log(e) — USES the exception
+                Insn(Opcode.THROW, 8, intArrayOf(1)),
+            ),
+            tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(emptyList(), emptyList(), 6))),
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(method)
+        assertNull(method.region, "a handler that reads the caught exception must not be collapsed to a finally")
+        assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true)
+    }
+
+    /**
+     * A catch-all whose cleanup BRANCHES (a multi-block handler) is outside the provable single-block
+     * envelope: hoisting a branching cleanup into `finally {}` is not proven safe, so the method bails.
+     */
+    @Test
+    fun multiExitFinallyWithBranchingCleanupBails() {
+        val reader = FakeCodeReader(
+            2,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall),
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4),
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = mCleanup),
+                Insn(Opcode.RETURN_VOID, 3),
+                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(), methodRef = mCleanup),
+                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.MOVE_EXCEPTION, 6, intArrayOf(1)), // catch-all entry
+                Insn(Opcode.IF_EQZ, 7, intArrayOf(0), target = 9), // cleanup BRANCHES ⇒ multi-block handler
+                Insn(Opcode.INVOKE_STATIC, 8, intArrayOf(), methodRef = mCleanup),
+                Insn(Opcode.THROW, 9, intArrayOf(1)),
+            ),
+            tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(emptyList(), emptyList(), 6))),
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(method)
+        assertNull(method.region, "a branching (multi-block) cleanup handler must bail, not factor a finally")
+        assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true)
+    }
+
+    /**
+     * The full **split-range** finally shape of `TestFinally3`: a source `try { … } finally { close(); }`
+     * that javac split into TWO try-ranges sharing one catch-all, with an OUTER `if` whose taken arm jumps
+     * straight to the shared post-code (a protected merge), whose fall arm holds an INNER `if` that
+     * early-returns with an inlined cleanup, and a second range flowing into that same merge which ends in a
+     * second inlined `cleanup(); return`. The structurer must grow the whole finally body across the two
+     * ranges + the non-throwing between-code, recognize BOTH inlined-cleanup exits, and factor ONE
+     * `try { … } finally { cleanup(); }` — cleanup emitted exactly once per path, both returns inside the try.
+     */
+    @Test
+    fun splitRangeFinallyWithInnerEarlyReturnReconstructs() {
+        val reader = FakeCodeReader(
+            3, // v0 = cond1 (param), v1 = cond2 (param), v2 = exception var
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall), // A (try1): protected work
+                Insn(Opcode.IF_NEZ, 1, intArrayOf(0), target = 6), // A end: if cond1 -> J(off6, merge) else C
+                Insn(Opcode.IF_NEZ, 2, intArrayOf(1), target = 5), // C (unprot between): if cond2 -> E else D
+                Insn(Opcode.INVOKE_STATIC, 3, intArrayOf(), methodRef = mCleanup), // D exit: inlined cleanup copy
+                Insn(Opcode.RETURN_VOID, 4), // D exit: early return
+                Insn(Opcode.INVOKE_STATIC, 5, intArrayOf(), methodRef = voidCall), // E (try2): protected work → J
+                Insn(Opcode.INVOKE_STATIC, 6, intArrayOf(), methodRef = voidCall), // J (try2): shared merge → G
+                Insn(Opcode.INVOKE_STATIC, 7, intArrayOf(), methodRef = mCleanup), // G exit: inlined cleanup copy
+                Insn(Opcode.RETURN_VOID, 8), // G exit: return
+                Insn(Opcode.MOVE_EXCEPTION, 9, intArrayOf(2)), // H: catch-all for BOTH ranges (finally)
+                Insn(Opcode.INVOKE_STATIC, 10, intArrayOf(), methodRef = mCleanup), // H cleanup copy
+                Insn(Opcode.THROW, 11, intArrayOf(2)),
+            ),
+            tries = listOf(
+                FakeTryBlock(0, 1, FakeCatchHandler(emptyList(), emptyList(), 9)), // try1: A
+                FakeTryBlock(5, 6, FakeCatchHandler(emptyList(), emptyList(), 9)), // try2: E, J
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT, IrType.INT))
+        TestPipeline.structured(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the split-range try/finally must structure")
+        assertNoPhi(method)
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc, "a single try/finally spanning both ranges must be built")
+        assertTrue(tc.catches.isEmpty(), "a pure finally has no catch clauses")
+        assertNotNull(tc.finallyRegion, "the cleanup is hoisted into a finally region")
+        assertNotNull(firstRegion<IfRegion>(method), "the branchy body (outer + inner if) is kept in the try")
+        // Exactly ONE cleanup INVOKE survives across the whole method — both inlined copies + the handler copy
+        // collapse to the single finally copy. Never dropped (>=1), never doubled (==1).
+        val liveCleanups = method.blocks.sumOf { b ->
+            b.instructions.count { insn ->
+                insn is com.jadxmp.ir.insn.InvokeInstruction && insn.methodRef.name == "cleanup" &&
+                    !insn.contains(AttrFlag.DONT_GENERATE)
+            }
+        }
+        assertEquals(1, liveCleanups, "cleanup emitted exactly once (in the finally) on every path")
+        // Both inlined-cleanup returns survive (nothing dropped) — one per normal exit path.
+        assertEquals(2, method.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.RETURN },
+            "both returns survive, one per normal exit path")
+        // They live INSIDE the try body (the region is one try/finally with no follow — nothing after it), and
+        // the finally holds ONLY the cleanup (no return leaked into it). Walk the whole region tree.
+        val tryReturns = deepBlocks(tc.tryRegion).sumOf { b -> b.instructions.count { it.opcode == IrOpcode.RETURN } }
+        assertEquals(2, tryReturns, "both returns are pulled inside the try (finally runs cleanup on each)")
+        val finallyReturns = deepBlocks(tc.finallyRegion!!).sumOf { b -> b.instructions.count { it.opcode == IrOpcode.RETURN } }
+        assertEquals(0, finallyReturns, "no return leaked into the finally")
+        val throwHidden = method.blocks.flatMap { it.instructions }
+            .single { it.opcode == IrOpcode.THROW }.contains(AttrFlag.DONT_GENERATE)
         assertTrue(throwHidden, "the synthetic re-throw is hidden by the finally")
     }
 

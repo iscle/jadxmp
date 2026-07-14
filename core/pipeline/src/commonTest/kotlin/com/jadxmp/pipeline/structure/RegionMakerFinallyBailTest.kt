@@ -1,6 +1,9 @@
 package com.jadxmp.pipeline.structure
 
 import com.jadxmp.input.Opcode
+import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.InvokeInstruction
+import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.pipeline.PipelineAttrs
 import com.jadxmp.pipeline.support.FakeCatchHandler
@@ -10,6 +13,8 @@ import com.jadxmp.pipeline.support.FakeTryBlock
 import com.jadxmp.pipeline.support.Insn
 import com.jadxmp.pipeline.support.TestPipeline
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -74,35 +79,79 @@ class RegionMakerFinallyBailTest {
         assertHonestBail(reader, IrType.OBJECT, listOf(IrType.INT, IrType.OBJECT, IrType.OBJECT, IrType.OBJECT))
     }
 
-    // ---- TestFinally3 essence: TWO try ranges sharing ONE catchall (finally) ----
-    // Bail: "try body with multiple normal exits not supported yet".
-    // javac split one try/finally into two try ranges (try1: A,B ; try2: E,F) both protected by the same
-    // catch-all cleanup handler, with unprotected code (C,D) between them and F reached by a jump from A.
-    // collectProtectedRegion from A gathers {A,B,F} (E is only reachable through unprotected C), leaving two
-    // external exits {C, G}. Correct reconstruction is a single try/finally across the split ranges.
+    // ---- TestFinally3 essence: TWO try ranges sharing ONE catchall (finally) — NOW STRUCTURES ----
+    // FLIPPED (was `finally3_splitTryRangesSharedCatchallBails`, an honest-bail guard): the split-range
+    // finally now reconstructs. javac split one `try { A; between; E } finally { cleanup(); }` into two
+    // try-ranges (try1: A ; try2: E) sharing the SAME catch-all cleanup, joined by non-throwing unprotected
+    // between-code C, with a cleanup copy inlined before BOTH normal returns (D and G). The structurer grows
+    // the whole finally body {A, C, E} across the split ranges and factors ONE `try { … } finally { cleanup
+    // }`: the two inlined copies + the handler copy collapse to a SINGLE cleanup in the finally, both returns
+    // stay inside the try, the synthetic re-throw is hidden. (Rule 4: cleanup emitted exactly once per path.)
     @Test
-    fun finally3_splitTryRangesSharedCatchallBails() {
+    fun finally3_splitTryRangesSharedCatchallNowStructures() {
         val reader = FakeCodeReader(
-            3, // v0, v1, v2(exc)
+            2, // v0 = cond (param), v1 = exception var
             listOf(
-                Insn(Opcode.CONST, 0, intArrayOf(0), literal = 0), // entry (unprotected)
-                Insn(Opcode.IF_NEZ, 1, intArrayOf(1), target = 6), // A (try1): if v1 -> F(off6) else fall
-                Insn(Opcode.INVOKE_STATIC, 2, methodRef = sink), // B (try1 end)
-                Insn(Opcode.IF_NEZ, 3, intArrayOf(1), target = 5), // C (unprotected): -> E(off5) else fall
-                Insn(Opcode.RETURN, 4, intArrayOf(0)), // D (unprotected)
-                Insn(Opcode.INVOKE_STATIC, 5, methodRef = sink), // E (try2): falls to F
-                Insn(Opcode.INVOKE_STATIC, 6, methodRef = sink), // F (try2 end): shared jump target
-                Insn(Opcode.RETURN, 7, intArrayOf(0)), // G (unprotected)
-                Insn(Opcode.MOVE_EXCEPTION, 8, intArrayOf(2)), // H: catchall for BOTH tries (finally)
-                Insn(Opcode.INVOKE_STATIC, 9, methodRef = cleanup),
-                Insn(Opcode.THROW, 10, intArrayOf(2)),
+                Insn(Opcode.INVOKE_STATIC, 0, methodRef = sink), // A (try1): protected throwing work
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4), // C (unprotected between): -> E(off4) else D
+                Insn(Opcode.INVOKE_STATIC, 2, methodRef = cleanup), // D exit: inlined cleanup copy
+                Insn(Opcode.RETURN_VOID, 3), // D exit: return
+                Insn(Opcode.INVOKE_STATIC, 4, methodRef = sink), // E (try2): protected throwing work → falls to G
+                Insn(Opcode.INVOKE_STATIC, 5, methodRef = cleanup), // G exit: inlined cleanup copy
+                Insn(Opcode.RETURN_VOID, 6), // G exit: return
+                Insn(Opcode.MOVE_EXCEPTION, 7, intArrayOf(1)), // H: catchall for BOTH tries (finally)
+                Insn(Opcode.INVOKE_STATIC, 8, methodRef = cleanup), // H cleanup copy
+                Insn(Opcode.THROW, 9, intArrayOf(1)),
             ),
             tries = listOf(
-                FakeTryBlock(1, 2, FakeCatchHandler(emptyList(), emptyList(), 8)), // try1: A,B
-                FakeTryBlock(5, 6, FakeCatchHandler(emptyList(), emptyList(), 8)), // try2: E,F
+                FakeTryBlock(0, 0, FakeCatchHandler(emptyList(), emptyList(), 7)), // try1: A
+                FakeTryBlock(4, 4, FakeCatchHandler(emptyList(), emptyList(), 7)), // try2: E
             ),
         )
-        assertHonestBail(reader, IrType.OBJECT, listOf(IrType.OBJECT, IrType.INT))
+        val m = TestPipeline.buildMethod(reader, returnType = IrType.VOID, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(m)
+
+        assertNotNull(m.region, "the split-range try/finally must now structure (region != null)")
+        assertEquals(true, m[PipelineAttrs.FULLY_STRUCTURED], "structured across the split ranges")
+        // Exactly ONE cleanup INVOKE survives (the two inlined copies collapse into the finally's single copy).
+        val liveCleanups = m.blocks.sumOf { b ->
+            b.instructions.count { insn ->
+                insn is InvokeInstruction && insn.methodRef.name == "cleanup" && !insn.contains(AttrFlag.DONT_GENERATE)
+            }
+        }
+        assertEquals(1, liveCleanups, "cleanup emitted exactly once (in the finally), never dropped or doubled")
+        // Both normal returns survive (nothing dropped), and the synthetic re-throw is hidden by the finally.
+        assertEquals(2, m.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.RETURN })
+        val throwHidden = m.blocks.flatMap { it.instructions }
+            .single { it.opcode == IrOpcode.THROW }.contains(AttrFlag.DONT_GENERATE)
+        assertTrue(throwHidden, "the synthetic re-throw is hidden (folded into the finally)")
+    }
+
+    // ---- Negative: a split-range exit that LACKS the inlined cleanup must still bail ----
+    // Same split-range shape, but the D exit is a BARE `return` with no cleanup copy. Growing the body reaches
+    // the method exit via D without a cleanup, which is a drop hazard — so reconstruction must decline and the
+    // method bails honestly rather than factor a finally that adds cleanup to a path that never ran it.
+    @Test
+    fun finally3_splitRangeWithUncoveredExitBails() {
+        val reader = FakeCodeReader(
+            2,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, methodRef = sink), // A (try1)
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 3), // C (between): -> E(off3) else D
+                Insn(Opcode.RETURN_VOID, 2), // D exit: BARE return (NO cleanup) — uncovered
+                Insn(Opcode.INVOKE_STATIC, 3, methodRef = sink), // E (try2) → falls to G
+                Insn(Opcode.INVOKE_STATIC, 4, methodRef = cleanup), // G exit: cleanup copy
+                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.MOVE_EXCEPTION, 6, intArrayOf(1)), // H catchall
+                Insn(Opcode.INVOKE_STATIC, 7, methodRef = cleanup),
+                Insn(Opcode.THROW, 8, intArrayOf(1)),
+            ),
+            tries = listOf(
+                FakeTryBlock(0, 0, FakeCatchHandler(emptyList(), emptyList(), 6)),
+                FakeTryBlock(3, 3, FakeCatchHandler(emptyList(), emptyList(), 6)),
+            ),
+        )
+        assertHonestBail(reader, IrType.VOID, listOf(IrType.INT))
     }
 
     // ---- TestNestedTryCatch4 / TestUnreachableCatch essence: a nested try INSIDE a handler ----
