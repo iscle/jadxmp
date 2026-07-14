@@ -567,17 +567,22 @@ internal class RegionMaker(
             first = false
             if (!atStart) {
                 if (block === exit) break
-                // Stop at the immediate follow OR any enclosing forward region's follow (an active exit):
-                // reaching an ancestor's follow means this block belongs to that enclosing region. Keeps the
-                // same precedence the single `chainFollow` had — checked before the loop break/continue
-                // targets (which must still emit their jump leaves), so loop/switch semantics are unchanged.
-                if (block === chainFollow || block in exitStack) break
+                if (block === chainFollow) break
                 if (loopCtx != null && block === loopCtx.follow) {
                     seq.add(breakLeaf()); break
                 }
                 if (loopCtx?.continueTarget != null && block === loopCtx.continueTarget) {
                     seq.add(continueLeaf()); break
                 }
+                // An ENCLOSING forward region's follow (an active exit pushed by an outer if/try/sync).
+                // Checked AFTER the loop/switch break and continue-target checks: a block that is BOTH an
+                // inner loop/switch break-target AND an enclosing follow must emit its break/continue leaf
+                // FIRST — stopping here plain would drop that break (switch cases fall through; a
+                // `while (true)` break-to-follow that coincides with an enclosing follow becomes an infinite
+                // loop). By this point the block is neither the immediate follow nor a loop/switch jump
+                // target, so it genuinely belongs to an enclosing region (which places it) — stop here and
+                // let that region continue from it, instead of re-placing/revisiting it.
+                if (block in exitStack) break
                 // A block outside the enclosing loop that is not its follow is a non-local exit
                 // (multi-level break/continue) we do not model — bail rather than mis-structure it.
                 if (loopCtx != null && block !== exit && block !in loopCtx.bodyNodes) {

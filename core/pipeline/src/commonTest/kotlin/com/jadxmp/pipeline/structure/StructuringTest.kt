@@ -760,6 +760,72 @@ class StructuringTest {
         assertEquals(setOf(0L, 1L), sw.cases.single().keys.toSet())
     }
 
+    @Test
+    fun switchNestedInIfWhoseMergeEqualsSwitchMergeStillEmitsCaseBreaks() {
+        // The active-exit-stack precedence guard (Phase-1 review must-fix). A switch nested in an outer `if`
+        // whose merge is the SAME block as the switch merge M. The outer if pushes M as an active exit; each
+        // case body's `goto M` reaches M as a CHAIN-level break (a switch break-target), not a direct if-arm.
+        // If the `block in exitStack` stop were checked BEFORE the loopCtx.follow break, it would fire first
+        // and stop plain — dropping every `break` so the cases fall through (recompiles but runs wrong: the
+        // nets can't see it — edges recorded as fall-through, every block placed once). The break/continue
+        // checks MUST precede the active-exit stop. This asserts all case breaks are still emitted.
+        val sink = FakeMethodRef("Lcom/example/Foo;", "sink", "V", emptyList())
+        // CONTROL: the bare switch (no if wrapper) — establishes the correct break count.
+        val controlPayload = com.jadxmp.input.SwitchPayload(keys = intArrayOf(0, 1), targets = intArrayOf(3, 5))
+        val control = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.PACKED_SWITCH, 0, intArrayOf(0), target = 40), // switch(p0); default = fall to 1
+                Insn(Opcode.INVOKE_STATIC, 1, intArrayOf(), methodRef = sink), // default body
+                Insn(Opcode.GOTO, 2, target = 7),
+                Insn(Opcode.INVOKE_STATIC, 3, intArrayOf(), methodRef = sink), // case 0 body
+                Insn(Opcode.GOTO, 4, target = 7),
+                Insn(Opcode.INVOKE_STATIC, 5, intArrayOf(), methodRef = sink), // case 1 body
+                Insn(Opcode.GOTO, 6, target = 7),
+                Insn(Opcode.RETURN_VOID, 7), // switch merge
+                Insn(Opcode.PACKED_SWITCH_PAYLOAD, 40, payload = controlPayload),
+            ),
+        )
+        val controlMethod = TestPipeline.buildMethod(control, argTypes = listOf(IrType.INT))
+        TestPipeline.structured(controlMethod)
+        val controlBreaks = leaves(controlMethod.region!!).count { it.opcode == IrOpcode.BREAK }
+        assertTrue(controlBreaks > 0, "sanity: the bare switch emits case breaks")
+
+        // BUG SHAPE: the same switch wrapped in `if (p1 != 0) { switch(p0) … }` where the outer if merge
+        // == the switch merge M (offset 10). M is on the active-exit stack while the cases build.
+        // Packed-switch targets are RELATIVE to the switch offset (3): case bodies at absolute 6 and 8.
+        val payload = com.jadxmp.input.SwitchPayload(keys = intArrayOf(0, 1), targets = intArrayOf(3, 5))
+        val reader = FakeCodeReader(
+            3, // p0 = v1 (switch selector), p1 = v2 (if condition)
+            listOf(
+                Insn(Opcode.IF_NEZ, 0, intArrayOf(2), target = 3), // if (p1 != 0) goto switch; else fall
+                Insn(Opcode.INVOKE_STATIC, 1, intArrayOf(), methodRef = sink), // else body
+                Insn(Opcode.GOTO, 2, target = 10), // else -> M
+                Insn(Opcode.PACKED_SWITCH, 3, intArrayOf(1), target = 40), // switch(p0); default = fall to 4
+                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(), methodRef = sink), // default body
+                Insn(Opcode.GOTO, 5, target = 10), // default -> M
+                Insn(Opcode.INVOKE_STATIC, 6, intArrayOf(), methodRef = sink), // case 0 body
+                Insn(Opcode.GOTO, 7, target = 10), // case 0 -> M
+                Insn(Opcode.INVOKE_STATIC, 8, intArrayOf(), methodRef = sink), // case 1 body
+                Insn(Opcode.GOTO, 9, target = 10), // case 1 -> M
+                Insn(Opcode.RETURN_VOID, 10), // M — switch merge == outer if merge
+                Insn(Opcode.PACKED_SWITCH_PAYLOAD, 40, payload = payload),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT, IrType.INT))
+        TestPipeline.structured(method)
+
+        assertStructuredInvariant(method)
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the switch-in-if must fully structure")
+        val breaks = leaves(method.region!!).count { it.opcode == IrOpcode.BREAK }
+        assertEquals(
+            controlBreaks,
+            breaks,
+            "case breaks must NOT be dropped when the switch merge is also an enclosing active exit " +
+                "(got $breaks, control $controlBreaks — 0 would mean fall-through)",
+        )
+    }
+
     // ---- try / catch --------------------------------------------------------
 
     @Test
