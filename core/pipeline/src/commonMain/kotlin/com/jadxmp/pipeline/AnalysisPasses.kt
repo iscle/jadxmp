@@ -6,6 +6,7 @@ import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.pipeline.cfg.CfgBuilder
 import com.jadxmp.pipeline.cfg.Dominators
+import com.jadxmp.pipeline.cfg.FixMultiEntryLoops
 import com.jadxmp.pipeline.constructor.ConstructorArgTernaryFold
 import com.jadxmp.pipeline.constructor.ConstructorReconstruction
 import com.jadxmp.pipeline.decode.MethodDecoder
@@ -25,6 +26,7 @@ import com.jadxmp.pipeline.types.TypeInference
 object PassNames {
     const val BUILD_CFG = "BuildCfg"
     const val METHOD_INLINE = "MethodInline"
+    const val FIX_MULTI_ENTRY_LOOPS = "FixMultiEntryLoops"
     const val DOMINATORS = "Dominators"
     const val SSA = "Ssa"
     const val TYPE_INFERENCE = "TypeInference"
@@ -71,6 +73,25 @@ class MethodInlinePass : MethodPass {
 
     override fun run(method: IrMethod, context: PassContext) {
         MethodInliner(context.root).process(method)
+    }
+}
+
+/**
+ * Make irreducible **multi-entry loops** reducible by bounded, provably-safe node-splitting (duplicating
+ * the straight-line block a cycle is entered at from two paths). **jadx: FixMultiEntryLoops.** Runs on the
+ * raw CFG, after inlining and before dominators/SSA — so SSA reconstruction rebuilds correct φ/values for
+ * the split and the reducibility precondition of structuring is met. A no-op unless a supported
+ * multi-entry shape is present; residual irreducibility is left for structuring's honest bail (never wrong
+ * code, rule 4).
+ */
+class FixMultiEntryLoopsPass : MethodPass {
+    override val name: String get() = PassNames.FIX_MULTI_ENTRY_LOOPS
+    override val runAfter: List<String> get() = listOf(PassNames.METHOD_INLINE)
+    override val runBefore: List<String> get() = listOf(PassNames.DOMINATORS)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        if (method.entryBlock == null) return
+        FixMultiEntryLoops(method, context.cancellation).process()
     }
 }
 
@@ -205,6 +226,7 @@ object AnalysisPipeline {
     val methodPasses: List<MethodPass> = listOf(
         BuildCfgPass(),
         MethodInlinePass(),
+        FixMultiEntryLoopsPass(),
         DominatorsPass(),
         SsaPass(),
         TypeInferencePass(),

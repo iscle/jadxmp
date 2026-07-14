@@ -184,10 +184,14 @@ object Dominators {
     }
 
     private fun applyDominators(rpo: List<BasicBlock>, idom: IntArray) {
+        // Clear the dominator-tree child lists on EVERY block first: [compute] may be re-run on a method
+        // (e.g. after a CFG transform such as FixMultiEntryLoops recomputes and then DominatorsPass runs
+        // again), and dominatedBlocks is otherwise only appended to — a second run would accumulate stale
+        // duplicate children. The dominators sets are cleared per block below.
+        for (block in rpo) block.dominatedBlocks.clear()
         val entry = rpo[0]
         entry.immediateDominator = null
         entry.dominators.clear()
-        entry.dominatedBlocks.clear()
         entry.dominators.add(entry.id)
         for (i in 1 until rpo.size) {
             val block = rpo[i]
