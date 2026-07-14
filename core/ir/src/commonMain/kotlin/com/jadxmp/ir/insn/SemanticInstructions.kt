@@ -25,13 +25,10 @@ import com.jadxmp.ir.type.IrType
  * expressions; for the instance forms ([InvokeKind.hasInstance]) arg 0 is the receiver.
  * jadx: InvokeNode
  *
- * **`invoke-custom` (invokedynamic) is intentionally NOT representable here yet.** It has no
- * resolvable [MethodRef] and the contract carries no bootstrap/call-site payload, so the pipeline
- * keeps an `invoke-custom` as a bare `Instruction(IrOpcode.INVOKE)` (data flow preserved, symbol
- * lost) and codegen emits a visible marker rather than silently dropping it. [InvokeKind.CUSTOM]
- * exists for classification only; a dedicated `InvokeCustomInstruction` carrying the bootstrap
- * method + args will be added when lambda / string-concat reconstruction lands (later phase).
- * [InvokeKind.POLYMORPHIC] IS representable — its call-site proto rides on [methodRef].
+ * A **raw `invoke-custom` (invokedynamic)** is modeled by the sibling [InvokeCustomInstruction] (also
+ * an `IrOpcode.INVOKE`), which carries the decoded call-site payload (bootstrap method, name, proto).
+ * [InvokeKind.CUSTOM] exists for classification only. [InvokeKind.POLYMORPHIC] IS representable here —
+ * its call-site proto rides on [methodRef].
  *
  * @param opcode either [IrOpcode.INVOKE] (default) or [IrOpcode.CONSTRUCTOR] once a `<init>` call has
  *   been normalized by a later pass.
@@ -55,6 +52,40 @@ class InvokeInstruction(
     /** The receiver operand for instance calls (arg 0), or null for static/custom. */
     val instanceArg: Operand? get() = if (hasInstance && argCount > 0) getArg(0) else null
 }
+
+/**
+ * A raw `invoke-custom` (invokedynamic) call site, rendered — like jadx's `InvokeCustomRawNode` — as a
+ * polymorphic-style call through the resolved bootstrap:
+ * `(<Ret>) bootstrap(MethodHandles.lookup(), "<name>", MethodType.methodType(<Ret>, <params…>))
+ * .dynamicInvoker().invoke(<runtime args>) /* invoke-custom */`.
+ *
+ * This is a normal [IrOpcode.INVOKE] instruction, so every generic pass (SSA renaming, type inference,
+ * dead-code / out-of-SSA, expression shaping, structuring) that iterates operands/result handles it
+ * unchanged: [Instruction.args] are the RUNTIME register arguments (data flow preserved) and [result]
+ * is the (folded `move-result`) destination, given the [protoReturnType] so the value types correctly.
+ * The bootstrap "static" arguments (`lookup()`, the name, the `MethodType`) are compile-time constants
+ * synthesized by codegen — they are not register operands and so carry no data flow.
+ *
+ * @param bootstrapMethod the resolved bootstrap method the call site links (jadx: the `resolve` invoke).
+ * @param bootstrapKind how the bootstrap dispatches; only [InvokeKind.STATIC] is faithfully renderable
+ *   (bootstrap methods are static per the JVM spec).
+ * @param callSiteName the invokedynamic name (e.g. `"func"`).
+ * @param protoReturnType the call-site proto return type (the `.invoke(…)` result / result cast type).
+ * @param protoParamTypes the call-site proto parameter types (the runtime argument types).
+ * @param renderable false when the call site cannot be faithfully rendered (a field handle, a
+ *   non-static bootstrap, or extra bootstrap arguments this backend does not spell); codegen then
+ *   bails to a visible error marker rather than emit wrong code (rule 4).
+ */
+class InvokeCustomInstruction(
+    val bootstrapMethod: MethodRef,
+    val bootstrapKind: InvokeKind,
+    val callSiteName: String,
+    val protoReturnType: IrType,
+    val protoParamTypes: List<IrType>,
+    val renderable: Boolean,
+    result: RegisterOperand? = null,
+    args: List<Operand> = emptyList(),
+) : Instruction(IrOpcode.INVOKE, result, args)
 
 /**
  * An instance/static field get or put. The [Instruction.opcode] is derived from [isStatic]/[isPut].

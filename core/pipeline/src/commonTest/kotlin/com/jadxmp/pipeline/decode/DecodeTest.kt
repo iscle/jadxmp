@@ -1,24 +1,32 @@
 package com.jadxmp.pipeline.decode
 
+import com.jadxmp.input.EncodedValue
+import com.jadxmp.input.EncodedValueType
 import com.jadxmp.input.FillArrayDataPayload
 import com.jadxmp.input.IndexType
+import com.jadxmp.input.MethodHandleType
 import com.jadxmp.input.Opcode
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ArithOp
 import com.jadxmp.ir.insn.FieldInstruction
 import com.jadxmp.ir.insn.FillArrayInstruction
+import com.jadxmp.ir.insn.InvokeCustomInstruction
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.LiteralOperand
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.type.IrType
+import com.jadxmp.pipeline.support.FakeCallSite
 import com.jadxmp.pipeline.support.FakeCodeReader
 import com.jadxmp.pipeline.support.FakeFieldRef
+import com.jadxmp.pipeline.support.FakeMethodHandle
+import com.jadxmp.pipeline.support.FakeMethodProto
 import com.jadxmp.pipeline.support.FakeMethodRef
 import com.jadxmp.pipeline.support.Insn
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DecodeTest {
@@ -246,6 +254,76 @@ class DecodeTest {
         // The unsupported instruction is preserved as a placeholder (no silent code loss) and reported.
         assertEquals(2, code.instructions.size)
         assertTrue(code.errors.isNotEmpty(), "an undecodable opcode must be reported")
+    }
+
+    @Test
+    fun invokeCustomCarriesBootstrapNameProtoAndRuntimeArgs() {
+        // call_site = [bootstrapHandle, "func", proto (ID)Ljava/lang/String;]
+        val bootstrap = FakeMethodRef(
+            "Linvoke/Foo;", "staticBootstrap",
+            "Ljava/lang/invoke/CallSite;",
+            listOf(
+                "Ljava/lang/invoke/MethodHandles\$Lookup;",
+                "Ljava/lang/String;",
+                "Ljava/lang/invoke/MethodType;",
+            ),
+        )
+        val callSite = FakeCallSite(
+            listOf(
+                EncodedValue(EncodedValueType.METHOD_HANDLE, FakeMethodHandle(MethodHandleType.INVOKE_STATIC, methodRef = bootstrap)),
+                EncodedValue(EncodedValueType.STRING, "func"),
+                EncodedValue(EncodedValueType.METHOD_TYPE, FakeMethodProto("Ljava/lang/String;", listOf("I", "D"))),
+            ),
+        )
+        val code = decode(
+            3,
+            Insn(Opcode.INVOKE_CUSTOM, offset = 0, registers = intArrayOf(0, 1), indexType = IndexType.CALL_SITE, callSite = callSite),
+            Insn(Opcode.MOVE_RESULT, offset = 1, registers = intArrayOf(0)),
+            Insn(Opcode.RETURN, offset = 2, registers = intArrayOf(0)),
+        )
+        // move-result folds into the invoke-custom: only the invoke + return remain.
+        assertEquals(2, code.instructions.size)
+        val ic = code.instructions[0].insn as InvokeCustomInstruction
+        assertEquals(IrOpcode.INVOKE, ic.opcode)
+        assertTrue(ic.renderable)
+        // Bootstrap method resolved from the handle.
+        assertEquals(IrType.objectType("invoke.Foo"), ic.bootstrapMethod.declaringType)
+        assertEquals("staticBootstrap", ic.bootstrapMethod.name)
+        assertEquals(InvokeKind.STATIC, ic.bootstrapKind)
+        // Call-site name + proto.
+        assertEquals("func", ic.callSiteName)
+        assertEquals(IrType.STRING, ic.protoReturnType)
+        assertEquals(listOf(IrType.INT, IrType.DOUBLE), ic.protoParamTypes)
+        // Runtime register args, typed by the proto params (v0=int, v1=double).
+        assertEquals(2, ic.argCount)
+        assertEquals(0, (ic.getArg(0) as RegisterOperand).regNum)
+        assertEquals(IrType.INT, (ic.getArg(0) as RegisterOperand).type)
+        assertEquals(1, (ic.getArg(1) as RegisterOperand).regNum)
+        assertEquals(IrType.DOUBLE, (ic.getArg(1) as RegisterOperand).type)
+        // The folded move-result takes the proto return type, so the value types as String.
+        val result = ic.result as RegisterOperand
+        assertEquals(0, result.regNum)
+        assertEquals(IrType.STRING, result.type)
+    }
+
+    @Test
+    fun invokeCustomWithExtraBootstrapArgsIsNotRenderable() {
+        val bootstrap = FakeMethodRef("Linvoke/Foo;", "bsm", "Ljava/lang/invoke/CallSite;", emptyList())
+        val callSite = FakeCallSite(
+            listOf(
+                EncodedValue(EncodedValueType.METHOD_HANDLE, FakeMethodHandle(MethodHandleType.INVOKE_STATIC, methodRef = bootstrap)),
+                EncodedValue(EncodedValueType.STRING, "name"),
+                EncodedValue(EncodedValueType.METHOD_TYPE, FakeMethodProto("V", emptyList())),
+                EncodedValue(EncodedValueType.INT, 42), // an extra bootstrap argument we do not spell
+            ),
+        )
+        val code = decode(
+            1,
+            Insn(Opcode.INVOKE_CUSTOM, offset = 0, registers = intArrayOf(), indexType = IndexType.CALL_SITE, callSite = callSite),
+            Insn(Opcode.RETURN_VOID, offset = 1),
+        )
+        val ic = code.instructions[0].insn as InvokeCustomInstruction
+        assertFalse(ic.renderable, "an invoke-custom with extra bootstrap args must bail (not faithfully rendered)")
     }
 
     @Test

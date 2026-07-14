@@ -15,6 +15,7 @@ import com.jadxmp.ir.insn.FieldRef
 import com.jadxmp.ir.insn.FillArrayInstruction
 import com.jadxmp.ir.insn.IfInstruction
 import com.jadxmp.ir.insn.Instruction
+import com.jadxmp.ir.insn.InvokeCustomInstruction
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
@@ -83,11 +84,19 @@ class MethodDecoder(
                     decoded.add(di)
                     // Track invoke/filled-new-array so a following move-result can be folded in.
                     val insn = di.insn
-                    pending = when (insn.opcode) {
+                    val p = when (insn.opcode) {
                         IrOpcode.INVOKE, IrOpcode.FILLED_NEW_ARRAY -> insn
                         else -> null
                     }
-                    pendingType = if (pending != null) resultTypeOf(input, opcode) else IrType.UNKNOWN
+                    pending = p
+                    // A decoded invoke-custom already carries its call-site proto return type; use it
+                    // directly (re-reading the call site would be wasteful). Everything else derives the
+                    // folded move-result type from the method/type index.
+                    pendingType = when {
+                        p == null -> IrType.UNKNOWN
+                        p is InvokeCustomInstruction -> p.protoReturnType
+                        else -> resultTypeOf(input, opcode)
+                    }
                 }
             }
         }
@@ -363,9 +372,69 @@ class MethodDecoder(
         type = Descriptors.parseType(ref.type),
     )
 
+    /**
+     * Decode a raw `invoke-custom`. The DEX call site is a `[bootstrapHandle, name, proto, ...extra]`
+     * array (mirrors jadx `CustomRawCall`): the handle resolves the bootstrap method, `name`/`proto` are
+     * the invokedynamic call-site name and signature. The runtime register arguments become the
+     * instruction operands (typed by the proto params) so data flow / SSA see them; the folded
+     * `move-result` is later typed with the proto return type.
+     *
+     * When the shape is one we cannot faithfully render (a field handle, a non-static bootstrap, or
+     * extra bootstrap arguments), we still build a data-flow-preserving [InvokeCustomInstruction] but
+     * mark it `renderable = false` so codegen bails honestly (rule 4). A call site that cannot even be
+     * split into handle/name/proto falls back to a bare register-preserving `INVOKE`.
+     */
     private fun invokeCustom(input: InputInstruction): Instruction {
-        // No resolvable MethodRef for invoke-custom; keep the data-flow (all argument registers) with
-        // best-effort object hints so nothing is lost, and let a following move-result attach a result.
+        val values = input.indexAsCallSite().values
+        val handle = values.getOrNull(0)?.value as? com.jadxmp.input.MethodHandle
+        val name = values.getOrNull(1)?.value as? String
+        val proto = values.getOrNull(2)?.value as? com.jadxmp.input.MethodProto
+        val handleMethod = handle?.methodRef
+        if (handle == null || name == null || proto == null || handle.type.isField || handleMethod == null) {
+            return bareInvokeCustom(input)
+        }
+        val bootstrapKind = invokeKindForHandle(handle.type)
+        val protoReturnType = Descriptors.parseType(proto.returnType)
+        val protoParamTypes = proto.parameterTypes.map { Descriptors.parseType(it) }
+        // Runtime register arguments, one per proto parameter (wide params advance two register slots),
+        // typed by the proto so type inference resolves them.
+        val args = ArrayList<Operand>(input.registerCount)
+        var regIdx = 0
+        for (pt in protoParamTypes) {
+            if (regIdx >= input.registerCount) break
+            args.add(RegisterOperand(input.register(regIdx), pt))
+            regIdx += Descriptors.slotsOf(pt)
+        }
+        // Faithfully renderable only for a static bootstrap with no extra call-site arguments.
+        val renderable = bootstrapKind == InvokeKind.STATIC && values.size == 3
+        return InvokeCustomInstruction(
+            bootstrapMethod = toMethodRef(handleMethod),
+            bootstrapKind = bootstrapKind ?: InvokeKind.STATIC,
+            callSiteName = name,
+            protoReturnType = protoReturnType,
+            protoParamTypes = protoParamTypes,
+            renderable = renderable,
+            result = null,
+            args = args,
+        )
+    }
+
+    /** Map a DEX method-handle kind to the invoke kind of the bootstrap call, or null for field kinds. */
+    private fun invokeKindForHandle(type: com.jadxmp.input.MethodHandleType): InvokeKind? = when (type) {
+        com.jadxmp.input.MethodHandleType.INVOKE_STATIC -> InvokeKind.STATIC
+        com.jadxmp.input.MethodHandleType.INVOKE_INSTANCE -> InvokeKind.VIRTUAL
+        com.jadxmp.input.MethodHandleType.INVOKE_DIRECT -> InvokeKind.DIRECT
+        com.jadxmp.input.MethodHandleType.INVOKE_CONSTRUCTOR -> InvokeKind.DIRECT
+        com.jadxmp.input.MethodHandleType.INVOKE_INTERFACE -> InvokeKind.INTERFACE
+        else -> null // field-accessor handles: no method call
+    }
+
+    /**
+     * A last-resort invoke-custom placeholder when the call site cannot be split into a bootstrap
+     * handle + name + proto: keep the data-flow (all argument registers) so nothing is lost, and let a
+     * following move-result attach a result. Codegen emits a visible marker rather than guessing.
+     */
+    private fun bareInvokeCustom(input: InputInstruction): Instruction {
         val args = ArrayList<Operand>(input.registerCount)
         for (i in 0 until input.registerCount) args.add(RegisterOperand(input.register(i), IrType.UNKNOWN))
         return Instruction(IrOpcode.INVOKE, result = null, args = args)

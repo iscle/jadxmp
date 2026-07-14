@@ -4,11 +4,13 @@ import com.jadxmp.input.CallSite
 import com.jadxmp.input.CatchHandler
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.DebugInfo
+import com.jadxmp.input.EncodedValue
 import com.jadxmp.input.FieldRef
 import com.jadxmp.input.IndexType
 import com.jadxmp.input.Instruction
 import com.jadxmp.input.InstructionPayload
 import com.jadxmp.input.MethodHandle
+import com.jadxmp.input.MethodHandleType
 import com.jadxmp.input.MethodProto
 import com.jadxmp.input.MethodRef
 import com.jadxmp.input.Opcode
@@ -35,6 +37,22 @@ data class FakeMethodRef(
     override val parameterTypes: List<String>,
 ) : MethodRef
 
+/** Method-proto test double (a call-site signature). */
+data class FakeMethodProto(
+    override val returnType: String,
+    override val parameterTypes: List<String>,
+) : MethodProto
+
+/** Method-handle test double (a bootstrap handle pointing at [methodRef]). */
+data class FakeMethodHandle(
+    override val type: MethodHandleType,
+    override val fieldRef: FieldRef? = null,
+    override val methodRef: MethodRef? = null,
+) : MethodHandle
+
+/** Call-site test double for invoke-custom (the decoded bootstrap-argument array). */
+data class FakeCallSite(override val values: List<EncodedValue>) : CallSite
+
 /** A single normalized instruction spec. Fields mirror the [Instruction] accessors used by decode. */
 class Insn(
     val opcode: Opcode,
@@ -47,6 +65,7 @@ class Insn(
     val typeValue: String? = null,
     val fieldRef: FieldRef? = null,
     val methodRef: MethodRef? = null,
+    val callSite: CallSite? = null,
     val payload: InstructionPayload? = null,
 )
 
@@ -100,7 +119,7 @@ class FakeCodeReader(
         override fun indexAsField(): FieldRef = spec.fieldRef!!
         override fun indexAsMethod(): MethodRef = spec.methodRef!!
         override fun indexAsProto(protoIndex: Int): MethodProto = error("unused")
-        override fun indexAsCallSite(): CallSite = error("unused")
+        override fun indexAsCallSite(): CallSite = spec.callSite!!
         override fun indexAsMethodHandle(): MethodHandle = error("unused")
         override val payload: InstructionPayload? get() = spec.payload
     }

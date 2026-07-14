@@ -16,6 +16,7 @@ import com.jadxmp.ir.insn.FieldRef
 import com.jadxmp.ir.insn.IfInstruction
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.insn.InstructionOperand
+import com.jadxmp.ir.insn.InvokeCustomInstruction
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
@@ -1127,6 +1128,10 @@ internal class MethodBodyWriter(
     }
 
     private fun emitInvoke(insn: Instruction) {
+        if (insn is InvokeCustomInstruction) {
+            emitInvokeCustom(insn, KotlinPrec.LOWEST)
+            return
+        }
         val invoke = insn as? InvokeInstruction
         if (invoke == null) {
             emitUnknownExpr(insn)
@@ -1172,6 +1177,92 @@ internal class MethodBodyWriter(
         code.add(KotlinIdentifiers.sanitize(target.name))
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1)
     }
+
+    /**
+     * Render a raw `invoke-custom` as a polymorphic-style call through the resolved bootstrap, adapted
+     * to Kotlin syntax (postfix `as` cast, `X::class.java` class literals):
+     * `bootstrap(MethodHandles.lookup(), "<name>", MethodType.methodType(<Ret>::class.java, <P>.TYPE, …))
+     * .dynamicInvoker().invoke(<args>) as <Ret> /* invoke-custom */`.
+     * A non-renderable shape (marked in decode) bails to an error marker (rule 4).
+     */
+    private fun emitInvokeCustom(insn: InvokeCustomInstruction, minPrec: Int) {
+        if (!insn.renderable) {
+            code.emitErrorMarker(method, "unsupported invoke-custom (field/non-static handle or extra bootstrap args)")
+            return
+        }
+        val returnType = insn.protoReturnType
+        val body = {
+            emitBootstrapCall(insn)
+            code.add(".dynamicInvoker().invoke")
+            emitArgList(insn, 0)
+            if (returnType != IrType.VOID) {
+                code.add(" as ")
+                emitTypeRef(returnType)
+            }
+            code.add(" /* invoke-custom */")
+        }
+        if (returnType != IrType.VOID) wrapped(KotlinPrec.AS, minPrec) { body() } else body()
+    }
+
+    /**
+     * `bootstrap(MethodHandles.lookup(), "<name>", MethodType.methodType(<Ret>::class.java, <P>.TYPE, …))`.
+     * A same-class static bootstrap omits the class qualifier.
+     */
+    private fun emitBootstrapCall(insn: InvokeCustomInstruction) {
+        val boot = insn.bootstrapMethod
+        if ((boot.declaringType as? IrType.Object)?.className != method.declaringClass.fullName) {
+            emitClassName(boot.declaringType)
+            code.add(".")
+        }
+        code.attachReference(MethodNodeRef(className(boot.declaringType), boot.name, boot.paramTypes.map { it.toString() }))
+        code.add(KotlinIdentifiers.sanitize(boot.name))
+        code.add("(")
+        emitClassName(METHOD_HANDLES_TYPE)
+        code.add(".lookup(), ")
+        code.add(KotlinLiterals.stringLiteral(insn.callSiteName))
+        code.add(", ")
+        emitMethodType(insn.protoReturnType, insn.protoParamTypes)
+        code.add(")")
+    }
+
+    /** `MethodType.methodType(<Ret token>, <param tokens…>)`. */
+    private fun emitMethodType(returnType: IrType, paramTypes: List<IrType>) {
+        emitClassName(METHOD_TYPE_TYPE)
+        code.add(".methodType(")
+        emitTypeToken(returnType)
+        for (p in paramTypes) {
+            code.add(", ")
+            emitTypeToken(p)
+        }
+        code.add(")")
+    }
+
+    /** A `Class` token: a primitive as `<Boxed>.TYPE`, a reference as `<Type>::class.java`. */
+    private fun emitTypeToken(type: IrType) {
+        if (type is IrType.Primitive) {
+            emitClassName(boxedType(type.kind))
+            code.add(".TYPE")
+        } else {
+            emitClassName(type)
+            code.add("::class.java")
+        }
+    }
+
+    /** The boxed wrapper type whose `.TYPE` field names a primitive's `Class`. */
+    private fun boxedType(kind: TypeKind): IrType = IrType.objectType(
+        when (kind) {
+            TypeKind.BOOLEAN -> "java.lang.Boolean"
+            TypeKind.CHAR -> "java.lang.Character"
+            TypeKind.BYTE -> "java.lang.Byte"
+            TypeKind.SHORT -> "java.lang.Short"
+            TypeKind.INT -> "java.lang.Integer"
+            TypeKind.FLOAT -> "java.lang.Float"
+            TypeKind.LONG -> "java.lang.Long"
+            TypeKind.DOUBLE -> "java.lang.Double"
+            TypeKind.VOID -> "java.lang.Void"
+            TypeKind.OBJECT, TypeKind.ARRAY -> IrType.OBJECT_CLASS
+        },
+    )
 
     private fun emitArgList(insn: Instruction, firstArgIndex: Int) {
         code.add("(")
@@ -1408,6 +1499,10 @@ internal class MethodBodyWriter(
 
     private companion object {
         const val CLASS_INIT_NAME = "<clinit>"
+
+        /** `java.lang.invoke` support types synthesized for an invoke-custom call site. */
+        val METHOD_HANDLES_TYPE = IrType.objectType("java.lang.invoke.MethodHandles")
+        val METHOD_TYPE_TYPE = IrType.objectType("java.lang.invoke.MethodType")
 
         /** The only supertypes an array is assignable to; a named class outside this set can't hold one. */
         val ARRAY_SUPERTYPE_CLASSES = setOf(

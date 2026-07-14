@@ -18,6 +18,7 @@ import com.jadxmp.ir.insn.FillArrayInstruction
 import com.jadxmp.ir.insn.IfInstruction
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.insn.InstructionOperand
+import com.jadxmp.ir.insn.InvokeCustomInstruction
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
@@ -981,8 +982,13 @@ internal class MethodBodyWriter(
     }
 
     private fun emitInvoke(insn: Instruction, minPrec: Int) {
-        // invoke-custom (invokedynamic) and any unresolved invoke arrive as a bare Instruction(INVOKE),
-        // not an InvokeInstruction — keep the data-flow visible with a marker rather than guessing.
+        // A raw invoke-custom (invokedynamic) has its own polymorphic-style rendering.
+        if (insn is InvokeCustomInstruction) {
+            emitInvokeCustom(insn, minPrec)
+            return
+        }
+        // An unresolved invoke arrives as a bare Instruction(INVOKE), not an InvokeInstruction —
+        // keep the data-flow visible with a marker rather than guessing.
         val invoke = insn as? InvokeInstruction
         if (invoke == null) {
             emitUnknownExpr(insn)
@@ -1038,6 +1044,82 @@ internal class MethodBodyWriter(
         code.add(methodCallName(method))
         // Instance forms carry the receiver as arg 0; skip it when listing the actual arguments.
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1, method.paramTypes)
+    }
+
+    /**
+     * Render a raw `invoke-custom` as jadx does — a polymorphic-style call through the resolved
+     * bootstrap:
+     * `(<Ret>) bootstrap(MethodHandles.lookup(), "<name>",
+     * MethodType.methodType(<Ret>.class, <P>.TYPE, …)).dynamicInvoker().invoke(<args>) /* invoke-custom */`.
+     * A shape we cannot spell faithfully (marked non-renderable in decode) bails to a marker (rule 4).
+     */
+    private fun emitInvokeCustom(insn: InvokeCustomInstruction, minPrec: Int) {
+        if (!insn.renderable) {
+            code.emitErrorMarker(method, "unsupported invoke-custom (field/non-static handle or extra bootstrap args)")
+            return
+        }
+        val returnType = insn.protoReturnType
+        val body = {
+            if (returnType != IrType.VOID) {
+                code.add("(")
+                emitTypeRef(returnType)
+                code.add(") ")
+            }
+            emitBootstrapCall(insn)
+            code.add(".dynamicInvoker().invoke")
+            // The runtime register args, coerced to the proto parameter types (as jadx does).
+            emitArgList(insn, 0, insn.protoParamTypes)
+            code.add(" /* invoke-custom */")
+        }
+        // A leading cast makes the whole thing a unary-precedence expression; without it, the postfix
+        // call chain binds tighter than any operator, so no extra parentheses are needed.
+        if (returnType != IrType.VOID) wrapped(Prec.UNARY, minPrec) { body() } else body()
+    }
+
+    /**
+     * The bootstrap invocation with its synthesized compile-time arguments:
+     * `bootstrap(MethodHandles.lookup(), "<name>", MethodType.methodType(<Ret>.class, <P>.TYPE, …))`.
+     * A same-class static bootstrap omits the class qualifier (matches jadx).
+     */
+    private fun emitBootstrapCall(insn: InvokeCustomInstruction) {
+        val boot = insn.bootstrapMethod
+        val enclosing = method.declaringClass.fullName
+        if ((boot.declaringType as? IrType.Object)?.className != enclosing) {
+            emitTypeRef(boot.declaringType)
+            code.add(".")
+        }
+        code.attachReference(MethodNodeRef(className(boot.declaringType), boot.name, boot.paramTypes.map { it.toString() }))
+        code.add(methodCallName(boot))
+        code.add("(")
+        emitTypeRef(METHOD_HANDLES_TYPE)
+        code.add(".lookup(), ")
+        code.add(JavaLiterals.stringLiteral(insn.callSiteName))
+        code.add(", ")
+        emitMethodType(insn.protoReturnType, insn.protoParamTypes)
+        code.add(")")
+    }
+
+    /** `MethodType.methodType(<Ret token>, <param tokens…>)` — the call-site signature literal. */
+    private fun emitMethodType(returnType: IrType, paramTypes: List<IrType>) {
+        emitTypeRef(METHOD_TYPE_TYPE)
+        code.add(".methodType(")
+        emitTypeToken(returnType)
+        for (p in paramTypes) {
+            code.add(", ")
+            emitTypeToken(p)
+        }
+        code.add(")")
+    }
+
+    /** A `Class` token as jadx spells it: a primitive as `<Boxed>.TYPE`, a reference as `<Type>.class`. */
+    private fun emitTypeToken(type: IrType) {
+        if (type is IrType.Primitive) {
+            emitTypeRef(boxedType(type.kind))
+            code.add(".TYPE")
+        } else {
+            emitTypeRef(type)
+            code.add(".class")
+        }
     }
 
     /**
@@ -1340,9 +1422,29 @@ internal class MethodBodyWriter(
         else -> null
     }
 
+    /** The boxed wrapper type whose `.TYPE` field names a primitive's `Class` (jadx's spelling). */
+    private fun boxedType(kind: TypeKind): IrType = IrType.objectType(
+        when (kind) {
+            TypeKind.BOOLEAN -> "java.lang.Boolean"
+            TypeKind.CHAR -> "java.lang.Character"
+            TypeKind.BYTE -> "java.lang.Byte"
+            TypeKind.SHORT -> "java.lang.Short"
+            TypeKind.INT -> "java.lang.Integer"
+            TypeKind.FLOAT -> "java.lang.Float"
+            TypeKind.LONG -> "java.lang.Long"
+            TypeKind.DOUBLE -> "java.lang.Double"
+            TypeKind.VOID -> "java.lang.Void"
+            TypeKind.OBJECT, TypeKind.ARRAY -> IrType.OBJECT_CLASS
+        },
+    )
+
     private companion object {
         /** The JVM static initializer name; its body renders as a `static { … }` block. */
         const val CLASS_INIT_NAME = "<clinit>"
+
+        /** `java.lang.invoke` support types synthesized for an invoke-custom call site. */
+        val METHOD_HANDLES_TYPE = IrType.objectType("java.lang.invoke.MethodHandles")
+        val METHOD_TYPE_TYPE = IrType.objectType("java.lang.invoke.MethodType")
 
         /** The only supertypes an array is assignable to; a named class outside this set can't hold one. */
         val ARRAY_SUPERTYPE_CLASSES = setOf(
