@@ -1515,8 +1515,12 @@ internal class RegionMaker(
         val handlerRegion = handlerRegionBlocks(handler)
         if (!isMonitorRelease(handlerRegion, lock)) throw Bail("cleanup handler is not a pure monitor release")
 
-        val protectedBlocks = collectProtectedRegion(head, handlerSet)
+        val protectedBlocks = HashSet(collectProtectedRegion(head, handlerSet))
         if (protectedBlocks.any { it in handlerRegion }) throw Bail("cleanup handler overlaps the body")
+        // Pull in blocks the compiler emitted OUTSIDE the try range that nonetheless execute under the lock
+        // (they flow back into an in-body `monitor-exit; return`). Without this the sync body's "follow"
+        // would re-enter the body and double-place — the TestSynchronized4 chain-in-lock shape.
+        pullLockInternalTails(head, protectedBlocks, handlerRegion)
 
         val exits = LinkedHashSet<BasicBlock>()
         for (b in protectedBlocks) {
@@ -1548,6 +1552,59 @@ internal class RegionMaker(
 
         consumedMonitorEnters.add(monitorEnter)
         return BuiltSync(SyncRegion(lock, body), follow)
+    }
+
+    /**
+     * Pull **lock-internal tail** blocks into the synchronized [body]: blocks the compiler emitted OUTSIDE
+     * the try range (so [collectProtectedRegion] misses them) that nonetheless execute while the lock is
+     * held, because control both enters and leaves them entirely within the still-locked region. javac may
+     * place such a block (e.g. `cond: v = 0; goto sharedReturn`) after the cleanup handler, yet it belongs
+     * inside `synchronized {}` — it flows back into an in-body `monitor-exit; return`. Without pulling it in,
+     * [makeSync] sees it as a *follow* that re-enters the body, which double-places and bails (the
+     * TestSynchronized4 chain-in-lock shape).
+     *
+     * A block `x` joins ONLY when it PROVABLY runs under the lock and its out-of-try status is vacuous
+     * (rule 4 — a mis-pulled block would wrongly render inside the critical section):
+     *  - [head] dominates `x` — `x` lives under the sync head, never pre-lock code;
+     *  - `x` touches NO monitor (neither acquires nor releases — its position w.r.t. the single lock is
+     *    fixed by its neighbours, not a release point);
+     *  - every clean predecessor AND every clean successor of `x` is already inside the lock set — `x` is
+     *    fully interior. You cannot reach a monitor region's interior without holding its lock, and `x`
+     *    never escapes to the method exit on an (unlocked) return path, so `x` executes locked;
+     *  - `x` cannot throw — so the exception edge it LACKS (being outside the try) is vacuous: rendering it
+     *    inside `synchronized {}`, whose auto-unlock would fire on a throw the bytecode's handler does not
+     *    catch, changes nothing because `x` never throws.
+     * Anything else stays a follow (or bails). Over-rejection is safe; these clauses are exactly what a
+     * block that runs *unlocked* (reached after a `monitor-exit`, or exiting to the method exit) fails.
+     */
+    private fun pullLockInternalTails(
+        head: BasicBlock,
+        body: MutableSet<BasicBlock>,
+        handlerRegion: Set<BasicBlock>,
+    ) {
+        var changed = true
+        while (changed) {
+            cancellation.ensureActive()
+            changed = false
+            for (x in method.blocks) {
+                if (x in body || x === exit || x === entry || x in handlerRegion) continue
+                if (head.id !in x.dominators) continue // must live strictly under the sync head
+                if (x.instructions.any {
+                        it.opcode == IrOpcode.MONITOR_ENTER || it.opcode == IrOpcode.MONITOR_EXIT
+                    }
+                ) {
+                    continue // a block that itself (un)locks fixes its own lock state — not a neutral tail
+                }
+                if (x.instructions.any { mayThrow(it) }) continue // its missing try-protection must be vacuous
+                val preds = cleanPreds(x)
+                val succs = cleanSucc(x)
+                if (preds.isEmpty() || succs.isEmpty()) continue
+                if (preds.any { it !in body }) continue // entered only from inside the still-locked region
+                if (succs.any { it !in body }) continue // flows back into the lock; never escapes to the exit
+                body.add(x)
+                changed = true
+            }
+        }
     }
 
     /** A handler's own region: blocks reachable from its entry over clean flow and dominated by it. */

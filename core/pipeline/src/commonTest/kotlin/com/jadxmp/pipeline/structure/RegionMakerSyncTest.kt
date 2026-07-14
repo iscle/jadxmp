@@ -298,14 +298,19 @@ class RegionMakerSyncTest {
     }
 
     @Test
-    fun multiExitSyncWithSharedInBodyReturnMergeBailsHonestly() {
-        // The TestSynchronized4 shape: TWO paths converge on a SHARED in-body `monitor-exit; return` block
-        // (`goto_1d`), reached both by fall-through and via a `goto` from another arm. That shared block is
-        // PROTECTED (inside the critical section) and contains a monitor-exit (which may throw), so it
-        // cannot be duplicated into each arm — and structuring it as a single-follow would misplace the
-        // second exit. There is no single-follow proof here, so structuring must BAIL honestly (region
-        // stays null) rather than emit a synchronized whose auto-unlock doesn't match the bytecode's paths
-        // (rule 4). This locks in the shared-merge honest bail.
+    fun multiExitSyncWithSharedInBodyReturnMergeStructuresAsChainInLock() {
+        // The TestSynchronized4 shape: a diamond CHAIN inside `synchronized {}`. TWO paths converge on a
+        // SHARED in-body `monitor-exit; return` block (`goto_1d`), reached both by fall-through and via a
+        // `goto` from another arm (`cond_22`). The compiler emitted `cond_22` (offset 12) AFTER the cleanup
+        // handler, so it is OUTSIDE the try range — yet it flows straight back into the in-body shared
+        // return, so it runs under the lock. [pullLockInternalTails] pulls that provably lock-internal,
+        // non-throwing, monitor-free tail into the sync body; the shared block then structures as the merge
+        // of its diamond (owned once), and the whole chain structures inside one SyncRegion. This is the
+        // reference `synchronized (obj) { if (isZero(i)) return call(...); ...; return getField() == null; }`.
+        //
+        // (Previously this asserted an HONEST BAIL — `pullLockInternalTails` did not exist, so `cond_22` was
+        // seen as a follow that re-enters the body, double-placing the shared return and bailing. The pull
+        // makes the shape provably structurable, so the assertion is updated from bail to correct structure.)
         val reader = FakeCodeReader(
             3, // v0 = lock, v1 = exc, v2 = boolean param
             listOf(
@@ -321,15 +326,39 @@ class RegionMakerSyncTest {
                 Insn(Opcode.MOVE_EXCEPTION, 9, intArrayOf(1)), // handler = 9
                 Insn(Opcode.MONITOR_EXIT, 10, intArrayOf(0)), // try_end after this
                 Insn(Opcode.THROW, 11, intArrayOf(1)),
-                Insn(Opcode.GOTO, 12, target = 7), // cond_22 → the SHARED in-body return block
+                Insn(Opcode.GOTO, 12, target = 7), // cond_22 → the SHARED in-body return block (lock-internal tail)
             ),
             tries = listOf(FakeTryBlock(3, 10, FakeCatchHandler(emptyList(), emptyList(), 9))),
         )
         val method = TestPipeline.buildMethod(reader, methodName = "sync", argTypes = listOf(IrType.BOOLEAN), isStatic = true)
         TestPipeline.structured(method)
-        assertNull(
-            method.region,
-            "a shared in-body return merge inside the lock has no single-follow proof — it must bail, not miscompile",
+
+        // Fully structured (region != null ⇒ every honesty net passed: no double placement of the shared
+        // return, total block+edge coverage, every monitor consumed).
+        assertEquals(
+            true,
+            method[PipelineAttrs.FULLY_STRUCTURED],
+            "the chain-in-lock (shared in-body return merge) must structure, not bail",
+        )
+        val sync = firstSync(method)
+        assertNotNull(sync, "the whole chain is wrapped in one SyncRegion")
+
+        // The lock-internal tail `cond_22` (the goto at offset 12) is emitted INSIDE the synchronized body,
+        // not dropped and not left as an external follow.
+        val bodyBlocks = HashSet<BasicBlock>().also { blocksInTree(sync.body, it) }
+        val condTail = method.blocks.first { b -> b.instructions.any { it.offset == 12 } }
+        assertTrue(condTail in bodyBlocks, "the lock-internal tail renders inside the lock")
+
+        // Monitor balance / no leak: the synthetic release catch-all is consumed (no re-throw emitted, its
+        // handler block not in the tree) — the lock releases via `synchronized {}` on every path.
+        val allTree = HashSet<BasicBlock>().also { blocksInTree(method.region, it) }
+        assertTrue(
+            allTree.none { b -> b.instructions.any { it.opcode == IrOpcode.THROW } },
+            "the cleanup handler's re-throw is not emitted",
+        )
+        assertTrue(
+            allTree.none { b -> b.contains(PipelineAttrs.EXC_HANDLER) },
+            "the synthetic release handler is consumed, not in the tree",
         )
     }
 
