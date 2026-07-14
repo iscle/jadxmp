@@ -23,15 +23,21 @@ import com.jadxmp.ir.type.IrType
  * `static final` constant fields; a synthetic `$VALUES` array field; synthetic `values()` /
  * `valueOf(String)` methods; a `<clinit>` that does `A = new X("A", 0); … ; $VALUES = new X[]{A,…}`;
  * and a private `X(String name, int ordinal, …)` constructor. This analyzer recovers, from that shape:
- *  - the enum constants in **ordinal order** (the order their stores appear in `<clinit>`),
+ *  - **every** constant in **ordinal order** — including field-less "fake" constants (a construction
+ *    present in `$VALUES` with no backing static field, seen under obfuscation) — where the order comes
+ *    from the `$VALUES` array (jadx's authority), required to be a bijection onto `{0..N-1}`,
+ *  - each constant's **name from its STRING-ARG** (the ctor's first arg), NOT the possibly-obfuscated
+ *    backing-field name (jadx names by the string arg and renames the field),
  *  - each constant's real constructor arguments (with the synthetic leading `name`/`ordinal` stripped),
- *  - the synthetic members to hide (`$VALUES`, `values()`, `valueOf(String)`),
+ *  - the synthetic members to hide (`$VALUES`, `values()`, `valueOf(String)`, the `$values()` builder),
  *  - the `<clinit>` enum-construction instructions to suppress (and whether the residual is empty),
  *  - the constructor's synthetic-arg count and its `super(name, ordinal)` call to drop.
  *
- * Returns `null` whenever the class is not a confidently-reconstructable enum (a non-enum, a missing
- * `$VALUES`, an unlocatable constant, or inline/anonymous constants we can't map to a field). In that
- * case the caller leaves the class untouched rather than emit a wrong enum (CLAUDE rule 4).
+ * Returns `null` whenever the class is not a confidently-reconstructable enum: a non-enum, a missing
+ * `$VALUES`, a construction whose string-name/ordinal/backing-field can't be recovered, a `$VALUES`
+ * array that isn't a clean `{0..N-1}` bijection over the constructions, or a string-renamed constant
+ * field still referenced by surviving code. In that case the caller leaves the class untouched rather
+ * than emit a wrong enum (CLAUDE rule 4).
  */
 internal class EnumReconstruction private constructor(
     val constants: List<EnumConstant>,
@@ -43,10 +49,11 @@ internal class EnumReconstruction private constructor(
     val suppressedClinitInsns: Set<Instruction>,
     val fixedClassFlags: Int,
     /**
-     * Each enum constant's (suppressed) constructor-result SSA value → that constant's field. A residual
-     * `<clinit>` statement that reads such a value (e.g. an alias `MAX = <the constructor result>`)
-     * renders as the constant's simple name; the constant is initialized before the static block runs, so
-     * the substitution is always faithful. Passed through to the residual-block [MethodBodyWriter].
+     * Each enum constant's (suppressed) constructor-result SSA value → a [FieldRef] bearing that
+     * constant's (string-arg) NAME. A residual `<clinit>` statement that reads such a value (e.g. an alias
+     * `MAX = <the constructor result>`) renders as the constant's simple name; the constant is initialized
+     * before the static block runs, so the substitution is always faithful. Passed through to the
+     * residual-block [MethodBodyWriter].
      */
     val constantResultFields: Map<SsaValue, FieldRef>,
     /**
@@ -74,10 +81,19 @@ internal class EnumReconstruction private constructor(
     val renamedMethods: Map<IrMethod, String>,
 ) {
     /**
-     * One reconstructed constant: its backing [field], the real (stripped) constructor [args], and the
-     * declared types of those args ([argParamTypes], for overload-pinning `null` casts at emit time).
+     * One reconstructed constant. [name] is the Java constant name — the (sanitized) STRING-ARG passed to
+     * the constructor, NOT the (possibly obfuscated) backing field name (jadx names by the string arg).
+     * [field] is the backing `ACC_ENUM` static field, or `null` for a **fake** constant: a construction
+     * present in `<clinit>` / `$VALUES` with no backing field (obfuscation that kept the ordinal live but
+     * dropped the field). [args] are the real (synthetic-`name`/`ordinal`-stripped) constructor arguments
+     * and [argParamTypes] their declared parameter types (for overload-pinning `null` casts at emit time).
      */
-    class EnumConstant(val field: IrField, val args: List<Operand>, val argParamTypes: List<IrType>)
+    class EnumConstant(
+        val name: String,
+        val field: IrField?,
+        val args: List<Operand>,
+        val argParamTypes: List<IrType>,
+    )
 
     companion object {
         private const val ENUM_CLASS = "java.lang.Enum"
@@ -115,59 +131,34 @@ internal class EnumReconstruction private constructor(
 
             val statements = clinit?.let { flatten(it) } ?: emptyList()
 
-            // Locate each constant's construction, in <clinit> statement order.
-            val orderedConstants = ArrayList<EnumConstant>()
-            val ordinals = ArrayList<Int?>()
-            val locatedFields = HashSet<IrField>()
-            val constructorInsns = ArrayList<Instruction>()
-            // A constant's constructor-result SSA → its field, so a residual alias store that reuses the
-            // construction result (`MAX = <the FIVE_SECONDS result>`) can render as the constant's name.
-            val constantResultFields = HashMap<SsaValue, FieldRef>()
-            for (stmt in statements) {
-                if (stmt.opcode != IrOpcode.STATIC_PUT) continue
-                val fieldRef = (stmt as? com.jadxmp.ir.insn.FieldInstruction)?.fieldRef ?: continue
-                val field = enumConstantFields.firstOrNull {
-                    it.name == fieldRef.name &&
-                        (fieldRef.declaringType as? IrType.Object)?.className == cls.fullName
-                } ?: continue
-                if (field in locatedFields) continue
-                val ctor = tracedConstructor(stmt.getArg(stmt.argCount - 1), cls.fullName) ?: continue
-                locatedFields.add(field)
-                constructorInsns.add(ctor)
-                ctor.result?.ssaValue?.let { constantResultFields[it] = FieldRef(clsType, field.name, field.type) }
-                val n = syntheticArgCount(ctor.argCount)
-                val args = if (ctor.argCount > n) (n until ctor.argCount).map { ctor.getArg(it) } else emptyList()
-                val declaredParams = (ctor as? InvokeInstruction)?.methodRef?.paramTypes.orEmpty().drop(n)
-                // The TRUE ordinal is the int literal passed as the ctor's 2nd synthetic arg (jadx uses
-                // the $VALUES array order, which coincides). Store it so a reordered/obfuscated <clinit>
-                // still emits constants in ordinal order rather than store order.
-                val ordinal = if (n >= 2 && ctor.argCount >= 2) resolveIntLiteral(ctor.getArg(1)) else null
-                orderedConstants.add(EnumConstant(field, args, declaredParams))
-                ordinals.add(ordinal)
-            }
-
-            // Every declared constant field must have been located, or we'd silently drop a constant.
-            if (locatedFields.size != enumConstantFields.size) return null
-
-            // Reorder by the recovered ordinal literal when every constant has a distinct one; otherwise
-            // keep the (stable) <clinit> store order rather than risk a wrong partial sort.
-            val sortedConstants = orderByOrdinal(orderedConstants, ordinals)
-
-            // Count enum-type constructions anywhere in <clinit> (top-level or inlined into a store); a
-            // mismatch means inline/anonymous/"fake" constants (jadx's fake-field case) that we don't
-            // reconstruct — bail rather than silently lose them (CLAUDE rule 4).
-            val allEnumCtors = countEnumConstructors(statements, cls.fullName)
-            if (allEnumCtors != orderedConstants.size) return null
+            // Recover EVERY constant — field-backed AND field-less "fake" (a construction with no backing
+            // static field: an obfuscator that kept the ordinal live in `$VALUES` but dropped the field) —
+            // in ordinal order, naming each by its STRING-ARG rather than the (possibly obfuscated) field
+            // name (jadx: EnumVisitor). Returns null on ANY ambiguity so we never drop, duplicate,
+            // mis-order, or mis-name a constant (CLAUDE rule 4).
+            val recovery = recoverConstants(cls, clsType, statements, enumConstantFields, valuesField) ?: return null
 
             val hiddenFields = setOf(valuesField)
             val (hiddenMethods, renamedMethods, syntheticValues, syntheticValueOf) =
                 classifyEnumMethods(cls, clsType, valuesField)
 
             val suppressed = if (clinit != null) {
-                computeSuppressed(statements, constructorInsns, locatedConstantStores(statements, cls), valuesField, cls)
+                computeSuppressed(
+                    statements, recovery.constructors,
+                    locatedConstantStores(statements, cls), valuesField, cls,
+                )
             } else {
                 emptySet()
             }
+
+            // A constant named by its string-arg whose backing FIELD name differs is effectively renamed
+            // (the field is hidden, the constant re-declared under the string name). A codegen-only backend
+            // cannot rewrite every reference to that now-gone field, so if any surviving (non-suppressed)
+            // read/write of it exists — here or in another class — bail to the honest raw form rather than
+            // emit a dangling reference (CLAUDE rule 4). For an un-referenced field (the common obfuscated
+            // case) the rename is invisible and safe.
+            if (renamedConstantFieldReferenced(cls, recovery.constants, suppressed)) return null
+
             // A residual (kept) `<clinit>` statement that reads a value defined by a SUPPRESSED
             // instruction would dangle — the def is gone. The ONE case we can still honor is a read of a
             // suppressed enum-constant CONSTRUCTION result (an alias `MAX = <the FIVE_SECONDS result>`):
@@ -175,7 +166,7 @@ internal class EnumReconstruction private constructor(
             // constant's simple name (see [constantResultFields]). Any OTHER suppressed-def read (a dropped
             // `$VALUES` array element, etc.) has no faithful rendering, so we bail rather than emit an
             // undefined reference (CLAUDE rule 4).
-            if (!residualIsClean(statements, suppressed, constantResultFields.keys)) return null
+            if (!residualIsClean(statements, suppressed, recovery.constantResultFields.keys)) return null
             val dropClinit = clinit != null && residualIsEmpty(statements, suppressed)
 
             // jadx fixAccessFlags: an enum declaration may not carry final/abstract/static.
@@ -183,7 +174,7 @@ internal class EnumReconstruction private constructor(
                 (JavaModifiers.FINAL or JavaModifiers.ABSTRACT or JavaModifiers.STATIC).inv()
 
             return EnumReconstruction(
-                constants = sortedConstants,
+                constants = recovery.constants,
                 enumConstantFields = enumConstantFields,
                 hiddenFields = hiddenFields,
                 hiddenMethods = hiddenMethods,
@@ -191,12 +182,281 @@ internal class EnumReconstruction private constructor(
                 dropClinit = dropClinit,
                 suppressedClinitInsns = suppressed,
                 fixedClassFlags = fixedFlags,
-                constantResultFields = constantResultFields,
+                constantResultFields = recovery.constantResultFields,
                 valuesField = valuesField,
                 syntheticValuesMethod = syntheticValues,
                 syntheticValueOfMethod = syntheticValueOf,
                 renamedMethods = renamedMethods,
             )
+        }
+
+        /**
+         * Result of [recoverConstants]: the constants in ordinal order, EVERY enum construction found in
+         * `<clinit>` (field-backed + fake — for suppression), and the construction-result → constant-name
+         * alias map for residual-block rewrites.
+         */
+        private class Recovery(
+            val constants: List<EnumConstant>,
+            val constructors: List<Instruction>,
+            val constantResultFields: Map<SsaValue, FieldRef>,
+        )
+
+        /**
+         * Recover the enum's constants — field-backed AND field-less "fake" — in ordinal order, PROVABLY:
+         *  1. collect every enum-type construction in `<clinit>` (top-level or inlined),
+         *  2. map each construction to its backing field via the `STATIC_PUT` that stores its result,
+         *  3. derive the ordinal ORDER from the `$VALUES` array (jadx's authority), requiring the array to
+         *     be a bijection onto `{0..N-1}` over exactly those constructions — proving none is dropped,
+         *     duplicated, or mis-ordered,
+         *  4. name each constant by its (sanitized) string-arg, requiring distinct names,
+         *  5. require every declared constant field to back exactly one construction.
+         * Any failure returns null (the caller bails). An enum with no constructions and no constant fields
+         * is legitimately empty (recovered as zero constants).
+         */
+        private fun recoverConstants(
+            cls: IrClass,
+            clsType: IrType,
+            statements: List<Instruction>,
+            enumConstantFields: Set<IrField>,
+            valuesField: IrField,
+        ): Recovery? {
+            val allCtors = collectEnumConstructors(statements, cls.fullName)
+            if (allCtors.isEmpty()) {
+                // A declared constant field with no construction ⇒ we can't recover its args ⇒ bail.
+                if (enumConstantFields.isNotEmpty()) return null
+                return Recovery(emptyList(), emptyList(), emptyMap())
+            }
+            val allCtorSet = allCtors.toHashSet()
+
+            // Construction ↔ backing field, via the STATIC_PUT of the construction result into the field.
+            val fieldByCtor = HashMap<Instruction, IrField>()
+            for (stmt in statements) {
+                if (stmt.opcode != IrOpcode.STATIC_PUT) continue
+                val fieldRef = (stmt as? com.jadxmp.ir.insn.FieldInstruction)?.fieldRef ?: continue
+                if ((fieldRef.declaringType as? IrType.Object)?.className != cls.fullName) continue
+                val field = enumConstantFields.firstOrNull { it.name == fieldRef.name } ?: continue
+                val ctor = tracedConstructor(stmt.getArg(stmt.argCount - 1), cls.fullName) ?: continue
+                if (ctor in allCtorSet && ctor !in fieldByCtor) fieldByCtor[ctor] = field
+            }
+            // Every declared constant field must back exactly one distinct construction.
+            if (fieldByCtor.size != enumConstantFields.size) return null
+            if (fieldByCtor.values.toHashSet().size != enumConstantFields.size) return null
+            val ctorByField = fieldByCtor.entries.associate { (c, f) -> f to c }
+
+            // Ordinal order + completeness, from $VALUES (the authoritative order jadx also uses).
+            val ordered = orderFromValuesArray(statements, valuesField, cls, allCtors, allCtorSet, ctorByField, enumConstantFields)
+                ?: return null
+
+            val constants = ArrayList<EnumConstant>(ordered.size)
+            val resultFields = HashMap<SsaValue, FieldRef>()
+            val usedNames = HashSet<String>()
+            for ((index, ctor) in ordered.withIndex()) {
+                val inv = ctor as? InvokeInstruction ?: return null
+                if (ctor.argCount < 1) return null
+                val rawName = resolveStringLiteral(ctor.getArg(0)) ?: return null
+                // Sanitize (as jadx does) so an illegal-identifier name still yields compilable output; a
+                // post-sanitize collision (two names collapse) is unrecoverable ⇒ bail.
+                val name = JavaIdentifiers.sanitize(rawName)
+                if (!usedNames.add(name)) return null
+                // Cross-check: when the ctor carries an explicit ordinal arg it must equal the array index.
+                if (ctor.argCount >= 2) {
+                    val ordinal = resolveIntLiteral(ctor.getArg(1))
+                    if (ordinal != null && ordinal != index) return null
+                }
+                val n = syntheticArgCount(ctor.argCount)
+                val args = if (ctor.argCount > n) (n until ctor.argCount).map { ctor.getArg(it) } else emptyList()
+                val declaredParams = inv.methodRef.paramTypes.drop(n)
+                constants.add(EnumConstant(name, fieldByCtor[ctor], args, declaredParams))
+                // Residual alias reads of this construction render as the constant's (string) name; the
+                // FieldRef carries that name so aliasForFieldRef falls through to it (no such field exists).
+                ctor.result?.ssaValue?.let { resultFields[it] = FieldRef(clsType, name, clsType) }
+            }
+            return Recovery(constants, allCtors, resultFields)
+        }
+
+        /**
+         * Derive the constants' ordinal order from the `$VALUES` array, requiring the array to fill
+         * indices `{0..N-1}` exactly once each with a distinct construction covering EXACTLY [allCtors] —
+         * a bijection. Array elements may be either the construction result directly (`aput vNew`) or an
+         * `sget` of the just-stored constant field (`aput <sget CONST>`); both resolve to the construction.
+         * The array itself is built either inline in `<clinit>` (older javac) or in a synthetic `$values()`
+         * builder method the `<clinit>` calls (modern javac/kotlinc) — [resolveArrayBuild] normalizes both.
+         * Returns the constructions in index order, or null on any gap/duplicate/unresolved element.
+         */
+        private fun orderFromValuesArray(
+            statements: List<Instruction>,
+            valuesField: IrField,
+            cls: IrClass,
+            allCtors: List<Instruction>,
+            allCtorSet: Set<Instruction>,
+            ctorByField: Map<IrField, Instruction>,
+            enumConstantFields: Set<IrField>,
+        ): List<Instruction>? {
+            val valuesStore = statements.firstOrNull { stmt ->
+                stmt.opcode == IrOpcode.STATIC_PUT &&
+                    (stmt as? com.jadxmp.ir.insn.FieldInstruction)?.let {
+                        it.fieldRef.name == valuesField.name &&
+                            (it.fieldRef.declaringType as? IrType.Object)?.className == cls.fullName
+                    } == true
+            } ?: return null
+            val storedProducer = producerOf(valuesStore.getArg(valuesStore.argCount - 1)) ?: return null
+            // Normalize to the statement list + array-producer where the elements actually live.
+            val (arrayStmts, producer) = resolveArrayBuild(storedProducer, statements, cls) ?: return null
+            val indexToCtor = HashMap<Int, Instruction>()
+            when (producer.opcode) {
+                IrOpcode.FILLED_NEW_ARRAY -> {
+                    for (i in 0 until producer.argCount) {
+                        val ctor = ctorForArrayElement(producer.getArg(i), cls, allCtorSet, ctorByField, enumConstantFields)
+                            ?: return null
+                        if (indexToCtor.put(i, ctor) != null) return null
+                    }
+                }
+                IrOpcode.NEW_ARRAY -> {
+                    val size = if (producer.argCount > 0) resolveIntLiteral(producer.getArg(0)) else null
+                    val arrayVar = producer.result?.ssaValue ?: return null
+                    for (stmt in arrayStmts) {
+                        if (stmt.opcode != IrOpcode.ARRAY_PUT || stmt.argCount < 3) continue
+                        if ((stmt.getArg(1) as? RegisterOperand)?.ssaValue != arrayVar) continue
+                        val index = resolveIntLiteral(stmt.getArg(2)) ?: return null
+                        if (index < 0) return null
+                        val ctor = ctorForArrayElement(stmt.getArg(0), cls, allCtorSet, ctorByField, enumConstantFields)
+                            ?: return null
+                        if (indexToCtor.put(index, ctor) != null) return null // duplicate index ⇒ bail
+                    }
+                    if (size != null && indexToCtor.size != size) return null
+                }
+                else -> return null
+            }
+            val n = indexToCtor.size
+            if (n != allCtors.size) return null // array must cover exactly the constructions
+            for (i in 0 until n) if (i !in indexToCtor) return null // indices must be 0..N-1
+            val ordered = (0 until n).map { indexToCtor.getValue(it) }
+            if (ordered.toHashSet().size != n) return null // distinct constructions (no duplicate)
+            if (!ordered.all { it in allCtorSet }) return null
+            return ordered
+        }
+
+        /**
+         * Normalize the `$VALUES` array-building site to `(statements, arrayProducer)`:
+         *  - **inline** (older javac): the store's value IS a `NEW_ARRAY`/`FILLED_NEW_ARRAY` in `<clinit>`
+         *    → the `<clinit>` statements and that producer.
+         *  - **`$values()` builder** (modern javac/kotlinc): the store's value is the RESULT of an invoke
+         *    of a synthetic static array-builder → that method's body statements and the array it returns.
+         * Returns null when the value is neither shape (e.g. an unrecognized producer) so the caller bails.
+         */
+        private fun resolveArrayBuild(
+            producer: Instruction,
+            statements: List<Instruction>,
+            cls: IrClass,
+        ): Pair<List<Instruction>, Instruction>? {
+            when (producer.opcode) {
+                IrOpcode.NEW_ARRAY, IrOpcode.FILLED_NEW_ARRAY -> return statements to producer
+                IrOpcode.INVOKE -> {
+                    val inv = producer as? InvokeInstruction ?: return null
+                    if (inv.invokeKind != com.jadxmp.ir.insn.InvokeKind.STATIC) return null
+                    if ((inv.methodRef.declaringType as? IrType.Object)?.className != cls.fullName) return null
+                    val builder = cls.methods.firstOrNull {
+                        it.name == inv.methodRef.name && it.argTypes == inv.methodRef.paramTypes &&
+                            JavaModifiers.has(it.accessFlags, JavaModifiers.STATIC)
+                    } ?: return null
+                    val builderStmts = flatten(builder)
+                    val ret = builderStmts.lastOrNull { it.opcode == IrOpcode.RETURN && it.argCount == 1 } ?: return null
+                    val arrayProducer = producerOf(ret.getArg(0)) ?: return null
+                    if (arrayProducer.opcode != IrOpcode.NEW_ARRAY && arrayProducer.opcode != IrOpcode.FILLED_NEW_ARRAY) {
+                        return null
+                    }
+                    return builderStmts to arrayProducer
+                }
+                else -> return null
+            }
+        }
+
+        /** The construction a `$VALUES` array element refers to — directly, or via an `sget` of its field. */
+        private fun ctorForArrayElement(
+            element: Operand,
+            cls: IrClass,
+            allCtorSet: Set<Instruction>,
+            ctorByField: Map<IrField, Instruction>,
+            enumConstantFields: Set<IrField>,
+        ): Instruction? {
+            tracedConstructor(element, cls.fullName)?.let { if (it in allCtorSet) return it }
+            val insn = producerOf(element) ?: return null
+            if (insn.opcode == IrOpcode.STATIC_GET) {
+                val fieldRef = (insn as? com.jadxmp.ir.insn.FieldInstruction)?.fieldRef ?: return null
+                if ((fieldRef.declaringType as? IrType.Object)?.className != cls.fullName) return null
+                val field = enumConstantFields.firstOrNull { it.name == fieldRef.name } ?: return null
+                return ctorByField[field]
+            }
+            return null
+        }
+
+        /** Every enum-type construction in [statements], including ones inlined into another instruction. */
+        private fun collectEnumConstructors(statements: List<Instruction>, enumClassName: String): List<Instruction> {
+            val out = ArrayList<Instruction>()
+            fun visit(insn: Instruction) {
+                if (isEnumConstructor(insn, enumClassName)) out.add(insn)
+                for (i in 0 until insn.argCount) {
+                    (insn.getArg(i) as? InstructionOperand)?.let { visit(it.instruction) }
+                }
+            }
+            for (stmt in statements) visit(stmt)
+            return out
+        }
+
+        /** Resolve [op] to its constant `String` value (through a register/CONST_STRING/move), or null. */
+        private fun resolveStringLiteral(op: Operand): String? = when (op) {
+            is InstructionOperand -> resolveStringLiteralInsn(op.instruction)
+            is RegisterOperand -> op.ssaValue?.assign?.parent?.let { resolveStringLiteralInsn(it) }
+            is LiteralOperand -> null
+        }
+
+        private fun resolveStringLiteralInsn(insn: Instruction): String? = when (insn.opcode) {
+            IrOpcode.CONST_STRING -> (insn as? com.jadxmp.ir.insn.ConstStringInstruction)?.value
+            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG ->
+                if (insn.argCount > 0) resolveStringLiteral(insn.getArg(0)) else null
+            else -> null
+        }
+
+        /**
+         * True if any constant renamed by its string-arg (its sanitized string name differs from its
+         * sanitized backing-field name) has a surviving reference to that field — a non-suppressed
+         * read/write, in this class or ANY other loaded class. Such a reference cannot be rewritten by a
+         * codegen-only backend, so its presence forces a bail (see [analyze]).
+         */
+        private fun renamedConstantFieldReferenced(
+            cls: IrClass,
+            constants: List<EnumConstant>,
+            suppressed: Set<Instruction>,
+        ): Boolean {
+            val renamedFieldNames = constants.mapNotNull { c ->
+                c.field?.name?.takeIf { JavaIdentifiers.sanitize(it) != c.name }
+            }.toHashSet()
+            if (renamedFieldNames.isEmpty()) return false
+            for (other in cls.root.classes) {
+                for (m in other.methods) {
+                    for (block in m.blocks) {
+                        for (insn in block.instructions) {
+                            if (insn in suppressed) continue // a suppressed <clinit> statement is dropped
+                            if (referencesEnumField(insn, cls.fullName, renamedFieldNames)) return true
+                        }
+                    }
+                }
+            }
+            return false
+        }
+
+        private fun referencesEnumField(insn: Instruction, enumClassName: String, fieldNames: Set<String>): Boolean {
+            val fieldRef = (insn as? com.jadxmp.ir.insn.FieldInstruction)?.fieldRef
+            if (fieldRef != null && fieldRef.name in fieldNames &&
+                (fieldRef.declaringType as? IrType.Object)?.className == enumClassName
+            ) {
+                return true
+            }
+            for (i in 0 until insn.argCount) {
+                val arg = insn.getArg(i)
+                if (arg is InstructionOperand && referencesEnumField(arg.instruction, enumClassName, fieldNames)) return true
+            }
+            return false
         }
 
         /** Result of [classifyEnumMethods]: which methods to hide, which to rename, and the two synthetics. */
@@ -355,20 +615,6 @@ internal class EnumReconstruction private constructor(
 
         // ---- <clinit> tracing ----
 
-        /**
-         * Reorder [constants] by their recovered [ordinals] — but only when every constant has a
-         * distinct ordinal. On any missing or duplicate ordinal we can't trust the reordering, so we
-         * keep the stable `<clinit>` store order (which coincides with ordinal order for standard
-         * javac/kotlinc output) rather than risk a wrong partial sort.
-         */
-        private fun orderByOrdinal(constants: List<EnumConstant>, ordinals: List<Int?>): List<EnumConstant> {
-            if (constants.size <= 1) return constants
-            if (ordinals.any { it == null }) return constants
-            val present = ordinals.filterNotNull()
-            if (present.toSet().size != present.size) return constants
-            return constants.indices.sortedBy { ordinals[it]!! }.map { constants[it] }
-        }
-
         /** Resolve [op] to its constant `Int` value (through a register/CONST/move), or null. */
         private fun resolveIntLiteral(op: Operand): Int? = when (op) {
             is LiteralOperand -> op.value.toInt()
@@ -401,18 +647,6 @@ internal class EnumReconstruction private constructor(
             }
         }
 
-        /** Count every enum-type constructor instruction in [statements], including inlined (nested) ones. */
-        private fun countEnumConstructors(statements: List<Instruction>, enumClassName: String): Int {
-            var count = 0
-            fun visit(insn: Instruction) {
-                if (isEnumConstructor(insn, enumClassName)) count++
-                for (i in 0 until insn.argCount) {
-                    (insn.getArg(i) as? InstructionOperand)?.let { visit(it.instruction) }
-                }
-            }
-            for (stmt in statements) visit(stmt)
-            return count
-        }
 
         private fun isEnumConstructor(insn: Instruction, enumClassName: String): Boolean {
             val inv = insn as? InvokeInstruction ?: return false

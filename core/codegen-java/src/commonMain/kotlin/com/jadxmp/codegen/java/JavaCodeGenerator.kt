@@ -232,8 +232,10 @@ class JavaCodeGenerator {
                 return
             }
             for ((i, c) in e.constants.withIndex()) {
-                code.attachDefinition(FieldNodeRef(cls.fullName, c.field.name))
-                code.add(JavaMemberAliases.aliasOf(c.field))
+                // The constant is named by its (sanitized) string-arg; the metadata ref points at the
+                // backing field's binary name when there is one (a fake constant has none — use the name).
+                code.attachDefinition(FieldNodeRef(cls.fullName, c.field?.name ?: c.name))
+                code.add(c.name)
                 if (c.args.isNotEmpty()) emitEnumConstantArgs(cls, e, c)
                 when {
                     i < e.constants.lastIndex -> code.add(",")
@@ -253,7 +255,7 @@ class JavaCodeGenerator {
                 // filled by separate puts, or a reference to another enum constant) — be honest with an
                 // inline marker rather than emit an empty array / a fabricated `new EnumType(...)` /
                 // an undefined reference (CLAUDE rule 4).
-                flagError(cls, "enum constant '${c.field.name}' constructor arguments not reconstructed", surfacedInline = true)
+                flagError(cls, "enum constant '${c.name}' constructor arguments not reconstructed", surfacedInline = true)
                 code.add(" /* JADXMP ERROR: enum constant arguments not reconstructed */")
             }
         }

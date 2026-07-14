@@ -607,6 +607,212 @@ class JavaEnumTest {
         assertTrue(code.contains("values()"), "values() cache assignment must survive")
     }
 
+    /**
+     * The jadx "fake field" shape (TestEnums10): `<clinit>` has MORE constructor calls than backing
+     * fields — some constants have NO static field — AND the field-backed ones carry OBFUSCATED names
+     * (`a0`/`a2`) while every constant is named by its STRING-ARG. `$VALUES` lists ALL constructions
+     * (fake + real) in ordinal order. The reconstruction must recover every constant exactly once, in
+     * ordinal order (from `$VALUES`, not store order), string-named, synthesizing the fake ones.
+     */
+    @Test
+    fun enumWithFakeAndObfuscatedConstantsSynthesizedInOrdinalOrder() {
+        val cls = irClass("e.Proto", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Proto")
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        // Obfuscated backing fields for ordinals 0 and 2; ordinal 1 ("MIDDLE") has NO field (fake).
+        enumField(cls, "a0", t, enumConst)
+        enumField(cls, "a2", t, enumConst)
+        enumField(cls, "value", IrType.INT, Flags.PUBLIC or Flags.FINAL)
+
+        val ctorParams = listOf(IrType.STRING, IrType.INT, IrType.INT)
+        val c0 = Ssa(0, t)
+        val c1 = Ssa(1, t) // fake — never stored into a field
+        val c2 = Ssa(2, t)
+        val arr = Ssa(3, arrT)
+        val ctor0 = ctorCall(t, ctorParams, listOf(strLit("FIRST"), intLit(0), intLit(10)), c0.def())
+        val ctor1 = ctorCall(t, ctorParams, listOf(strLit("MIDDLE"), intLit(1), intLit(20)), c1.def())
+        val ctor2 = ctorCall(t, ctorParams, listOf(strLit("LAST"), intLit(2), intLit(30)), c2.def())
+        val newArr = newArray(arrT, intLit(3), arr.def())
+        clinitOf(
+            cls,
+            // Stores are OUT of ordinal order and the fake construction has no store at all — the emitted
+            // order must come from $VALUES (index 0,1,2), never the store sequence.
+            ctor2, staticPut(fieldRef(cls, "a2", t), c2.use()),
+            ctor0, staticPut(fieldRef(cls, "a0", t), c0.use()),
+            ctor1,
+            newArr,
+            arrayPut(c0.use(), arr.use(), intLit(0)),
+            arrayPut(c1.use(), arr.use(), intLit(1)),
+            arrayPut(c2.use(), arr.use(), intLit(2)),
+            staticPut(fieldRef(cls, "\$VALUES", arrT), arr.use()),
+        )
+        // Real ctor <init>(String,int,int): super(name,ord); this.value = v.
+        cls.method("<init>", argTypes = ctorParams, accessFlags = Flags.PRIVATE) {
+            this[com.jadxmp.codegen.CodegenKeys.PARAM_NAMES] = listOf("name", "ordinal", "v")
+            val self = Local(0, t, isThis = true)
+            val name = Local(1, IrType.STRING, name = "name", isParam = true)
+            val ord = Local(2, IrType.INT, name = "ordinal", isParam = true)
+            val v = Local(3, IrType.INT, name = "v", isParam = true)
+            val superCall = InvokeInstruction(
+                MethodRef(enumSuper, MethodRef.CONSTRUCTOR_NAME, enumSuper, listOf(IrType.STRING, IrType.INT)),
+                InvokeKind.DIRECT,
+                null,
+                listOf(self.ref(), name.ref(), ord.ref()),
+            )
+            body(superCall, instancePut(self.ref(), v.ref(), fieldRef(cls, "value", IrType.INT)), ret())
+        }
+        cls.method("values", returnType = arrT, accessFlags = Flags.PUBLIC or Flags.STATIC)
+        cls.method("valueOf", returnType = t, argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC or Flags.STATIC)
+
+        val code = generate(cls)
+        assertThatCode(code)
+            .containsOne("public enum Proto {")
+            .doesNotContain("extends") // a reconstructed enum never spells `extends`
+            .containsOne("FIRST(10),")
+            .containsOne("MIDDLE(20),") // fake constant synthesized (no backing field)
+            .containsOne("LAST(30);")
+            .doesNotContain("a0") // obfuscated backing-field names hidden; string names used instead
+            .doesNotContain("a2")
+            .containsOne("public final int value;")
+        val iFirst = code.indexOf("FIRST")
+        val iMiddle = code.indexOf("MIDDLE")
+        val iLast = code.indexOf("LAST")
+        assertTrue(iFirst in 0 until iMiddle && iMiddle in (iFirst + 1) until iLast, "constants must be in ordinal order")
+    }
+
+    /**
+     * NEGATIVE: `$VALUES` omits an index (a construction is unaccounted for), so the ordinal order is not
+     * provable. Rather than risk dropping / mis-ordering a constant, reconstruction BAILS to the honest
+     * raw form (which spells `extends`) — never a half-reconstructed enum (CLAUDE rule 4).
+     */
+    @Test
+    fun enumWithIncompleteValuesArrayBails() {
+        val cls = irClass("e.Gap", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Gap")
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "a0", t, enumConst)
+        enumField(cls, "a2", t, enumConst)
+
+        val ctorParams = listOf(IrType.STRING, IrType.INT)
+        val c0 = Ssa(0, t)
+        val c1 = Ssa(1, t) // fake, in NO array slot ⇒ unaccounted
+        val c2 = Ssa(2, t)
+        val arr = Ssa(3, arrT)
+        val ctor0 = ctorCall(t, ctorParams, listOf(strLit("FIRST"), intLit(0)), c0.def())
+        val ctor1 = ctorCall(t, ctorParams, listOf(strLit("MIDDLE"), intLit(1)), c1.def())
+        val ctor2 = ctorCall(t, ctorParams, listOf(strLit("LAST"), intLit(2)), c2.def())
+        val newArr = newArray(arrT, intLit(3), arr.def())
+        clinitOf(
+            cls,
+            ctor0, staticPut(fieldRef(cls, "a0", t), c0.use()),
+            ctor1,
+            ctor2, staticPut(fieldRef(cls, "a2", t), c2.use()),
+            newArr,
+            arrayPut(c0.use(), arr.use(), intLit(0)),
+            arrayPut(c2.use(), arr.use(), intLit(2)), // index 1 missing
+            staticPut(fieldRef(cls, "\$VALUES", arrT), arr.use()),
+        )
+        syntheticEnumCtor(cls, t, ctorParams)
+
+        val code = generate(cls)
+        assertThatCode(code).containsOne("extends") // bailed to the raw form
+        assertTrue(!code.contains("FIRST(0)"), "a bailed enum must not emit a clean reconstructed constant")
+    }
+
+    /**
+     * NEGATIVE: a field-obfuscated constant (`a0` → "ONLY") whose backing field is READ by a user method.
+     * Naming the constant by its string-arg strips the field, orphaning that read; a codegen-only backend
+     * cannot rewrite the reference, so reconstruction BAILS to the honest raw form (CLAUDE rule 4).
+     */
+    @Test
+    fun renamedConstantFieldWithUserReferenceBails() {
+        val cls = irClass("e.Ref2", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Ref2")
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "a0", t, enumConst)
+
+        val c0 = Ssa(0, t)
+        val arr = Ssa(1, arrT)
+        val ctor0 = ctorCall(t, listOf(IrType.STRING, IrType.INT), listOf(strLit("ONLY"), intLit(0)), c0.def())
+        val arrInsn = filledNewArray(arrT, listOf(c0.use()), arr.def())
+        clinitOf(
+            cls,
+            ctor0, staticPut(fieldRef(cls, "a0", t), c0.use()),
+            arrInsn, staticPut(fieldRef(cls, "\$VALUES", arrT), arr.use()),
+        )
+        syntheticEnumCtor(cls, t, listOf(IrType.STRING, IrType.INT))
+        // A user method reading the obfuscated constant field — the reference the rename would orphan.
+        cls.method("get", returnType = t, accessFlags = Flags.PUBLIC or Flags.STATIC) {
+            body(ret(expr(staticGet(fieldRef(cls, "a0", t)))))
+        }
+
+        val code = generate(cls)
+        assertThatCode(code).containsOne("extends") // bailed to the raw form
+        assertTrue(code.contains("a0"), "the honest raw form keeps the field its user method references")
+    }
+
+    /**
+     * The modern javac/kotlinc shape (TestSwitchOverEnum$Count): the `$VALUES` array is NOT built inline
+     * in `<clinit>` but returned by a synthetic `$values()` builder method the `<clinit>` calls. Ordinal
+     * order must be recovered by following that call into the builder's array construction; the builder is
+     * hidden (Java regenerates it).
+     */
+    @Test
+    fun enumWithValuesBuilderMethodRecoversOrderAndHidesBuilder() {
+        val cls = irClass("e.Seq", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Seq")
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "A", t, enumConst)
+        enumField(cls, "B", t, enumConst)
+        enumField(cls, "C", t, enumConst)
+
+        // Synthetic `$values()`: new T[3]; [0]=A; [1]=B; [2]=C; return — the array order is the ordinals.
+        cls.method("\$values", returnType = arrT, accessFlags = Flags.PRIVATE or Flags.STATIC or 0x1000) {
+            val ba = Ssa(5, arrT)
+            body(
+                newArray(arrT, intLit(3), ba.def()),
+                arrayPut(expr(staticGet(fieldRef(cls, "A", t))), ba.use(), intLit(0)),
+                arrayPut(expr(staticGet(fieldRef(cls, "B", t))), ba.use(), intLit(1)),
+                arrayPut(expr(staticGet(fieldRef(cls, "C", t))), ba.use(), intLit(2)),
+                ret(ba.use()),
+            )
+        }
+
+        val a = Ssa(0, t)
+        val b = Ssa(1, t)
+        val c = Ssa(2, t)
+        val vals = Ssa(3, arrT)
+        val aCtor = ctorCall(t, listOf(IrType.STRING, IrType.INT), listOf(strLit("A"), intLit(0)), a.def())
+        val bCtor = ctorCall(t, listOf(IrType.STRING, IrType.INT), listOf(strLit("B"), intLit(1)), b.def())
+        val cCtor = ctorCall(t, listOf(IrType.STRING, IrType.INT), listOf(strLit("C"), intLit(2)), c.def())
+        val buildCall = staticInvoke(t, "\$values", arrT, emptyList(), emptyList(), vals.def())
+        clinitOf(
+            cls,
+            aCtor, staticPut(fieldRef(cls, "A", t), a.use()),
+            bCtor, staticPut(fieldRef(cls, "B", t), b.use()),
+            cCtor, staticPut(fieldRef(cls, "C", t), c.use()),
+            buildCall, staticPut(fieldRef(cls, "\$VALUES", arrT), vals.use()),
+        )
+        syntheticEnumCtor(cls, t, listOf(IrType.STRING, IrType.INT))
+        cls.method("values", returnType = arrT, accessFlags = Flags.PUBLIC or Flags.STATIC)
+        cls.method("valueOf", returnType = t, argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC or Flags.STATIC)
+
+        val code = generate(cls)
+        assertThatCode(code)
+            .containsOne("public enum Seq {")
+            .doesNotContain("extends")
+            .doesNotContain("\$values") // synthetic builder hidden
+            .doesNotContain("static {") // <clinit> fully suppressed
+        val ia = code.indexOf("A,")
+        val ib = code.indexOf("B,")
+        val ic = code.indexOf("C")
+        assertTrue(ia in 0 until ib && ib in (ia + 1) until ic, "constants must be in ordinal order A, B, C")
+    }
+
     @Test
     fun nonEnumClassUnaffected() {
         val cls = irClass("e.Plain")
