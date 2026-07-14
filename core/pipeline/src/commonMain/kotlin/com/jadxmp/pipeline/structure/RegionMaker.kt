@@ -923,20 +923,17 @@ internal class RegionMaker(
     private fun findOutBlock(condBlock: BasicBlock, thenBlock: BasicBlock, elseBlock: BasicBlock): BasicBlock? {
         val elseSet = HashSet<BasicBlock>(elseBlock.dominanceFrontier).apply { add(elseBlock) }
         val e = exit
-        val nonDup = ArrayList<BasicBlock>()
-        val dup = ArrayList<BasicBlock>()
+        // Keep only the DF-intersection candidates that are a PROVABLY genuine single merge. [isGenuineMerge]
+        // already rejects a duplicable shared `return` tail (leaving it to the duplication path), so the
+        // common two-candidate diamond (shared tail + real branch merge) collapses to just the branch merge.
+        // Require EXACTLY ONE survivor: zero (both arms terminate) or two-or-more (truly ambiguous) ⇒ null,
+        // and the caller keeps the honest clamp/bail rather than guess a wrong out-block (rule 4).
+        val candidates = ArrayList<BasicBlock>()
         for (b in HashSet<BasicBlock>(thenBlock.dominanceFrontier).apply { add(thenBlock) }) {
             if (b === e || b !in elseSet) continue
-            if (!isGenuineMerge(condBlock, b)) continue
-            (if (isDuplicable(b)) dup else nonDup).add(b)
+            if (isGenuineMerge(condBlock, b)) candidates.add(b)
         }
-        // A diamond whose arms can both `return false` OR both continue yields TWO genuine candidates: the
-        // shared `return` tail (duplicable) and the real continuation block (a branch, not duplicable).
-        // Prefer the unique NON-duplicable merge (the continuation). A duplicable shared tail is the follow
-        // only when it is the SOLE genuine reconvergence (the last diamond in a chain, whose merge IS the
-        // shared `return` — jadx dedups these via `isEqualReturnBlocks`), placed once instead of duplicated.
-        // Ambiguity within the chosen tier (>1) ⇒ null (bail) — never guess between two real merges.
-        return nonDup.singleOrNull() ?: dup.singleOrNull()?.takeIf { nonDup.isEmpty() }
+        return candidates.singleOrNull()
     }
 
     /**

@@ -73,13 +73,14 @@ class RegionMakerLoopTest {
     }
 
     @Test
-    fun unconsumedBranchBailsInsteadOfLeakingBareComparison() {
-        // `if (a == 0) {} return;` — the if is redundant (both arms merge at the return), so the condition
-        // block has a SINGLE successor and is structured as a straight-line leaf: its `if` is never
-        // consumed. Emitting it would leak `a == 0;` as a bare non-statement (javac "not a statement") and
-        // any dropped arm would vanish silently. The no-leaked-branch net must bail honestly (region==null)
-        // rather than report FULLY_STRUCTURED with a leaked comparison. (Mirrors the corpus's
-        // never-exiting-inner-loop-arm shape, whose pruned arm leaves the same single-successor `if`.)
+    fun degenerateIfWhoseArmsShareOneTargetIsConsumedNotLeaked() {
+        // `if (a == 0) {} return;` — the `if`'s two arms are the SAME target, so the block has a SINGLE CFG
+        // successor: the condition is dead (both paths are identical) and side-effect-free (a register
+        // compare). Phase-2 degenerate-branch consumption marks the `if` DONT_GENERATE and structures the
+        // method as plain `return;` — NO code is dropped (there is no distinct arm to lose) and the
+        // comparison does NOT leak as a bare `a == 0;` non-statement. This is a strict improvement over the
+        // earlier honest bail: the shape is now provably structurable. (A THROWING/effectful degenerate
+        // condition — an inlined call/field-read — still bails; see the mayThrow guard in RegionMaker.)
         val reader = FakeCodeReader(
             1,
             listOf(
@@ -92,8 +93,13 @@ class RegionMakerLoopTest {
 
         // Universal invariant: a structured method never leaves an emittable branch un-consumed.
         assertNoLeakedBranch(method)
-        // For this shape specifically it cannot be structured, so it bails honestly.
-        assertEquals(null, method.region, "an un-consumed branch must bail, not silently structure")
+        // The dead, side-effect-free branch is consumed and the method structures (not a bail).
+        assertNotNull(method.region, "a degenerate if with a pure condition and one target structures as `return;`")
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the pure degenerate if structures cleanly")
+        // The comparison is SPECIFICALLY elided (DONT_GENERATE), never rendered as a bare statement.
+        val ifInsn = method.blocks.flatMap { it.instructions }
+            .first { it is com.jadxmp.ir.insn.IfInstruction }
+        assertTrue(ifInsn.contains(AttrFlag.DONT_GENERATE), "the dead comparison must be consumed, not rendered")
     }
 
     @Test

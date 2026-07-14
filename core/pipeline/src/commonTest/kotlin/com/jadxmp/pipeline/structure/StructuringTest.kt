@@ -305,6 +305,100 @@ class StructuringTest {
         assertTrue(terms.all { it is Condition.Compare }, "each term is a relational comparison")
     }
 
+    // ---- dominance-frontier out-block (findOutBlock / isGenuineMerge) --------
+
+    @Test
+    fun earlyReturnDiamondReconvergesViaDominanceFrontierOutBlock() {
+        // A diamond whose THEN-arm has an early `return` sub-path, so the two arms' reconvergence M is
+        // invisible to post-dominance (ipostdom(cond) collapses to the method exit). The merge is recovered
+        // by findOutBlock — the DOMINANCE-FRONTIER INTERSECTION of the arms — and proven a genuine single
+        // merge (every non-terminal path reaches it, no external predecessor) by isGenuineMerge. M is placed
+        // ONCE as the follow (it is itself a further branch, so non-duplicable) and the method FULLY structures.
+        //
+        //   B0: if (a==0) goto B2 else B1        (cond; ipostdom == exit because B3 returns early)
+        //   B1: if (b==0) goto B3 else B4        (then-arm: nested if with an early-return sub-path)
+        //   B4: goto M                           (then-arm continues to the merge)
+        //   B3: return                           (early terminal return — hides the merge from post-dom)
+        //   B2: goto M                           (else-arm reaches the same merge)
+        //   M : if (c==0) ... (return | return)  (the genuine merge; a branch, so NOT a duplicable tail)
+        val reader = FakeCodeReader(
+            3, // v0 = a (p0), v1 = b (p1), v2 = c (p2)
+            listOf(
+                Insn(Opcode.IF_EQZ, 0, intArrayOf(0), target = 4), // B0: a==0 -> B2(off4); fall -> B1(off1)
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(1), target = 3), // B1: b==0 -> B3(off3); fall -> B4(off2)
+                Insn(Opcode.GOTO, 2, target = 5), // B4: -> M(off5)
+                Insn(Opcode.RETURN_VOID, 3), // B3: early return
+                Insn(Opcode.GOTO, 4, target = 5), // B2: -> M(off5)
+                Insn(Opcode.IF_EQZ, 5, intArrayOf(2), target = 7), // M: c==0 -> B6(off7); fall -> B5(off6)
+                Insn(Opcode.RETURN_VOID, 6), // B5
+                Insn(Opcode.RETURN_VOID, 7), // B6
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.structured(method)
+
+        assertStructuredInvariant(method)
+        val region = method.region
+        assertNotNull(region, "the early-return diamond must structure via the DF out-block merge")
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "every path reaches the recovered merge")
+        // The merge M and both branches (B0, B1) are IfRegions — three in total, none dropped or duplicated.
+        assertTrue(countIfRegions(region) >= 3, "outer if, nested if, and the recovered merge if all present")
+        // No un-consumed branch may leak as a bare statement (the rule-4 net).
+        for (insn in leaves(region)) {
+            if (insn is IfInstruction && !insn.contains(AttrFlag.DONT_GENERATE)) {
+                error("an un-consumed IF leaked as a bare statement")
+            }
+        }
+        // All three returns (the early return + the merge's two arms) survive.
+        assertTrue(
+            leaves(region).count { it.opcode == IrOpcode.RETURN } >= 3,
+            "the early return and both merge-arm returns are all preserved",
+        )
+    }
+
+    @Test
+    fun ambiguousDoubleMergeDiamondHasNoUniqueOutBlockAndBailsHonestly() {
+        // A diamond whose two arms EACH fan out to the SAME pair of downstream branches M and N, so the
+        // dominance-frontier intersection holds TWO genuine merge candidates (M and N both satisfy every
+        // clause of isGenuineMerge). There is no UNIQUE genuine merge, so findOutBlock must return null
+        // rather than guess one — and with no enclosing follow to rescue it the second arm revisits an
+        // already-placed, non-duplicable branch, so structuring bails honestly (region == null) instead of
+        // dropping the other reconvergence. This proves the "unique-or-bail" gate: picking either M or N as
+        // the follow would misplace the code the other merge dominates (rule 4).
+        //
+        //   B0: if -> L | R
+        //   L : if -> M | N        R : if -> M | N        (both arms reach BOTH merges)
+        //   M : if -> P | Q        N : if -> P | Q        (M, N are branches ⇒ non-duplicable)
+        //   P : return             Q : return
+        // (trampoline GOTO blocks bridge the non-adjacent edges the two-way IF fall-through can't express.)
+        val reader = FakeCodeReader(
+            5, // v0=B0, v1=L, v2=R, v3=M, v4=N conditions (all read-only args ⇒ no φ)
+            listOf(
+                Insn(Opcode.IF_EQZ, 0, intArrayOf(0), target = 3), // B0: ==0 -> R(off3); fall -> L(off1)
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(1), target = 8), // L : ==0 -> N(off8); fall -> Lm(off2)
+                Insn(Opcode.GOTO, 2, target = 6), // Lm: L's fall path -> M(off6)
+                Insn(Opcode.IF_EQZ, 3, intArrayOf(2), target = 5), // R : ==0 -> Rn(off5); fall -> Rm(off4)
+                Insn(Opcode.GOTO, 4, target = 6), // Rm: R's fall path -> M(off6)
+                Insn(Opcode.GOTO, 5, target = 8), // Rn: R's ==0 path -> N(off8)
+                Insn(Opcode.IF_EQZ, 6, intArrayOf(3), target = 11), // M : ==0 -> Q(off11); fall -> Mp(off7)
+                Insn(Opcode.GOTO, 7, target = 10), // Mp: M's fall path -> P(off10)
+                Insn(Opcode.IF_EQZ, 8, intArrayOf(4), target = 11), // N : ==0 -> Q(off11); fall -> Np(off9)
+                Insn(Opcode.GOTO, 9, target = 10), // Np: N's fall path -> P(off10)
+                Insn(Opcode.RETURN_VOID, 10), // P
+                Insn(Opcode.RETURN_VOID, 11), // Q
+            ),
+        )
+        val method = TestPipeline.buildMethod(
+            reader,
+            argTypes = listOf(IrType.INT, IrType.INT, IrType.INT, IrType.INT, IrType.INT),
+        )
+        TestPipeline.structured(method)
+
+        // Two genuine out-block candidates ⇒ no unique merge ⇒ findOutBlock null ⇒ honest bail.
+        assertNull(method.region, "an ambiguous double-merge diamond has no unique out-block and must bail")
+        assertNull(method[PipelineAttrs.FULLY_STRUCTURED], "a bailed method is not flagged structured")
+    }
+
     // ---- irreducible fallback ----------------------------------------------
 
     @Test
