@@ -564,7 +564,17 @@ internal class MethodBodyWriter(
                 code.add("return")
                 if (insn.argCount > 0) {
                     code.add(" ")
-                    emitOperand(insn.getArg(0), KotlinPrec.LOWEST)
+                    val arg = insn.getArg(0)
+                    // A register that provably holds a `const 0` (null) but whose out-of-SSA-coalesced
+                    // local carries a type definitely incompatible with the return type: emit `null`
+                    // rather than the wrongly-typed variable name (see the Java backend for the rationale).
+                    if (isReferenceType(method.returnType) && isNullConstRegister(arg) &&
+                        definitelyIncompatibleReference(operandType(arg), method.returnType)
+                    ) {
+                        code.add("null")
+                    } else {
+                        emitOperand(arg, KotlinPrec.LOWEST)
+                    }
                 }
             }
             IrOpcode.THROW -> {
@@ -1303,6 +1313,42 @@ internal class MethodBodyWriter(
         return lvT ?: svT ?: reg.type
     }
 
+    /** The coalesced local type a register renders with. */
+    private fun operandType(op: Operand): IrType = if (op is RegisterOperand) effectiveType(op) else op.type
+
+    /**
+     * True if [op] is a register whose single SSA definition is a `const 0` — it provably holds the null
+     * constant on this read. Per-SSA-version: a register reassigned before this use points at a different
+     * SSA value, so this correctly returns false for it.
+     */
+    private fun isNullConstRegister(op: Operand): Boolean {
+        if (op !is RegisterOperand || isThis(op)) return false
+        val def = op.ssaValue?.assign?.parent ?: return false
+        return def.opcode == IrOpcode.CONST && def.argCount > 0 &&
+            (def.getArg(0) as? LiteralOperand)?.value == 0L
+    }
+
+    /**
+     * True when [source] and [target] are reference types definitely not assignable in either direction —
+     * restricted to what codegen can decide without a class graph: an array vs a named non-array class
+     * (only `Any`/`Serializable`/`Cloneable` may hold an array), or two primitive-element arrays with
+     * different element kinds. Conservative: returns false whenever a subtype relation is possible.
+     */
+    private fun definitelyIncompatibleReference(source: IrType, target: IrType): Boolean {
+        val sArr = source is IrType.ArrayType
+        val tArr = target is IrType.ArrayType
+        if (sArr != tArr) {
+            val objSide = if (sArr) target else source
+            return objSide is IrType.Object && objSide.className !in ARRAY_SUPERTYPE_CLASSES
+        }
+        if (sArr && tArr) {
+            val se = (source as IrType.ArrayType).element
+            val te = (target as IrType.ArrayType).element
+            if (se is IrType.Primitive || te is IrType.Primitive) return se != te
+        }
+        return false
+    }
+
     /** A reference type (object/array/type-variable/wildcard, or an all-reference partial) — one that `?` applies to. */
     private fun isReferenceType(type: IrType): Boolean = when (type) {
         is IrType.Object, is IrType.ArrayType, is IrType.TypeVariable, is IrType.Wildcard -> true
@@ -1362,6 +1408,11 @@ internal class MethodBodyWriter(
 
     private companion object {
         const val CLASS_INIT_NAME = "<clinit>"
+
+        /** The only supertypes an array is assignable to; a named class outside this set can't hold one. */
+        val ARRAY_SUPERTYPE_CLASSES = setOf(
+            IrType.OBJECT_CLASS, "java.io.Serializable", "java.lang.Cloneable",
+        )
 
         /**
          * Opcodes a hoisted `static final` initializer may inline through — only producers that are

@@ -723,6 +723,17 @@ internal class MethodBodyWriter(
     private fun emitCoerced(op: Operand, targetType: IrType?, minPrec: Int) {
         if (targetType != null) {
             val source = operandType(op)
+            // A register that is PROVABLY a compile-time null constant (its sole def is `const 0` in a
+            // reference slot), but whose out-of-SSA-coalesced local carries a type that is definitely
+            // incompatible with the required [targetType] (e.g. an `InputStream` local reused to hold the
+            // null returned as `byte[]`). Rendering the variable name would be a type error, so emit the
+            // `null` literal instead — exactly equivalent, since the register holds null on this path.
+            if (targetType.isReferenceType() && isNullConstRegister(op) &&
+                definitelyIncompatibleReference(source, targetType)
+            ) {
+                code.add("null")
+                return
+            }
             if (source.isBooleanPrimitive() && targetType.isNumericPrimitive()) {
                 emitBooleanToNumber(op, targetType, minPrec)
                 return
@@ -795,6 +806,41 @@ internal class MethodBodyWriter(
     /** A resolved reference type (a `null` literal can be cast to it). */
     private fun IrType.isReferenceType(): Boolean =
         this is IrType.Object || this is IrType.ArrayType || this is IrType.TypeVariable || this is IrType.Wildcard
+
+    /**
+     * True if [op] is a register whose single SSA definition is a `const 0` — i.e. it provably holds
+     * the null constant on the read at hand. (A `const 0` reaching a reference-typed use is `null`.)
+     * Per-SSA-version: a register reassigned before this use points at a different SSA value whose def
+     * is that reassignment, so this correctly returns false for it.
+     */
+    private fun isNullConstRegister(op: Operand): Boolean {
+        if (op !is RegisterOperand || isThis(op)) return false
+        val def = op.ssaValue?.assign?.parent ?: return false
+        return def.opcode == IrOpcode.CONST && def.argCount > 0 &&
+            (def.getArg(0) as? LiteralOperand)?.value == 0L
+    }
+
+    /**
+     * True when [source] and [target] are reference types that are DEFINITELY not assignable in either
+     * direction — restricted to the cases codegen can decide without a class graph: an array vs a named
+     * non-array class (only `Object`/`Serializable`/`Cloneable` may hold an array), or two primitive-
+     * element arrays with different element kinds. Conservative: when a subtype relation is possible
+     * (two named classes, covariant reference arrays), it returns false so the variable is kept as-is.
+     */
+    private fun definitelyIncompatibleReference(source: IrType, target: IrType): Boolean {
+        val sArr = source is IrType.ArrayType
+        val tArr = target is IrType.ArrayType
+        if (sArr != tArr) {
+            val objSide = if (sArr) target else source
+            return objSide is IrType.Object && objSide.className !in ARRAY_SUPERTYPE_CLASSES
+        }
+        if (sArr && tArr) {
+            val se = (source as IrType.ArrayType).element
+            val te = (target as IrType.ArrayType).element
+            if (se is IrType.Primitive || te is IrType.Primitive) return se != te
+        }
+        return false
+    }
 
     /** True if [op] renders as the `null` literal (a zero constant of reference/unknown-reference type). */
     private fun isNullConstant(op: Operand): Boolean {
@@ -1297,6 +1343,11 @@ internal class MethodBodyWriter(
     private companion object {
         /** The JVM static initializer name; its body renders as a `static { … }` block. */
         const val CLASS_INIT_NAME = "<clinit>"
+
+        /** The only supertypes an array is assignable to; a named class outside this set can't hold one. */
+        val ARRAY_SUPERTYPE_CLASSES = setOf(
+            IrType.OBJECT_CLASS, "java.io.Serializable", "java.lang.Cloneable",
+        )
 
         /**
          * Opcodes an enum-constant argument may inline through (see [emitEnumConstantArgs]) — only the
