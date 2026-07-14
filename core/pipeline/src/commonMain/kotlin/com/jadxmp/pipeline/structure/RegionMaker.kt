@@ -110,6 +110,34 @@ internal class RegionMaker(
     /** Blocks already placed in the tree; a second placement attempt means an unstructured shape. */
     private val placed = HashSet<BasicBlock>()
 
+    /**
+     * The **active-exit stack** — the follows of all currently-open forward regions (an `if` merge, a
+     * try/synchronized follow). Mirrors jadx's `RegionStack` exits (`addExit`/`containsExit`). Structuring a
+     * chain ([makeRegion]) stops not only at its own immediate [chainFollow] but at ANY active exit: an arm
+     * that reaches an *enclosing* region's follow belongs to that enclosing region (which places it), so it
+     * stops there instead of re-placing the block (the sibling double-placement / revisit that the single
+     * `chainFollow` could not see). Pushed/popped strictly LIFO around each forward region's sub-region
+     * construction via [withActiveExit], so at any depth it holds exactly the enclosing forward follows.
+     *
+     * NB (Phase 1, behavior-preserving): in a correctly-nested method an arm always reaches its OWN merge
+     * (the immediate post-dominator) before any enclosing follow, so the extra membership test is inert and
+     * the board is byte-identical; it only fires earlier on the shapes that otherwise revisit-bail. Loop and
+     * switch follows are deliberately NOT here — they are break/continue targets handled by [LoopCtx] with a
+     * check that must keep its current precedence over the plain stop; putting them here would drop a break.
+     */
+    private val exitStack = ArrayList<BasicBlock>()
+
+    /** Run [body] with [exit] pushed as an active exit (no-op when null); pops it LIFO afterwards. */
+    private inline fun <T> withActiveExit(exit: BasicBlock?, body: () -> T): T {
+        if (exit == null) return body()
+        exitStack.add(exit)
+        try {
+            return body()
+        } finally {
+            exitStack.removeAt(exitStack.size - 1)
+        }
+    }
+
     /** CFG edges (`u.id -> v.id`, packed) represented in the region tree. See the edge-coverage net. */
     private val representedEdges = HashSet<Long>()
 
@@ -539,7 +567,11 @@ internal class RegionMaker(
             first = false
             if (!atStart) {
                 if (block === exit) break
-                if (block === chainFollow) break
+                // Stop at the immediate follow OR any enclosing forward region's follow (an active exit):
+                // reaching an ancestor's follow means this block belongs to that enclosing region. Keeps the
+                // same precedence the single `chainFollow` had — checked before the loop break/continue
+                // targets (which must still emit their jump leaves), so loop/switch semantics are unchanged.
+                if (block === chainFollow || block in exitStack) break
                 if (loopCtx != null && block === loopCtx.follow) {
                     seq.add(breakLeaf()); break
                 }
@@ -832,16 +864,20 @@ internal class RegionMaker(
         val merge = if (ipd === exit && chainFollow != null && chainFollow !== exit) chainFollow else ipd
         val thenIsMerge = thenTarget === merge
         val elseIsMerge = elseTarget === merge
-        val region: Region = when {
-            thenIsMerge && !elseIsMerge -> {
-                // Empty then-arm ⇒ invert so the sole arm is the then-branch.
-                IfRegion(negate(folded.condition), makeArm(elseTarget, merge, loopCtx))
-            }
-            elseIsMerge && !thenIsMerge -> {
-                IfRegion(folded.condition, makeArm(thenTarget, merge, loopCtx))
-            }
-            else -> {
-                IfRegion(folded.condition, makeArm(thenTarget, merge, loopCtx), makeArm(elseTarget, merge, loopCtx))
+        // The merge is this if's follow — an active exit while its arms are built, so an arm that reaches it
+        // (or an enclosing follow) stops there and the merge is placed once by the enclosing chain.
+        val region: Region = withActiveExit(merge) {
+            when {
+                thenIsMerge && !elseIsMerge -> {
+                    // Empty then-arm ⇒ invert so the sole arm is the then-branch.
+                    IfRegion(negate(folded.condition), makeArm(elseTarget, merge, loopCtx))
+                }
+                elseIsMerge && !thenIsMerge -> {
+                    IfRegion(folded.condition, makeArm(thenTarget, merge, loopCtx))
+                }
+                else -> {
+                    IfRegion(folded.condition, makeArm(thenTarget, merge, loopCtx), makeArm(elseTarget, merge, loopCtx))
+                }
             }
         }
         return BuiltIf(region, merge)
@@ -1068,7 +1104,11 @@ internal class RegionMaker(
         // open its blocks must not re-trigger a nested try for the SAME handler set.
         openTryBlocks.addAll(protectedBlocks)
         val tryRegion: Region = try {
-            makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            // The try's normal follow is an active exit while the body is structured (a branchy body's arm
+            // reaching the follow stops there; the follow is placed once after the try by the enclosing chain).
+            withActiveExit(follow) {
+                makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            }
         } finally {
             openTryBlocks.removeAll(protectedBlocks)
         }
@@ -1387,7 +1427,10 @@ internal class RegionMaker(
 
         openTryBlocks.addAll(protectedBlocks)
         val body: Region = try {
-            makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            // The synchronized follow is an active exit while the (possibly branchy) body is structured.
+            withActiveExit(follow) {
+                makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            }
         } finally {
             openTryBlocks.removeAll(protectedBlocks)
         }

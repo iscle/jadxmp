@@ -96,6 +96,57 @@ class RegionMakerTryCatchTest {
     }
 
     @Test
+    fun catchReachingOuterMergePastTheTryFollowIsPlacedOnceViaActiveExitStack() {
+        // if (p0 != 0) { try { sink(); } catch (Exception e) {} sink(); } else { sink(); } ; MERGE: return
+        // The catch handler jumps DIRECTLY to the outer if's merge (offset 8), PAST the try's own follow
+        // (offset 7, the `sink()` after the try inside the then-arm). So the catch reaches an ENCLOSING
+        // region's follow that is NOT its immediate chain-follow — the single `chainFollow` could not see
+        // it, so the catch re-placed MERGE and the enclosing chain then revisited it → bail (the
+        // TestOutBlock shape). With the active-exit stack, MERGE is an active exit (pushed by the outer if),
+        // so the catch stops there and MERGE is placed EXACTLY ONCE. This shape genuinely requires the
+        // stack (it bails with only the immediate chain-follow check).
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.IF_NEZ, 0, intArrayOf(0), target = 3), // outer if: if (p0!=0) goto then; else fall
+                Insn(Opcode.INVOKE_STATIC, 1, intArrayOf(), methodRef = voidCall), // else-arm
+                Insn(Opcode.GOTO, 2, target = 8), // else -> MERGE(8)
+                Insn(Opcode.INVOKE_STATIC, 3, intArrayOf(), methodRef = voidCall), // try body (try_start = 3)
+                Insn(Opcode.GOTO, 4, target = 7), // try body -> the try's follow F_try(7)  (try_end after this)
+                Insn(Opcode.MOVE_EXCEPTION, 5, intArrayOf(0)), // catch handler
+                Insn(Opcode.GOTO, 6, target = 8), // catch -> MERGE(8) DIRECTLY, past F_try(7)
+                Insn(Opcode.INVOKE_STATIC, 7, intArrayOf(), methodRef = voidCall), // F_try: after the try, then-arm
+                Insn(Opcode.RETURN_VOID, 8), // MERGE — the outer if's follow, reached by then-arm and else-arm
+            ),
+            tries = listOf(FakeTryBlock(3, 4, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(5), -1))),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.structured(method)
+
+        assertNoPhi(method)
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the catch-to-outer-merge shape must fully structure")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR), "correct structuring ⇒ no error flag")
+
+        // The outer merge (offset 8) appears EXACTLY ONCE in the emitted tree — the partition property.
+        val occ = HashMap<Int, Int>()
+        fun walk(c: IrContainer?) {
+            when (c) {
+                is com.jadxmp.ir.node.BasicBlock -> occ[c.id] = (occ[c.id] ?: 0) + 1
+                is SequenceRegion -> c.children.forEach { walk(it) }
+                is TryCatchRegion -> { walk(c.tryRegion); c.catches.forEach { walk(it.body) }; c.finallyRegion?.let { walk(it) } }
+                is IfRegion -> { walk(c.thenRegion); c.elseRegion?.let { walk(it) } }
+                else -> {}
+            }
+        }
+        walk(method.region)
+        val mergeBlock = method.blocks.first { b -> b.instructions.any { it.offset == 8 } }
+        assertEquals(1, occ[mergeBlock.id], "the outer merge must be placed exactly once (partitioned, not re-placed)")
+
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc, "a TryCatchRegion is produced inside the if arm")
+    }
+
+    @Test
     fun branchyTryBodyStructuresIntoTryCatchWithNestedIf() {
         // try { if (p0 == 0) sink() else sink(); } catch (Exception e) { return; } return;
         // The protected body is a full diamond — only structurable with clean post-dominators, since the
