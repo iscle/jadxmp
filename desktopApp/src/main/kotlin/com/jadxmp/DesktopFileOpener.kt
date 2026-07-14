@@ -29,13 +29,10 @@ class DesktopFileOpener : FileOpener {
         val dir = dialog.directory ?: return null
         val name = dialog.file ?: return null
         val file = File(dir, name)
-        val bytes = withContext(Dispatchers.IO) {
-            runCatching { file.readBytes() }.getOrNull()
-        } ?: return null
-        return OpenRequest(name = file.name, bytes = bytes)
+        return withContext(Dispatchers.IO) { openRequestFromFile(file) }
     }
 
     private companion object {
-        val SUPPORTED = listOf(".dex", ".apk", ".jar", ".aar", ".aab", ".zip", ".class")
+        val SUPPORTED = SUPPORTED_INPUT_EXTS
     }
 }
