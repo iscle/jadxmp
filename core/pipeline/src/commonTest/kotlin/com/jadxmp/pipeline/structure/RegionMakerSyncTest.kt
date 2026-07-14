@@ -60,6 +60,22 @@ class RegionMakerSyncTest {
         }
     }
 
+    private fun firstTryCatch(method: IrMethod): TryCatchRegion? {
+        var found: TryCatchRegion? = null
+        fun visit(r: Region?) {
+            when (r) {
+                is TryCatchRegion -> { if (found == null) found = r; visit(r.tryRegion); r.catches.forEach { visit(it.body) } }
+                is SyncRegion -> visit(r.body)
+                is SequenceRegion -> r.children.forEach { if (it is Region) visit(it) }
+                is IfRegion -> { visit(r.thenRegion); r.elseRegion?.let { visit(it) } }
+                is LoopRegion -> visit(r.body)
+                else -> {}
+            }
+        }
+        visit(method.region)
+        return found
+    }
+
     private fun firstSync(method: IrMethod): SyncRegion? {
         val all = HashSet<BasicBlock>()
         // Walk regions to find a SyncRegion (reuse the block walk's structure by a small recursion).
@@ -223,10 +239,11 @@ class RegionMakerSyncTest {
     }
 
     @Test
-    fun multiBlockCatchAllRethrowBailsNotMiscollapsed() {
-        // A catch-all whose ENTRY block does not itself end in THROW but a later block re-throws — the
-        // broadened handlerReThrows must still recognize it as a finally/cleanup and bail (rule 4),
-        // rather than emit it as a real `catch (Throwable)`.
+    fun multiBlockCatchAllRethrowRendersAsExplicitCatch() {
+        // A multi-block catch-all whose ENTRY does not end in THROW but a later block re-throws, with real
+        // cleanup in between (`move-exception; cleanup(); goto; throw`). It renders faithfully as
+        // `catch (Throwable e) { cleanup(); throw e; }` — the multi-block handler body is structured by
+        // makeRegion and the rethrow preserved. Faithful 1:1 transcription; nothing dropped or doubled.
         val reader = FakeCodeReader(
             2,
             listOf(
@@ -241,13 +258,24 @@ class RegionMakerSyncTest {
         )
         val method = TestPipeline.buildMethod(reader, methodName = "fin")
         TestPipeline.structured(method)
-        assertNull(method.region, "a multi-block catch-all re-throw (finally) must bail, not become a catch")
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "multi-block catch-all structures")
+        val tc = firstTryCatch(method)
+        assertNotNull(tc, "a TryCatchRegion is produced")
+        assertNull(tc.finallyRegion, "no finally is factored")
+        assertEquals(1, tc.catches.size)
+        // The cleanup call (body + handler = 2 total) and the rethrow are all kept.
+        val insns = method.blocks.flatMap { it.instructions }
+        assertEquals(2, insns.count { it.opcode == IrOpcode.INVOKE }, "the handler cleanup call is preserved")
+        assertNotNull(insns.firstOrNull { it.opcode == IrOpcode.THROW }, "the rethrow is emitted")
     }
 
     @Test
-    fun singleBlockCatchAllRethrowFinallyBails() {
-        // A single-block `finally` cleanup (`move-exception; throw`) — we do not reconstruct finally yet,
-        // so it must bail to the honest unstructured fallback rather than emit a `catch (Throwable) { throw }`.
+    fun singleBlockCatchAllRethrowRendersAsExplicitCatch() {
+        // A single-block catch-all that just re-throws (`move-exception; throw`). It cannot be factored
+        // into a `finally {}` (no cleanup on the normal path), so it renders FAITHFULLY as an explicit
+        // `catch (Throwable e) { throw e; }` — a 1:1 transcription of the bytecode handler (observably a
+        // no-op catch, but correct). This is a transcription, NOT a finally-factoring, so it can neither
+        // drop nor double any cleanup.
         val reader = FakeCodeReader(
             1,
             listOf(
@@ -260,6 +288,15 @@ class RegionMakerSyncTest {
         )
         val method = TestPipeline.buildMethod(reader, methodName = "fin")
         TestPipeline.structured(method)
-        assertNull(method.region, "a re-throwing catch-all (finally cleanup) must bail, not become a catch")
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "re-throwing catch-all structures")
+        val tc = firstTryCatch(method)
+        assertNotNull(tc, "a TryCatchRegion is produced")
+        assertNull(tc.finallyRegion, "no finally is factored")
+        assertEquals(1, tc.catches.size)
+        // The rethrow is preserved (a real `throw e`, not hidden as a finally would).
+        assertNotNull(
+            method.blocks.flatMap { it.instructions }.firstOrNull { it.opcode == IrOpcode.THROW },
+            "the rethrow is emitted",
+        )
     }
 }

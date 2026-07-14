@@ -833,9 +833,11 @@ class StructuringTest {
     }
 
     @Test
-    fun tryWithRethrowingCatchAllBails() {
-        // A catch-all handler that re-throws is finally / synchronized cleanup — must bail, not
-        // mis-render as `catch (Throwable) { … throw; }` structure we can't guarantee correct.
+    fun tryWithRethrowingCatchAllRendersAsExplicitCatch() {
+        // A catch-all handler that re-throws (`move-exception; throw`) that cannot be factored into a
+        // `finally {}` renders FAITHFULLY as `catch (Throwable e) { throw e; }` — a 1:1 transcription of
+        // the bytecode handler (jadx does the same when it cannot extract the finally). It structures
+        // (not a bail) and preserves the rethrow.
         val callRef = FakeMethodRef("Ltest/C;", "call", "V", emptyList())
         val reader = FakeCodeReader(
             2,
@@ -851,7 +853,13 @@ class StructuringTest {
         )
         val method = TestPipeline.buildMethod(reader)
         TestPipeline.structured(method)
-        assertNull(method.region, "re-throwing catch-all (finally/cleanup) must bail")
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "re-throwing catch-all structures")
+        assertNotNull(method.region)
+        assertNotNull(
+            method.blocks.flatMap { it.instructions }.firstOrNull { it.opcode == IrOpcode.THROW },
+            "the rethrow is emitted (not hidden as a finally would)",
+        )
     }
 
     // ---- helpers ------------------------------------------------------------

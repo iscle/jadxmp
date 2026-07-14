@@ -2,6 +2,7 @@ package com.jadxmp.pipeline.structure
 
 import com.jadxmp.input.Opcode
 import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.PhiInstruction
 import com.jadxmp.ir.node.IrContainer
 import com.jadxmp.ir.node.IrMethod
@@ -19,6 +20,7 @@ import com.jadxmp.pipeline.support.Insn
 import com.jadxmp.pipeline.support.TestPipeline
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -418,12 +420,14 @@ class RegionMakerTryCatchTest {
     }
 
     @Test
-    fun inBodyReturnCarryingItsOwnCleanupCopyBailsNotDoubleRun() {
+    fun inBodyReturnCarryingItsOwnCleanupCopyRendersWithoutDoubleRun() {
         // try { sink(); if (c) { cleanup(); return; } } finally { cleanup(); } return;
-        // javac inlines the cleanup on EVERY exit — including the IN-BODY early return, which carries its
-        // OWN cleanup copy. The narrow reconstruction hides only the fall-through + handler copies, so the
-        // in-body copy would stay LIVE and the finally would run cleanup a SECOND time on the c!=0 path (a
-        // silent double-execution). This must BAIL honestly (region null), not emit a spurious finally.
+        // javac inlines the cleanup on EVERY exit — the in-body early return, the normal exit, and the
+        // handler (three copies). The explicit-catch rendering does NOT factor a finally, so it keeps each
+        // copy exactly where it is: `try { sink(); if (c!=0) { cleanup(); return; } } catch (Throwable e)
+        // { cleanup(); throw e; } cleanup(); return;`. Each path runs cleanup EXACTLY ONCE — no
+        // double-execution (the very hazard that finally-factoring would have introduced) and no drop.
+        // (This is why we do not factor: the transcription is faithful where factoring is unsafe.)
         val cleanup = FakeMethodRef("Lcom/example/Foo;", "cleanup", "V", emptyList())
         val reader = FakeCodeReader(
             2, // v0 = exception var, v1 = c (param)
@@ -443,14 +447,23 @@ class RegionMakerTryCatchTest {
         )
         val method = TestPipeline.buildMethod(reader, argTypes = listOf(IrType.INT))
         TestPipeline.structured(method)
-        assertNull(method.region, "an in-body return carrying its own cleanup copy must bail — never a double-run finally")
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the in-body-return shape renders (no bail)")
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc)
+        assertNull(tc.finallyRegion, "no finally is factored (that would double-run the in-body copy)")
+        // Exactly the original count of calls survives: sink + the THREE cleanup copies (in-body, normal,
+        // handler). A factored finally would have ADDED a fourth copy → this asserts NO double-run.
+        assertEquals(4, method.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.INVOKE })
     }
 
     @Test
-    fun differingCleanupCopiesDoNotMergeIntoFinallyAndBail() {
-        // Same shape, but the normal-path "cleanup" calls a DIFFERENT method than the catch-all's cleanup.
-        // The copies are NOT identical, so they must NOT be merged into a finally (that would drop or
-        // misplace a statement). The method bails honestly (region null) — never a wrong finally (rule 4).
+    fun differingCleanupCopiesAreNotMergedButKeptOnTheirPaths() {
+        // The normal-path cleanup (cleanupA) differs from the catch-all's cleanup (cleanupB). They must
+        // NOT be merged into one finally. The explicit-catch rendering keeps each on ITS OWN path —
+        // `try { sink(); } catch (Throwable e) { cleanupB(); throw e; } cleanupA(); return;` — which is
+        // exactly the bytecode: cleanupA on normal exit, cleanupB on the exceptional path. Faithful; no
+        // statement dropped or misplaced (the very risk the old merge would have caused).
         val cleanupA = FakeMethodRef("Lcom/example/Foo;", "cleanupA", "V", emptyList())
         val cleanupB = FakeMethodRef("Lcom/example/Foo;", "cleanupB", "V", emptyList())
         val reader = FakeCodeReader(
@@ -467,7 +480,13 @@ class RegionMakerTryCatchTest {
         )
         val method = TestPipeline.buildMethod(reader)
         TestPipeline.structured(method)
-        assertNull(method.region, "non-identical cleanup copies must NOT merge into a finally — honest bail")
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "differing cleanups render (no merge, no bail)")
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc)
+        assertNull(tc.finallyRegion, "the differing copies must NOT be merged into a finally")
+        // All three calls survive (sink + cleanupA on normal + cleanupB in catch) — nothing merged/dropped.
+        assertEquals(3, method.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.INVOKE })
     }
 
     @Test
@@ -540,6 +559,43 @@ class RegionMakerTryCatchTest {
         assertTrue(method[PipelineAttrs.EXCEPTION_EDGES] == null, "no try ⇒ no exception-edge attribute")
         assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED])
         assertNotNull(firstRegion<IfRegion>(method), "the ordinary if/else must still structure")
+    }
+
+    @Test
+    fun unfactorableRethrowingCatchAllRendersAsExplicitCatch() {
+        // try { sink(); } catchall { cleanup(); throw e; }  — the NORMAL path has no cleanup, so the
+        // finally cannot be factored (reconstructFinally returns null). Instead of bailing, the catch-all
+        // is rendered FAITHFULLY as `catch (Throwable e) { cleanup(); throw e; }` — a 1:1 transcription of
+        // the bytecode handler (jadx does the same when it cannot extract the finally). Nothing is dropped
+        // or doubled: the cleanup stays exactly where the handler had it, and the rethrow is preserved.
+        val cleanup = FakeMethodRef("Lcom/example/Foo;", "cleanup", "V", emptyList())
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, methodRef = voidCall), // protected try body
+                Insn(Opcode.RETURN_VOID, 1), // follow — the normal path, with NO cleanup
+                Insn(Opcode.MOVE_EXCEPTION, 2, intArrayOf(0)), // catch-all handler entry
+                Insn(Opcode.INVOKE_STATIC, 3, methodRef = cleanup), // the cleanup
+                Insn(Opcode.THROW, 4, intArrayOf(0)), // rethrow the caught exception
+            ),
+            tries = listOf(FakeTryBlock(0, 0, FakeCatchHandler(emptyList(), emptyList(), 2))),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.structured(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the rethrowing catch-all structures (not bail)")
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc, "a TryCatchRegion must be produced")
+        assertNull(tc.finallyRegion, "not factored into a finally (the normal path has no cleanup)")
+        assertEquals(1, tc.catches.size, "one catch clause")
+        assertEquals(listOf(IrType.THROWABLE), tc.catches[0].exceptionTypes, "a catch-all renders as catch (Throwable)")
+        // The cleanup call and the rethrow are BOTH kept (nothing dropped); the rethrow is emitted (a real
+        // `throw e`, not hidden the way a factored finally would hide it).
+        val insns = method.blocks.flatMap { it.instructions }
+        assertEquals(2, insns.count { it.opcode == IrOpcode.INVOKE }, "both the body call and the cleanup call remain")
+        val throwInsn = insns.firstOrNull { it.opcode == IrOpcode.THROW }
+        assertNotNull(throwInsn, "the rethrow is preserved")
+        assertFalse(throwInsn.contains(AttrFlag.DONT_GENERATE), "the rethrow is emitted (not hidden as in a finally)")
     }
 
     @Test

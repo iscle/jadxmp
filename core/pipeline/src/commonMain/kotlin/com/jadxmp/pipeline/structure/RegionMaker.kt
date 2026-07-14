@@ -1234,8 +1234,15 @@ internal class RegionMaker(
         val catches = ArrayList<CatchClause>(handlers.size)
         for (h in handlers) {
             val excHandler = h[PipelineAttrs.EXC_HANDLER] ?: throw Bail("handler without EXC_HANDLER")
-            // A catch-all handler that just re-throws is finally / synchronized cleanup — bail.
-            if (excHandler.catchAll && handlerReThrows(h)) throw Bail("finally / cleanup handler not supported yet")
+            // A rethrowing catch-all is a compiler `finally`'s cleanup. [reconstructFinally] already had
+            // first crack at factoring it into a `finally {}` (the pretty form); reaching here means it
+            // could NOT (a non-Tier-1 shape). Rather than bail, render it FAITHFULLY as an explicit
+            // `catch (Throwable e) { <cleanup>; throw e; }` — a 1:1 transcription of the bytecode handler
+            // (jadx does the same when it cannot extract the finally). This never factors/moves/dedups
+            // cleanup, so it cannot drop it on a path or double it; the in-body returns keep their own
+            // inlined cleanup copies (correct, mutually exclusive). Nested-try handlers and sync cleanup
+            // are still caught below (isProtected / verifyAllMonitorsConsumed). Falls through to the
+            // ordinary distinct-handler path.
             if (h === follow) {
                 // Coincident empty catch: the handler entry IS the try follow — control merges there on
                 // BOTH the exceptional and normal exits (the swallowing `catch (E e) {}` that continues).
