@@ -1,11 +1,15 @@
 package com.jadxmp
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.jadxmp.ui.client.CoreApiDecompilerClient
+import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.workbench.JadxWorkbenchApp
 
 /**
@@ -20,11 +24,16 @@ import com.jadxmp.ui.workbench.JadxWorkbenchApp
 fun main() = application {
     val client = remember { CoreApiDecompilerClient() }
     val fileOpener = remember { DesktopFileOpener() }
+    val dropController = remember { FileDropController() }
     Window(
         onCloseRequest = ::exitApplication,
         state = rememberWindowState(width = 1280.dp, height = 820.dp),
         title = "jadxmp",
     ) {
-        JadxWorkbenchApp(client = client, fileOpener = fileOpener)
+        // Whole-window drop target: a file dropped anywhere opens; the start-page zone shows the
+        // hover highlight the controller drives.
+        Box(Modifier.fillMaxSize().desktopFileDropTarget(dropController)) {
+            JadxWorkbenchApp(client = client, fileOpener = fileOpener, dropController = dropController)
+        }
     }
 }

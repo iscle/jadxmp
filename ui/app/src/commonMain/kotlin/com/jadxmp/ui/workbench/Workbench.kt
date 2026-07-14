@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,8 +30,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.MutableStateFlow
 import com.jadxmp.ui.client.CodeView
 import com.jadxmp.ui.client.DecompilerClient
+import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.client.FileOpener
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.SessionState
@@ -65,12 +68,19 @@ import com.jadxmp.ui.theme.MonoFontFamily
 fun JadxWorkbenchApp(
     client: DecompilerClient = remember { StubDecompilerClient() },
     fileOpener: FileOpener? = null,
+    dropController: FileDropController? = null,
 ) {
     val systemDark = isSystemInDarkTheme()
     var dark by remember { mutableStateOf(systemDark) }
 
     JadxTheme(darkTheme = dark) {
-        Workbench(client = client, fileOpener = fileOpener, dark = dark, onToggleTheme = { dark = !dark })
+        Workbench(
+            client = client,
+            fileOpener = fileOpener,
+            dropController = dropController,
+            dark = dark,
+            onToggleTheme = { dark = !dark },
+        )
     }
 }
 
@@ -81,12 +91,22 @@ fun Workbench(
     onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     fileOpener: FileOpener? = null,
+    dropController: FileDropController? = null,
 ) {
     val state = rememberWorkbenchState(client, fileOpener)
     val ui by state.ui.collectAsState()
     val session by state.session.collectAsState()
     var showSearch by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+
+    // Route a shell-delivered file drop through the same open path a picked file takes. Installed at
+    // composition, long before any user drag, so no drop can be missed. A null controller (stub/
+    // preview) contributes an inert flow, so the highlight stays off and nothing is collected.
+    val dragFallback = remember { MutableStateFlow(false) }
+    val dragActive by (dropController?.dragActive ?: dragFallback).collectAsState()
+    LaunchedEffect(dropController, state) {
+        dropController?.drops?.collect { state.openProject(it) }
+    }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -117,6 +137,7 @@ fun Workbench(
                         message = (session as? SessionState.Loading)?.message
                             ?: (session as? SessionState.Failed)?.message,
                         onOpen = state::requestOpen,
+                        dragActive = dragActive,
                     )
                 } else {
                     HorizontalSplitPane(
@@ -372,9 +393,12 @@ private fun StartPage(
     loading: Boolean,
     message: String?,
     onOpen: () -> Unit,
+    dragActive: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
     val colors = JadxTheme.colors
+    // The zone lights up while an OS drag hovers the window (driven by the shell via FileDropController).
+    val armed = dragActive && !loading
     Box(Modifier.fillMaxSize().background(scheme.background), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -390,22 +414,28 @@ private fun StartPage(
                 color = scheme.onSurfaceVariant,
             )
             Box(Modifier.height(JadxTheme.spacing.sm))
-            // Drop zone (click to browse — real file access lands in the platform shells).
+            // Drop zone: dropping a file anywhere in the window opens it (wired per-platform in the
+            // shells via FileDropController); clicking still browses. The border/label reflect an
+            // active drag when [armed].
             Column(
                 Modifier
                     .fillMaxWidth()
                     .clip(MaterialTheme.shapes.large)
-                    .background(scheme.surface)
-                    .border(1.5.dp, scheme.outline, MaterialTheme.shapes.large)
+                    .background(if (armed) scheme.surfaceContainerHighest else scheme.surface)
+                    .border(1.5.dp, if (armed) scheme.primary else scheme.outline, MaterialTheme.shapes.large)
                     .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, enabled = !loading, onClick = onOpen)
                     .padding(JadxTheme.spacing.xxl),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(JadxTheme.spacing.md),
             ) {
                 Text(
-                    if (loading) "Opening…" else "Drop a file here",
+                    when {
+                        loading -> "Opening…"
+                        armed -> "Release to open"
+                        else -> "Drop a file here"
+                    },
                     style = MaterialTheme.typography.bodyLarge,
-                    color = scheme.onSurface,
+                    color = if (armed) scheme.primary else scheme.onSurface,
                     fontWeight = FontWeight.Medium,
                 )
                 Text("or click to browse", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceFaint)

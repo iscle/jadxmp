@@ -4,6 +4,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeViewport
 import com.jadxmp.ui.client.CoreApiDecompilerClient
+import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.workbench.JadxWorkbenchApp
 
 /**
@@ -24,9 +25,13 @@ import com.jadxmp.ui.workbench.JadxWorkbenchApp
  */
 @OptIn(ExperimentalComposeUiApi::class)
 fun main() {
+    // OS file drop is wired at the DOM level (Compose's canvas doesn't receive it on web); the same
+    // controller feeds dropped files into the workbench and drives the drop-zone highlight.
+    val dropController = FileDropController()
+    installBrowserFileDrop(dropController)
     ComposeViewport {
         val client = remember { CoreApiDecompilerClient() }
         val fileOpener = remember { BrowserFileOpener() }
-        JadxWorkbenchApp(client = client, fileOpener = fileOpener)
+        JadxWorkbenchApp(client = client, fileOpener = fileOpener, dropController = dropController)
     }
 }
