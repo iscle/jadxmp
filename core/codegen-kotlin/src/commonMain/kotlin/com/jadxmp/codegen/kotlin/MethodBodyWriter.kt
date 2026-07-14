@@ -60,8 +60,23 @@ internal class MethodBodyWriter(
     private val method: IrMethod,
     private val names: NameGenerator,
     paramNames: List<String>,
+    // Instructions the caller has already accounted for elsewhere and that must NOT render as body
+    // statements: an enum `<clinit>`'s enum-construction (its stores become entry declarations / are
+    // synthesized by the compiler), or a `static final` field's single store that was hoisted into the
+    // field's `val X = <expr>` initializer. See [KotlinCodeGenerator]. Empty for an ordinary body.
+    private val suppressed: Set<Instruction> = emptySet(),
 ) {
     private val types = KotlinTypeRenderer(imports)
+
+    // When set, a RegisterOperand renders as its (inlined) defining expression rather than a variable
+    // name — used to render a hoisted `static final` initializer outside the `<clinit>` variable scope,
+    // where the source registers have no declaration. Only enabled during [emitStaticFinalInit].
+    private var inlineRegisters = false
+
+    // The <clinit>'s TERMINAL return-void, if any: the fall-off `return` that is illegal inside a Kotlin
+    // companion `init { … }` block (and enum residual init). Only this exact instruction is suppressed —
+    // an early/conditional return-void is left to render honestly (no silent code loss).
+    private val clinitTerminalReturn: Instruction? = findClinitTerminalReturn()
 
     // Identity/value keyed: LocalVar or SsaValue (identity) or a boxed regNum (value).
     private val varRefs = HashMap<Any, VarRef>()
@@ -527,6 +542,8 @@ internal class MethodBodyWriter(
 
     private fun emitStatement(insn: Instruction) {
         if (insn === headerDelegation) return // already rendered in the constructor header
+        if (insn in suppressed) return // accounted for elsewhere (enum construction / hoisted field init)
+        if (insn === clinitTerminalReturn) return // fall-off `return` is illegal inside `init { … }`
         if (insn.contains(AttrFlag.DONT_GENERATE)) return
         when (insn.opcode) {
             IrOpcode.NOP, IrOpcode.PHI, IrOpcode.MOVE_EXCEPTION,
@@ -676,10 +693,149 @@ internal class MethodBodyWriter(
 
     private fun emitOperand(op: Operand, minPrec: Int) {
         when (op) {
-            is RegisterOperand -> emitRegister(op)
+            is RegisterOperand -> {
+                // While rendering a hoisted `static final` initializer, a register renders as its
+                // (inlined) self-contained defining expression, since the <clinit> locals it names have no
+                // declaration at the property position.
+                val def = if (inlineRegisters) inlinableDef(op) else null
+                if (def != null) emitInsnExpr(def, minPrec) else emitRegister(op)
+            }
             is LiteralOperand -> code.add(KotlinLiterals.format(op))
             is InstructionOperand -> emitInsnExpr(op.instruction, minPrec)
         }
+    }
+
+    // ---------- hoisted static-final field initializer ----------
+
+    /**
+     * Render the value stored by [store] (a `<clinit>` `STATIC_PUT`) as a `static final` field's `val X =
+     * <expr>` initializer, returning true if it was rendered. The value must be a fully self-contained
+     * expression tree — no free `<clinit>` register/`this` — because it is emitted at the property
+     * position, outside the static block's variable scope; otherwise false is returned (rendering nothing)
+     * and the caller keeps the store in the init block (CLAUDE rule 4: never a dangling reference).
+     */
+    fun emitStaticFinalInit(store: Instruction): Boolean {
+        val value = store.getArg(store.argCount - 1)
+        if (!canInline(value, HashSet())) return false
+        inlineRegisters = true
+        emitOperand(value, KotlinPrec.LOWEST)
+        inlineRegisters = false
+        return true
+    }
+
+    /**
+     * Plan hoisting [store] (a `<clinit>` `STATIC_PUT`) into a `val X = <expr>` initializer: the set of
+     * `<clinit>` instructions to suppress — the store PLUS the self-contained producer tree that feeds its
+     * value (which is inlined into the initializer and would otherwise re-emit as dead residual). Returns
+     * null when the value isn't self-contained, or when any producer's result is ALSO read by a statement
+     * outside the tree (hoisting it would either dangle or double-execute a side effect) — the caller then
+     * leaves the store in the init block (CLAUDE rule 4).
+     */
+    fun planStaticFinalInline(store: Instruction, alreadySuppressed: Set<Instruction>): Set<Instruction>? {
+        if (store.argCount == 0) return null
+        val tree = inlinedProducerTree(store.getArg(store.argCount - 1)) ?: return null
+        val suppressedTree = HashSet(tree).apply { add(store) }
+        val treeResults = tree.mapNotNull { it.result?.ssaValue }.toHashSet()
+        if (treeResults.isNotEmpty()) {
+            for (block in method.blocks) {
+                for (insn in block.instructions) {
+                    if (insn in suppressedTree) continue
+                    if (readsAny(insn, treeResults)) return null // producer shared with a surviving statement
+                }
+            }
+        }
+        // Order hazard: hoisting evaluates the initializer at the PROPERTY position, BEFORE every surviving
+        // `<clinit>` statement (they render in the init block, after all properties). If the tree reads
+        // mutable heap state (a field/array element) or performs a side-effecting call, moving it earlier
+        // could observe a not-yet-written value or reorder an effect (silent wrong value). So an
+        // order-sensitive tree may be hoisted ONLY when no surviving statement remains to reorder against;
+        // a purely literal/arithmetic tree is order-independent and always safe. (CLAUDE rule 4.)
+        if (tree.any { it.opcode in ORDER_SENSITIVE_OPCODES }) {
+            val excluded = HashSet(suppressedTree).apply { addAll(alreadySuppressed) }
+            if (hasSurvivingStatement(excluded)) return null
+        }
+        return suppressedTree
+    }
+
+    /** Whether any `<clinit>` statement outside [excluded] would still render in the init block. */
+    private fun hasSurvivingStatement(excluded: Set<Instruction>): Boolean {
+        for (block in method.blocks) {
+            for (insn in block.instructions) {
+                if (insn in excluded) continue
+                if (insn === clinitTerminalReturn) continue
+                if (insn.contains(AttrFlag.DONT_GENERATE)) continue
+                if (isScaffolding(insn)) continue
+                return true
+            }
+        }
+        return false
+    }
+
+    /** Control-flow scaffolding that never renders as a statement on its own. */
+    private fun isScaffolding(insn: Instruction): Boolean = when (insn.opcode) {
+        IrOpcode.NOP, IrOpcode.PHI, IrOpcode.MOVE_EXCEPTION,
+        IrOpcode.MONITOR_ENTER, IrOpcode.MONITOR_EXIT, IrOpcode.GOTO,
+        -> true
+        IrOpcode.RETURN -> insn.argCount == 0
+        else -> false
+    }
+
+    /** The producer instructions feeding [value] (inlined into the initializer), or null if not self-contained. */
+    private fun inlinedProducerTree(value: Operand): Set<Instruction>? {
+        if (!canInline(value, HashSet())) return null
+        val out = HashSet<Instruction>()
+        fun walk(op: Operand) {
+            val insn = when (op) {
+                is InstructionOperand -> op.instruction
+                is RegisterOperand -> op.ssaValue?.assign?.parent
+                else -> null
+            } ?: return
+            if (!out.add(insn)) return
+            for (i in 0 until insn.argCount) walk(insn.getArg(i))
+        }
+        walk(value)
+        return out
+    }
+
+    private fun readsAny(insn: Instruction, values: Set<com.jadxmp.ir.node.SsaValue>): Boolean {
+        for (i in 0 until insn.argCount) {
+            when (val op = insn.getArg(i)) {
+                is RegisterOperand -> if (op.ssaValue in values) return true
+                is InstructionOperand -> if (readsAny(op.instruction, values)) return true
+                else -> {}
+            }
+        }
+        return false
+    }
+
+    /** The defining instruction to inline for [reg], or null if it isn't a pure inlinable producer. */
+    private fun inlinableDef(reg: RegisterOperand): Instruction? {
+        if (isThis(reg)) return null
+        val def = reg.ssaValue?.assign?.parent ?: return null
+        return if (def.opcode in INLINABLE_OPCODES) def else null
+    }
+
+    /** Whether [op] resolves to a self-contained (no free register/`this`) expression tree. */
+    private fun canInline(op: Operand, visited: MutableSet<Instruction>): Boolean = when (op) {
+        is LiteralOperand -> true
+        is InstructionOperand -> canInlineInsn(op.instruction, visited)
+        is RegisterOperand -> {
+            if (isThis(op)) {
+                false
+            } else {
+                val def = op.ssaValue?.assign?.parent
+                def != null && def.opcode in INLINABLE_OPCODES && canInlineInsn(def, visited)
+            }
+        }
+    }
+
+    private fun canInlineInsn(insn: Instruction, visited: MutableSet<Instruction>): Boolean {
+        if (!visited.add(insn)) return false // cyclic ⇒ not inlinable
+        if (insn.opcode !in INLINABLE_OPCODES) return false
+        for (i in 0 until insn.argCount) {
+            if (!canInline(insn.getArg(i), visited)) return false
+        }
+        return true
     }
 
     private fun emitRegister(reg: RegisterOperand) {
@@ -1177,5 +1333,60 @@ internal class MethodBodyWriter(
         is IrType.Object -> type.className
         is IrType.ArrayType -> classNameForRef(type.element)
         else -> null
+    }
+
+    // ---------- <clinit> terminal-return detection ----------
+
+    /**
+     * The terminal `return-void` of a `<clinit>` — the one that would render as the last statement of the
+     * companion `init { … }` block — or null. Only the terminal one is matched (last instruction of the
+     * body's last leaf block), so an early conditional return-void stays rendered (no silent code loss).
+     */
+    private fun findClinitTerminalReturn(): Instruction? {
+        if (method.name != CLASS_INIT_NAME) return null
+        val block = lastBodyBlock() ?: return null
+        val last = block.instructions.lastOrNull { !it.contains(AttrFlag.DONT_GENERATE) } ?: return null
+        return if (last.opcode == IrOpcode.RETURN && last.argCount == 0) last else null
+    }
+
+    private fun lastBodyBlock(): BasicBlock? = when (val region = method.region) {
+        null -> method.blocks.lastOrNull { it.instructions.isNotEmpty() }
+        else -> lastLeafBlock(region)
+    }
+
+    private fun lastLeafBlock(container: IrContainer): BasicBlock? = when (container) {
+        is BasicBlock -> container
+        is SequenceRegion -> container.children.lastOrNull()?.let { lastLeafBlock(it) }
+        else -> null
+    }
+
+    private companion object {
+        const val CLASS_INIT_NAME = "<clinit>"
+
+        /**
+         * Opcodes a hoisted `static final` initializer may inline through — only producers that are
+         * genuinely **self-contained expressions**. Excludes `NEW_ARRAY` (a sized `new T[n]` filled by
+         * separate `ARRAY_PUT`s outside this DAG — inlining would drop the elements) and `NEW_INSTANCE`
+         * (an unfused allocation that renders an error marker); `CONSTRUCTOR`/`FILLED_NEW_ARRAY` carry
+         * their arguments/elements inline and so ARE self-contained.
+         */
+        val INLINABLE_OPCODES = setOf(
+            IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.CONST_CLASS,
+            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG,
+            IrOpcode.CAST, IrOpcode.CHECK_CAST, IrOpcode.ARITH, IrOpcode.NEG, IrOpcode.NOT,
+            IrOpcode.INSTANCE_OF, IrOpcode.ARRAY_LENGTH, IrOpcode.ARRAY_GET,
+            IrOpcode.FILLED_NEW_ARRAY, IrOpcode.STATIC_GET, IrOpcode.INSTANCE_GET,
+            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR, IrOpcode.TERNARY, IrOpcode.STRING_CONCAT,
+        )
+
+        /**
+         * Inlinable opcodes whose value is **order-sensitive**: they read mutable heap state (a field or
+         * array element) or perform a call that may have a side effect / observe mutable state. A tree
+         * containing any of these must not be hoisted ahead of a surviving `<clinit>` statement.
+         */
+        val ORDER_SENSITIVE_OPCODES = setOf(
+            IrOpcode.STATIC_GET, IrOpcode.INSTANCE_GET, IrOpcode.ARRAY_GET,
+            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR,
+        )
     }
 }
