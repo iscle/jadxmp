@@ -9,6 +9,7 @@ import com.jadxmp.pipeline.cfg.Dominators
 import com.jadxmp.pipeline.constructor.ConstructorArgTernaryFold
 import com.jadxmp.pipeline.constructor.ConstructorReconstruction
 import com.jadxmp.pipeline.decode.MethodDecoder
+import com.jadxmp.pipeline.inline.MethodInliner
 import com.jadxmp.pipeline.pass.MethodPass
 import com.jadxmp.pipeline.pass.PassContext
 import com.jadxmp.pipeline.pass.PassRunner
@@ -23,6 +24,7 @@ import com.jadxmp.pipeline.types.TypeInference
 /** Canonical pass names, referenced by ordering hints. */
 object PassNames {
     const val BUILD_CFG = "BuildCfg"
+    const val METHOD_INLINE = "MethodInline"
     const val DOMINATORS = "Dominators"
     const val SSA = "Ssa"
     const val TYPE_INFERENCE = "TypeInference"
@@ -53,6 +55,22 @@ class BuildCfgPass : MethodPass {
             method.add(AttrFlag.HAS_ERROR)
         }
         CfgBuilder(method, code, context.cancellation).build()
+    }
+}
+
+/**
+ * Inline simple synthetic/bridge forwarder methods into their call sites and drop the forwarder
+ * (jadx: MethodInlineVisitor). Runs after CFG build and before dominators/SSA, so a rewritten call is
+ * an ordinary direct call to every downstream stage. Only a provably-identity static forwarder is
+ * touched (see [MethodInliner]); everything else is left unchanged, so no non-glue method is affected.
+ */
+class MethodInlinePass : MethodPass {
+    override val name: String get() = PassNames.METHOD_INLINE
+    override val runAfter: List<String> get() = listOf(PassNames.BUILD_CFG)
+    override val runBefore: List<String> get() = listOf(PassNames.DOMINATORS)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        MethodInliner(context.root).process(method)
     }
 }
 
@@ -186,6 +204,7 @@ class ConstructorArgTernaryFoldPass : MethodPass {
 object AnalysisPipeline {
     val methodPasses: List<MethodPass> = listOf(
         BuildCfgPass(),
+        MethodInlinePass(),
         DominatorsPass(),
         SsaPass(),
         TypeInferencePass(),
