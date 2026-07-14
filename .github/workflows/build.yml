@@ -1,0 +1,107 @@
+name: Build, Test & Desktop Artifacts
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test (JVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The engine modules use the Android Multiplatform Library plugin, so the whole
+      # Gradle build needs the Android SDK to even configure — required for the JVM tests too.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile (all common + JVM)
+        run: ./gradlew compileKotlinJvm --stacktrace
+
+      - name: Wasm-safety check (engine must compile for wasmJs)
+        run: ./gradlew :core:pipeline:compileKotlinWasmJs :core:ir:compileKotlinWasmJs :core:api:compileKotlinWasmJs --stacktrace
+
+      - name: Run JVM unit tests
+        run: ./gradlew jvmTest --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/**'
+          if-no-files-found: ignore
+
+  desktop:
+    name: Desktop artifact (${{ matrix.name }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Native installer for the current OS (Compose Desktop: .deb on Linux, .msi on Windows, .dmg on macOS).
+      - name: Package native distribution
+        run: ./gradlew :desktopApp:packageDistributionForCurrentOS --stacktrace
+
+      # Also produce a runnable app image (no OS installer tooling required) as a robust fallback artifact.
+      - name: Create distributable app image
+        run: ./gradlew :desktopApp:createDistributable --stacktrace
+
+      - name: Upload native installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: jadxmp-desktop-installer-${{ matrix.name }}
+          path: |
+            desktopApp/build/compose/binaries/main/deb/*.deb
+            desktopApp/build/compose/binaries/main/msi/*.msi
+            desktopApp/build/compose/binaries/main/dmg/*.dmg
+          if-no-files-found: warn
+
+      - name: Upload app image
+        uses: actions/upload-artifact@v4
+        with:
+          name: jadxmp-desktop-app-${{ matrix.name }}
+          path: desktopApp/build/compose/binaries/main/app/**
+          if-no-files-found: warn
