@@ -68,6 +68,14 @@ internal class MethodBodyWriter(
     private val declared = HashSet<Any>()
     private var nextVarId = 0
 
+    // A method PARAMETER that is reassigned in the body, keyed like [varKey]. In Kotlin a parameter is
+    // `val` (immutable), so a body write `p = …` would not compile. We keep the parameter itself `val`
+    // (unchanged in the signature) and, at method entry, introduce a mutable copy `var pCopy = p`; every
+    // body occurrence of the parameter — read AND write — is redirected to the copy (see [setupParamCopies]
+    // / [varRefFor]). Faithful: the copy is initialised to the parameter before any statement, so a read of
+    // the copy equals the parameter on every path up to the first reassignment, and tracks it exactly after.
+    private val paramCopyRefs = HashMap<Any, VarRef>()
+
     // Per-enclosing-loop update clause to replay before a `continue` targets that loop. A lowered
     // `for` pushes its update; every other loop pushes null (their `continue` is native). The innermost
     // loop (top of stack) is the one an unlabeled `continue` targets — see [emitForLoop] / M1.
@@ -170,6 +178,9 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        // Introduce `var pCopy = p` for every parameter reassigned in the body BEFORE emitting any
+        // statement, so the copy is in scope (and initialised to the parameter) for every use.
+        setupParamCopies()
         val region = method.region
         if (region != null) {
             emitRegion(region)
@@ -181,6 +192,105 @@ internal class MethodBodyWriter(
             isLinear(blocks) -> blocks.forEach { emitStatements(it) }
             else -> emitLabeledBlockFallback(blocks)
         }
+    }
+
+    // ---------- reassigned-parameter copies (Kotlin params are `val`) ----------
+
+    /**
+     * Detect every parameter that is *reassigned* somewhere in the body and, for each, emit a mutable copy
+     * `var <copy>: <T> = <param>` at method entry, registering the copy so [varRefFor] redirects all later
+     * parameter reads/writes to it. A parameter that is only READ gets no copy (rule 4: only copy a genuine
+     * reassignment). `this` is never copied (it cannot be reassigned).
+     *
+     * Faithfulness: the copy is declared before the first statement and initialised to the parameter, so it
+     * dominates every use and equals the parameter until the first write — reading the copy never changes
+     * which value is observed on any path, and no assignment is dropped. The parameter itself stays `val`
+     * and unmodified in the signature. A reassigned register that is NOT a real parameter (e.g. a raw
+     * register later reused as an ordinary local) is a distinct source variable with its own name and is
+     * left untouched — only registers carrying the parameter's [AttrFlag.METHOD_ARGUMENT] marker are copied.
+     */
+    private fun setupParamCopies() {
+        val writes = LinkedHashMap<Any, RegisterOperand>()
+        forEachBodyStatement { insn ->
+            val res = insn.result ?: return@forEachBodyStatement
+            if (isReassignableParam(res)) {
+                val key = varKey(res)
+                if (key !in writes) writes[key] = res
+            }
+        }
+        for ((key, reg) in writes) {
+            val original = baseVarRefFor(reg) // the parameter's own ref/name (copy map not yet consulted)
+            val copyRef = VarRef(nextVarId++, names.unique(original.name))
+            // The type is INFERRED from the parameter (`var copy = p`), never spelled out: the parameter's
+            // own static type is exactly right for the copy, and it avoids a mismatch between the signature
+            // type (declared argType) and this backend's inferred local type (which may be more specific,
+            // e.g. `ArrayList` vs a `List` parameter — an explicit copy type would then not compile).
+            code.add("var ")
+            code.variable(copyRef, declaration = true)
+            code.add(" = ")
+            code.variable(original, declaration = false)
+            code.newLine()
+            paramCopyRefs[key] = copyRef
+            declared.add(key) // so a body write renders `copy = …`, never a fresh declaration
+        }
+    }
+
+    /** A reassignable parameter: a genuine method argument (not `this`) — the one case a Kotlin `val` blocks. */
+    private fun isReassignableParam(reg: RegisterOperand): Boolean = !isThis(reg) && isPreDeclared(reg)
+
+    /**
+     * Invoke [action] for every instruction [writeBody] would emit as a statement, walking the region tree
+     * when present (else the linear block list) so detection sees exactly what emission does. Skips
+     * instructions that emit nothing (DONT_GENERATE / structural opcodes) and the constructor delegation
+     * already hoisted into the header — so a non-emitted write never triggers a spurious copy.
+     */
+    private fun forEachBodyStatement(action: (Instruction) -> Unit) {
+        val region = method.region
+        if (region != null) {
+            walkRegionStatements(region, action)
+        } else {
+            for (block in method.blocks) for (insn in block.instructions) visitStatement(insn, action)
+        }
+    }
+
+    private fun walkRegionStatements(region: Region, action: (Instruction) -> Unit) {
+        when (region) {
+            is SequenceRegion -> region.children.forEach { walkContainerStatements(it, action) }
+            is IfRegion -> {
+                walkRegionStatements(region.thenRegion, action)
+                region.elseRegion?.let { walkRegionStatements(it, action) }
+            }
+            is LoopRegion -> {
+                region[CodegenKeys.LOOP_INIT]?.let { visitStatement(it, action) }
+                walkRegionStatements(region.body, action)
+                region[CodegenKeys.LOOP_UPDATE]?.let { visitStatement(it, action) }
+            }
+            is SwitchRegion -> {
+                region.cases.forEach { walkRegionStatements(it.body, action) }
+                region.defaultCase?.let { walkRegionStatements(it, action) }
+            }
+            is TryCatchRegion -> {
+                walkRegionStatements(region.tryRegion, action)
+                region.catches.forEach { walkRegionStatements(it.body, action) }
+                region.finallyRegion?.let { walkRegionStatements(it, action) }
+            }
+            is SyncRegion -> walkRegionStatements(region.body, action)
+        }
+    }
+
+    private fun walkContainerStatements(c: IrContainer, action: (Instruction) -> Unit) {
+        when (c) {
+            is BasicBlock -> for (insn in c.instructions) visitStatement(insn, action)
+            is Region -> walkRegionStatements(c, action)
+            else -> {}
+        }
+    }
+
+    private fun visitStatement(insn: Instruction, action: (Instruction) -> Unit) {
+        if (insn === headerDelegation) return
+        if (insn.contains(AttrFlag.DONT_GENERATE)) return
+        if (isSkippedStatement(insn)) return
+        action(insn)
     }
 
     private fun isLinear(blocks: List<BasicBlock>): Boolean {
@@ -507,7 +617,10 @@ internal class MethodBodyWriter(
         // DUPLICATED into another region position; the first copy's declaration is out of scope in a
         // sibling arm, so re-declare it locally in each copy. Fires ONLY on re-emission — a no-op for a
         // block emitted once. Cross-block / coalesced values are never marked (single declaration kept).
-        val redeclareDuplicate = key in declared && insn.contains(AttrFlag.BLOCK_LOCAL_TEMP)
+        // A reassigned-parameter copy is a single method-entry declaration; a body write is always a plain
+        // reassignment to it (never a re-declaration), even inside a duplicated block.
+        val isParamCopy = key in paramCopyRefs
+        val redeclareDuplicate = !isParamCopy && key in declared && insn.contains(AttrFlag.BLOCK_LOCAL_TEMP)
         if (redeclareDuplicate || (key !in declared && !isPreDeclared(result))) {
             // First-pass locals are `var` (always reassignable → always compiles); the declared type is
             // spelled out since inference from the RHS alone can be unsound (e.g. a null literal).
@@ -985,6 +1098,14 @@ internal class MethodBodyWriter(
     private fun varKey(reg: RegisterOperand): Any = reg.ssaValue?.localVar ?: reg.ssaValue ?: reg.regNum
 
     private fun varRefFor(reg: RegisterOperand): VarRef {
+        // A reassigned parameter renders as its mutable body copy everywhere in the body. The map is empty
+        // until [setupParamCopies] runs (start of [writeBody]), so the constructor delegation header — which
+        // is emitted BEFORE the body and is out of the copy's scope — still reads the original parameter.
+        paramCopyRefs[varKey(reg)]?.let { return it }
+        return baseVarRefFor(reg)
+    }
+
+    private fun baseVarRefFor(reg: RegisterOperand): VarRef {
         val key = varKey(reg)
         varRefs[key]?.let { return it }
         val preDeclared = isPreDeclared(reg)
