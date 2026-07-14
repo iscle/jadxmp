@@ -62,6 +62,8 @@ object TestPipeline {
     /** Decode + CFG + dominators (+ post-dominators). */
     fun dominators(method: IrMethod): MethodCode {
         val code = cfg(method)
+        // Mirror the real pipeline: node-split irreducible multi-entry loops before dominators/SSA.
+        com.jadxmp.pipeline.cfg.FixMultiEntryLoops(method).process()
         Dominators.compute(method)
         Dominators.computePostDominators(method)
         return code
