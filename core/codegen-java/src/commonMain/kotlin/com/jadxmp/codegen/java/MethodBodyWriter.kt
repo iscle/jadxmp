@@ -110,6 +110,20 @@ internal class MethodBodyWriter(
     // where the source registers have no declaration. Only enabled during [emitEnumConstantArgs].
     private var inlineRegisters = false
 
+    // Whether the enclosing class renders as a reconstructed enum (so its `<init>` params have the
+    // synthetic `name`/`ordinal` stripped in the declaration). Computed at most once, and only when a
+    // same-class constructor delegation is actually emitted.
+    private var enclosingEnumComputed = false
+    private var enclosingEnum = false
+
+    private fun enclosingIsReconstructedEnum(): Boolean {
+        if (!enclosingEnumComputed) {
+            enclosingEnum = EnumReconstruction.analyze(method.declaringClass) != null
+            enclosingEnumComputed = true
+        }
+        return enclosingEnum
+    }
+
     // Identity/value keyed: LocalVar or SsaValue (identity, no equals override) or a boxed regNum (value).
     private val varRefs = HashMap<Any, VarRef>()
     private val declared = HashSet<Any>()
@@ -1046,18 +1060,30 @@ internal class MethodBodyWriter(
         // `new FileNotFoundException("")` as an illegal `super("")` in the middle of a method.
         if (method.isConstructor) {
             val receiver = invoke.instanceArg
-            val firstArg = if (invoke.hasInstance) 1 else 0
+            var firstArg = if (invoke.hasInstance) 1 else 0
+            var paramTypes = method.paramTypes
             if (receiver is RegisterOperand && isThis(receiver)) {
                 // DEX has no `invoke-super` for constructors, so decide this()/super() by target class.
                 val enclosingName = this.method.declaringClass.fullName
                 val targetName = (method.declaringType as? IrType.Object)?.className
-                code.add(if (targetName == enclosingName) "this" else "super")
+                val sameClass = targetName == enclosingName
+                code.add(if (sameClass) "this" else "super")
+                // A same-class `this(...)` delegation inside a reconstructed enum forwards the synthetic
+                // leading `name`/`ordinal` the enclosing enum ctor received; the sibling ctor's declaration
+                // has those two params stripped (emitEnumConstructor), so strip them from the forwarded
+                // args too — else the arg list wouldn't line up with the stripped signature (and would even
+                // reference the now-removed name/ordinal locals).
+                if (sameClass && enclosingIsReconstructedEnum()) {
+                    val skip = EnumReconstruction.syntheticArgCount(paramTypes.size)
+                    firstArg += skip
+                    paramTypes = paramTypes.drop(skip)
+                }
             } else {
                 // Constructor call on another object (usually an inlined `new`): render `new T(args)`.
                 code.add("new ")
                 emitTypeRef(method.declaringType)
             }
-            emitArgList(invoke, firstArg, method.paramTypes)
+            emitArgList(invoke, firstArg, paramTypes)
             return
         }
 

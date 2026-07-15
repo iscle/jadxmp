@@ -277,6 +277,80 @@ class ConstructorReconstructionTest {
         assertTrue(allInsns(method).none { it.opcode == IrOpcode.CONSTRUCTOR }, "no arm was partially materialized")
     }
 
+    private val SAMPLE = "Lcom/example/Sample;"
+    private fun sampleCtorRef(vararg params: String) = FakeMethodRef(SAMPLE, "<init>", "V", params.toList())
+
+    @Test
+    fun thisDelegationThroughMoveIsRecognizedNotFused() {
+        // A same-class `this()` delegation whose receiver is a MOVE copy of `this`:
+        //   move-object v0, p0(this); invoke-direct {v0}, Sample.<init>(); return-void
+        // Must be recognized as a delegation (receiver collapsed onto `this`), never fused into a
+        // CONSTRUCTOR (which codegen would render as a spurious `new Sample()` — a rule-4 silent miscompile).
+        val reader = FakeCodeReader(
+            2, // v0 = temp, v1 = this (the sole param of a no-arg instance ctor)
+            listOf(
+                Insn(Opcode.MOVE_OBJECT, 0, intArrayOf(0, 1)), // v0 <- this
+                Insn(Opcode.INVOKE_DIRECT, 1, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = sampleCtorRef()),
+                Insn(Opcode.RETURN_VOID, 2),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, isStatic = false)
+        run(method)
+
+        assertTrue(allInsns(method).none { it.opcode == IrOpcode.CONSTRUCTOR }, "this() delegation must not be fused")
+        val invoke = allInsns(method).single { it is InvokeInstruction && it.methodRef.isConstructor } as InvokeInstruction
+        assertEquals(IrOpcode.INVOKE, invoke.opcode)
+        assertEquals(method.thisArg, (invoke.instanceArg as RegisterOperand).ssaValue, "receiver collapsed onto `this`")
+    }
+
+    @Test
+    fun thisDelegationThroughPhiOfMovedThisIsRecognized() {
+        // The branched-default-args shape: `this` reaches the receiver via a φ merging a moved `this` from
+        // each arm, then a same-class `this()` delegation. Both φ operands resolve to `this`, so the whole
+        // thing is a delegation — never a `new Sample()`.
+        //   if (p1==0) v0 <- this else v0 <- this   (φ at join); invoke-direct {v0}, Sample.<init>()
+        val reader = FakeCodeReader(
+            3, // v0 = temp, v1 = this, v2 = int param (condition)
+            listOf(
+                Insn(Opcode.IF_EQZ, 0, intArrayOf(2), target = 3), // if v2==0 -> else(off3)
+                Insn(Opcode.MOVE_OBJECT, 1, intArrayOf(0, 1)), // then: v0 <- this
+                Insn(Opcode.GOTO, 2, target = 4), // -> join(off4)
+                Insn(Opcode.MOVE_OBJECT, 3, intArrayOf(0, 1)), // else: v0 <- this
+                Insn(Opcode.INVOKE_DIRECT, 4, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = sampleCtorRef()),
+                Insn(Opcode.RETURN_VOID, 5),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, isStatic = false, argTypes = listOf(IrType.INT))
+        run(method)
+
+        assertTrue(allInsns(method).none { it.opcode == IrOpcode.CONSTRUCTOR }, "φ-of-this delegation must not be fused")
+        val invoke = allInsns(method).single { it is InvokeInstruction && it.methodRef.isConstructor } as InvokeInstruction
+        assertEquals(IrOpcode.INVOKE, invoke.opcode)
+        assertEquals(method.thisArg, (invoke.instanceArg as RegisterOperand).ssaValue, "receiver collapsed onto `this`")
+    }
+
+    @Test
+    fun genuineNewOfSameClassStillFusesToNew() {
+        // Over-fire guard: a REAL `new Sample()` inside Sample's own ctor — the receiver is a fresh
+        // new-instance, NOT `this` — must stay a construction (`new Sample()`), never be mis-read as a
+        // `this()` delegation. Same class name, but the receiver does not resolve to `this`.
+        //   new-instance v0, Sample; invoke-direct {v0}, Sample.<init>(); return-void
+        val reader = FakeCodeReader(
+            2, // v0 = the fresh object, v1 = this
+            listOf(
+                Insn(Opcode.NEW_INSTANCE, 0, intArrayOf(0), indexType = IndexType.TYPE_REF, typeValue = SAMPLE),
+                Insn(Opcode.INVOKE_DIRECT, 1, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = sampleCtorRef()),
+                Insn(Opcode.RETURN_VOID, 2),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, isStatic = false)
+        run(method)
+
+        assertTrue(allInsns(method).none { it.opcode == IrOpcode.NEW_INSTANCE }, "genuine new-instance is fused")
+        val ctor = allInsns(method).single { it.opcode == IrOpcode.CONSTRUCTOR } as InvokeInstruction
+        assertTrue(ctor.methodRef.isConstructor, "a genuine `new Sample()` stays a construction, not a this() delegation")
+    }
+
     @Test
     fun superDelegationIsNotTouched() {
         // invoke-direct {this}, Object.<init>()  — a super() call, no new-instance behind `this`.
