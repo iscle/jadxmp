@@ -47,6 +47,7 @@ import com.jadxmp.pipeline.pass.CancellationCheck
 internal class OutOfSsa(
     private val method: IrMethod,
     private val cancellation: CancellationCheck = CancellationCheck.None,
+    private val hierarchy: com.jadxmp.pipeline.types.ClassHierarchy? = null,
 ) {
     /** Thrown internally when SSA destruction cannot be done safely; the pass turns it into "no region". */
     class UnsupportedShapeException(message: String) : RuntimeException(message)
@@ -74,7 +75,8 @@ internal class OutOfSsa(
             for (group in groups) {
                 cancellation.ensureActive()
                 if (group.members.size <= 1 || !interferes(group)) {
-                    coalesce(group)
+                    val splitParam = conflictingParam(group)
+                    if (splitParam != null) coalesceSplittingParam(group, splitParam) else coalesce(group)
                 } else {
                     insertCopies(group)
                 }
@@ -237,6 +239,130 @@ internal class OutOfSsa(
             if (type == null && member.type.isTypeKnown) type = member.type
         }
         local.type = type ?: group.members.firstOrNull()?.type
+        if (local.ssaValues.size > 1) mergedLocals.add(local)
+    }
+
+    /** SSA values that are method parameters (defined at entry, fixed signature type). */
+    private val paramValues: Set<SsaValue> = method[PipelineAttrs.PARAMETERS]?.toHashSet() ?: emptySet()
+
+    /**
+     * A parameter member of an interference-free (coalescing) [group] whose fixed signature type CANNOT
+     * hold every other member's value — a type conflict that would miscompile if coalesced.
+     *
+     * A merged local containing a parameter is rendered by codegen under the parameter's **fixed** name and
+     * signature type (it cannot be widened). So if another member's value is not assignable to that type —
+     * e.g. register `p1` is the `String` parameter yet is later reassigned `Integer.valueOf(…)` /
+     * `Boolean.valueOf(…)` whose results merge back into it — coalescing emits an uncompilable cross-type
+     * store (`String str = Integer.valueOf(…)`). Such a parameter must be split out ([coalesceSplittingParam]).
+     * Returns null (⇒ ordinary coalesce, unchanged behavior) unless a class hierarchy is available and there
+     * is exactly one parameter member with a genuine, **provable** conflict.
+     *
+     * Crucially, the conflict must be *proven*, not merely *unprovable*: [ClassHierarchy] is conservative, so
+     * for two UNLOADED library types a non-subtype answer only means "cannot prove a subtype" — the two may
+     * still be genuinely compatible (e.g. an unloaded `rx.c.c` that really IS an `rx.i`). Splitting on that
+     * would needlessly discard the real receiver type (widening the local to `Object`) and diverge from the
+     * oracle. So we split ONLY on [ClassHierarchy.provablyNotSubtype] (a final param type, or two loaded
+     * types) and keep the status-quo coalesce whenever the relation is unknown.
+     */
+    private fun conflictingParam(group: Component): SsaValue? {
+        val h = hierarchy ?: return null // no hierarchy ⇒ cannot prove a conflict; keep status-quo coalesce
+        if (group.members.size <= 1) return null
+        val params = group.members.filter { it in paramValues }
+        val p = params.singleOrNull() ?: return null // 0 params, or ≥2 (ambiguous) ⇒ leave as-is
+        val pType = p.type
+        if (!pType.isTypeKnown || pType !is IrType.Object) return null
+        val conflict = group.members.any { m ->
+            m !== p && m.type.isTypeKnown && h.provablyNotSubtype(m.type, pType)
+        }
+        return if (conflict) p else null
+    }
+
+    /**
+     * Coalesce [group] **excluding** the conflicting [param], which keeps its own parameter local. The
+     * remaining members merge into one local typed to their join (a common supertype of all of them). The
+     * parameter's φ-edge contribution is reproduced by a **dominating pre-assignment** `merged = param` at a
+     * point dominating every occurrence: every OTHER φ operand is itself in `merged` and assigns it on its
+     * own incoming path, so `merged` still holds `param` on exactly the edges the φ named it — identical
+     * observable behavior, with no critical-edge copy needed. `param` (defined at method entry) dominates
+     * that point, so the pre-assignment is always in scope.
+     */
+    private fun coalesceSplittingParam(group: Component, param: SsaValue) {
+        val h = hierarchy!!
+        val local = LocalVar()
+        var joined: IrType? = null
+        for (member in group.members) {
+            if (member === param) continue
+            local.addSsaValue(member) // param is intentionally left out ⇒ CodegenBridge gives it its own local
+            if (member.type.isTypeKnown) {
+                joined = if (joined == null) member.type else h.commonSuperType(joined, member.type)
+            }
+        }
+        local.type = joined ?: param.type
+        materializeParamPreAssign(local, param)
+    }
+
+    /**
+     * Insert `local = param` at a point that dominates every occurrence of [local] and lies **outside every
+     * try and every loop** that carries the accumulator — reproducing the parameter's φ edge exactly once.
+     *
+     * The point must be:
+     *  - a strict dominating block that itself neither defines nor uses [local] ([at] `∉` occurrences), so
+     *    the end-of-block insertion can never sit after an in-block use (uninitialized read) or clobber an
+     *    in-block def;
+     *  - outside every enclosing try (a def inside `try {}` is invisibly scoped); and
+     *  - outside every loop that contains one of the merged members' DEFS — otherwise the pre-assign would
+     *    re-execute each iteration and RESET the accumulator (a silent miscompile).
+     *
+     * Any of these unmet ⇒ [fallbackCoalesceWithParam] (the honest status-quo coalesce), never an unsound
+     * placement (rule 4).
+     */
+    private fun materializeParamPreAssign(local: LocalVar, param: SsaValue) {
+        val byId = HashMap<Int, BasicBlock>(blocks.size)
+        for (b in blocks) byId[b.id] = b
+        val defBlocksOfMembers = local.ssaValues.mapNotNull { defBlock[it] }.toHashSet()
+        val occ = HashSet<BasicBlock>()
+        for (m in local.ssaValues) {
+            defBlock[m]?.let { occ.add(it) }
+            for (u in m.uses) u.parent?.let { p -> blockOfCached(p)?.let { occ.add(it) } }
+        }
+        if (occ.isEmpty()) return
+        val common = deepestCommonDominator(occ, byId) ?: run { fallbackCoalesceWithParam(local, param); return }
+        // Walk the point out of every enclosing try AND out of every loop the occurrences straddle, so it is
+        // a genuine pre-header of any accumulator loop rather than a per-iteration reset.
+        val loops = computeLoops()
+        val hoistedLoop = hoistOutOfEscapedLoops(common, occ, loops) ?: run {
+            fallbackCoalesceWithParam(local, param); return
+        }
+        val at = hoistOutOfProtected(hoistedLoop)
+        val safe = occ.all { at.id in it.dominators } && // dominates every occurrence
+            at !in occ && // holds no def/use of the merged local ⇒ no in-block ordering hazard
+            loops.none { (_, body) -> at in body && defBlocksOfMembers.any { it in body } } // not a resetting loop
+        if (!safe) {
+            fallbackCoalesceWithParam(local, param)
+            return
+        }
+        val type = local.type ?: param.type
+        val dstReg = RegisterOperand(param.regNum, type)
+        val dstValue = SsaValue(param.regNum, method.ssaValues.size, dstReg)
+        local.addSsaValue(dstValue)
+        method.ssaValues.add(dstValue)
+        // Register the pre-assign as this value's def site so declaration-scoping sees a dominating def and
+        // does NOT add a redundant `merged = default` init after it (which would clobber the param value).
+        defBlock[dstValue] = at
+        val srcReg = RegisterOperand(param.regNum, param.type)
+        srcReg.ssaValue = param
+        param.addUse(srcReg)
+        val move = Instruction(IrOpcode.MOVE, dstReg, listOf(srcReg))
+        val insns = at.instructions
+        val insertAt = if (insns.isNotEmpty() && isTerminator(insns.last())) insns.size - 1 else insns.size
+        insns.add(insertAt, move)
+        if (local.ssaValues.size > 1) mergedLocals.add(local)
+    }
+
+    /** Give up on the split and fold [param] back into [local] (the ordinary coalesced form). */
+    private fun fallbackCoalesceWithParam(local: LocalVar, param: SsaValue) {
+        local.addSsaValue(param)
+        if (local.type == null && param.type.isTypeKnown) local.type = param.type
         if (local.ssaValues.size > 1) mergedLocals.add(local)
     }
 
