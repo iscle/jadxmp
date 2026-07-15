@@ -95,6 +95,7 @@ fun TreePane(
                 label = "Flatten",
                 onClick = onToggleFlatten,
                 selected = tree.flattenPackages,
+                tooltip = "Flatten packages (show as a single list)",
             )
         }
         // Source / Resources selector

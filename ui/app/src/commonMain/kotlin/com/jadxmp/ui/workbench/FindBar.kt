@@ -180,13 +180,13 @@ internal fun FindBar(
                 color = scheme.onSurfaceVariant,
             )
         }
-        ToolbarButton(onClick = onPrev, enabled = state.count > 0, square = true) { tint ->
+        ToolbarButton(onClick = onPrev, enabled = state.count > 0, square = true, tooltip = "Previous match (Shift+Enter)") { tint ->
             DirectionCaret(pointsLeft = true, tint = tint)
         }
-        ToolbarButton(onClick = onNext, enabled = state.count > 0, square = true) { tint ->
+        ToolbarButton(onClick = onNext, enabled = state.count > 0, square = true, tooltip = "Next match (Enter)") { tint ->
             DirectionCaret(pointsLeft = false, tint = tint)
         }
-        ToolbarTextButton("Aa", onClick = { onMatchCaseChange(!state.matchCase) }, selected = state.matchCase)
-        ToolbarButton(onClick = onClose, square = true) { tint -> CloseGlyph(tint = tint) }
+        ToolbarTextButton("Aa", onClick = { onMatchCaseChange(!state.matchCase) }, selected = state.matchCase, tooltip = "Match case")
+        ToolbarButton(onClick = onClose, square = true, tooltip = "Close (Esc)") { tint -> CloseGlyph(tint = tint) }
     }
 }

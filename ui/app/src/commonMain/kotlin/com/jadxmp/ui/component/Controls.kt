@@ -16,8 +16,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -37,7 +43,15 @@ import com.jadxmp.ui.theme.MonoFontFamily
  * Flat toolbar affordance: transparent until hovered, tinted when selected. No ripple — the
  * instrument aesthetic prefers a quiet background shift over Material ripple. [content] draws the
  * glyph or label; use [contentTint] for the current interactive color.
+ *
+ * Pass [tooltip] to describe an icon-only button (jadx-gui parity: hover labels). A non-null value
+ * wraps the button in a Material3 [TooltipBox], which shows the label on **mouse hover**
+ * (desktop/web) and on long-press (touch) via `enableUserInput` — so it works on every target the
+ * engine ships to. The tooltip drops *below* the anchor ([TooltipAnchorPosition.Below]) because the
+ * toolbar hugs the top edge; an above-anchor tooltip would clip off-screen. Hover detection lives on
+ * the TooltipBox wrapper, independent of [enabled], so even a disabled button explains itself.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ToolbarButton(
     onClick: () -> Unit,
@@ -45,6 +59,7 @@ fun ToolbarButton(
     enabled: Boolean = true,
     selected: Boolean = false,
     square: Boolean = false,
+    tooltip: String? = null,
     content: @Composable (tint: Color) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -67,19 +82,31 @@ fun ToolbarButton(
             .defaultMinSize(minWidth = JadxTheme.spacing.iconButtonSize, minHeight = JadxTheme.spacing.iconButtonSize)
             .padding(horizontal = JadxTheme.spacing.sm)
     }
-    Box(
-        Modifier
-            .clip(MaterialTheme.shapes.small)
-            .background(background)
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
-            .then(base),
-        contentAlignment = Alignment.Center,
-    ) {
-        content(tint)
+    val button = @Composable {
+        Box(
+            Modifier
+                .clip(MaterialTheme.shapes.small)
+                .background(background)
+                .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+                .then(base),
+            contentAlignment = Alignment.Center,
+        ) {
+            content(tint)
+        }
+    }
+    if (tooltip == null) {
+        button()
+    } else {
+        TooltipBox(
+            positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Below),
+            tooltip = { PlainTooltip { Text(tooltip) } },
+            state = rememberTooltipState(),
+            content = button,
+        )
     }
 }
 
-/** Text-labelled toolbar button. */
+/** Text-labelled toolbar button. [tooltip] adds a hover label (e.g. the keyboard shortcut). */
 @Composable
 fun ToolbarTextButton(
     label: String,
@@ -87,8 +114,9 @@ fun ToolbarTextButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     selected: Boolean = false,
+    tooltip: String? = null,
 ) {
-    ToolbarButton(onClick, modifier, enabled, selected) { tint ->
+    ToolbarButton(onClick, modifier, enabled, selected, tooltip = tooltip) { tint ->
         Text(label, style = MaterialTheme.typography.labelMedium, color = tint)
     }
 }

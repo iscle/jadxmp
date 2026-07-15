@@ -421,20 +421,22 @@ private fun WorkbenchToolbar(
             modifier = Modifier.widthIn(max = 240.dp),
         )
         VDivider()
-        ToolbarTextButton("Open", onClick = onOpen)
+        // Shortcut hints below mirror DefaultKeymap (Keybindings.kt); "Ctrl" stands for the platform
+        // command accelerator (Ctrl on Windows/Linux, Cmd on macOS).
+        ToolbarTextButton("Open", onClick = onOpen, tooltip = "Open file (Ctrl+O)")
         // Save the active document's rendered text (P0#7). Disabled with no document open / no saver.
-        ToolbarTextButton("Save", onClick = onSave, enabled = canSave)
+        ToolbarTextButton("Save", onClick = onSave, enabled = canSave, tooltip = "Save file (Ctrl+S)")
         // Export the WHOLE project's sources + resources (P0#7). Disabled with no project open / no exporter.
-        ToolbarTextButton("Export", onClick = onExport, enabled = canExport)
+        ToolbarTextButton("Export", onClick = onExport, enabled = canExport, tooltip = "Export project (Ctrl+Shift+E)")
         VDivider()
-        ToolbarButton(onClick = onBack, enabled = canBack, square = true) { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
-        ToolbarButton(onClick = onForward, enabled = canForward, square = true) { tint -> DirectionCaret(pointsLeft = false, tint = tint) }
+        ToolbarButton(onClick = onBack, enabled = canBack, square = true, tooltip = "Go back (Alt+Left)") { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
+        ToolbarButton(onClick = onForward, enabled = canForward, square = true, tooltip = "Go forward (Alt+Right)") { tint -> DirectionCaret(pointsLeft = false, tint = tint) }
         VDivider()
         // jadx quick actions: open the manifest, jump to the launcher activity, jump to the Application
         // class (all read the manifest, so all are disabled when the container carries none).
-        ToolbarButton(onClick = onOpenManifest, enabled = hasManifest, square = true) { tint -> ManifestGlyph(tint = tint) }
-        ToolbarButton(onClick = onJumpMainActivity, enabled = hasManifest, square = true) { tint -> TargetGlyph(tint = tint) }
-        ToolbarButton(onClick = onJumpApplication, enabled = hasManifest, square = true) { tint -> AppClassGlyph(tint = tint) }
+        ToolbarButton(onClick = onOpenManifest, enabled = hasManifest, square = true, tooltip = "Open AndroidManifest.xml") { tint -> ManifestGlyph(tint = tint) }
+        ToolbarButton(onClick = onJumpMainActivity, enabled = hasManifest, square = true, tooltip = "Go to main activity") { tint -> TargetGlyph(tint = tint) }
+        ToolbarButton(onClick = onJumpApplication, enabled = hasManifest, square = true, tooltip = "Go to Application class") { tint -> AppClassGlyph(tint = tint) }
 
         // Centered command/search box.
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -476,8 +478,12 @@ private fun WorkbenchToolbar(
                 Text("Deobf", style = MaterialTheme.typography.labelMedium, color = scheme.onSurface, fontWeight = FontWeight.Medium)
             }
         }
-        ToolbarTextButton(if (dark) "Light" else "Dark", onClick = onToggleTheme)
-        ToolbarButton(onClick = onToggleSettings, selected = settingsActive, square = true) { tint -> GearGlyph(tint = tint) }
+        ToolbarTextButton(
+            if (dark) "Light" else "Dark",
+            onClick = onToggleTheme,
+            tooltip = if (dark) "Switch to light theme" else "Switch to dark theme",
+        )
+        ToolbarButton(onClick = onToggleSettings, selected = settingsActive, square = true, tooltip = "Settings") { tint -> GearGlyph(tint = tint) }
     }
 }
 
