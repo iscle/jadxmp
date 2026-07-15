@@ -951,4 +951,74 @@ class RegionMakerTryCatchTest {
         assertEquals(1, tc.catches.size)
         assertEquals(2, tc.catches[0].exceptionTypes.size, "a real A|B multi-catch is preserved, not collapsed")
     }
+
+    @Test
+    fun tryBodyWithInternalBridgeBlockAbsorbsItAndStructures() {
+        // A protected body whose control flow leaves the try range through a bare, non-throwing `goto`
+        // block that immediately RE-ENTERS the body (reached only from inside, flowing only back inside) —
+        // the compiler left that `goto` just past `try_end`. Counting it as a second "normal exit" would
+        // multi-exit-bail; it is instead absorbed into the body (exception-neutral, side-effect-free), so
+        // the try has a single follow and structures.
+        //   H:  sink(); if (p0==0) goto X else fall→M
+        //   M:  sink(); goto FOLLOW           (protected, the merge; reached from H-fall and from bridge)
+        //   X:  sink();                       (protected; try_end here — falls into the bridge)
+        //   G:  goto M                        (UNPROTECTED bridge: pred={X}⊆body, succ={M}⊆body)
+        //   FOLLOW: return                    (the single true exit, outside the try)
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall), // H prefix
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4), // H: taken→X(4), fall→M(2)
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = voidCall), // M prefix
+                Insn(Opcode.GOTO, 3, target = 6), // M → FOLLOW(6)
+                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(), methodRef = voidCall), // X (try_end = 4)
+                Insn(Opcode.GOTO, 5, target = 2), // G: UNPROTECTED bridge → M(2)
+                Insn(Opcode.RETURN_VOID, 6), // FOLLOW (outside the try)
+                Insn(Opcode.MOVE_EXCEPTION, 7, intArrayOf(0)), // handler
+                Insn(Opcode.RETURN_VOID, 8),
+            ),
+            tries = listOf(FakeTryBlock(0, 4, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(7), -1))),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.structured(method)
+
+        assertNoPhi(method)
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the internal-bridge try body must fully structure")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR), "absorbing the bridge ⇒ no error flag")
+        val tc = firstRegion<TryCatchRegion>(method)
+        assertNotNull(tc, "a TryCatchRegion must be produced")
+        // The bridge block (its GOTO is at offset 5) renders INSIDE the try region, not as a second follow.
+        val bridge = method.blocks.first { b -> b.instructions.any { it.offset == 5 } }
+        assertTrue(deepBlocks(tc.tryRegion).contains(bridge), "the absorbed bridge block renders inside the try body")
+    }
+
+    @Test
+    fun tryBodyWithTwoGenuineNormalExitsStillBailsHonestly() {
+        // Two protected blocks leave to TWO DISTINCT external follows, neither re-entering the body — a
+        // real multi-exit try (not a bridge). Absorption must NOT fire (the exits do not flow back in), so
+        // the method bails honestly (region==null), never a mis-structured tree (rule 4).
+        //   H:  sink(); if (p0==0) goto X else fall→A
+        //   A:  goto FOLLOW1     (protected)
+        //   X:  goto FOLLOW2     (protected; try_end here)
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall), // H prefix
+                Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 3), // H: taken→X(3), fall→A(2)
+                Insn(Opcode.GOTO, 2, target = 5), // A → FOLLOW1(5)
+                Insn(Opcode.GOTO, 3, target = 6), // X → FOLLOW2(6)  (try_end = 3)
+                Insn(Opcode.RETURN_VOID, 4), // (unreachable filler; keeps offsets contiguous)
+                Insn(Opcode.RETURN_VOID, 5), // FOLLOW1
+                Insn(Opcode.RETURN_VOID, 6), // FOLLOW2
+                Insn(Opcode.MOVE_EXCEPTION, 7, intArrayOf(0)), // handler
+                Insn(Opcode.RETURN_VOID, 8),
+            ),
+            tries = listOf(FakeTryBlock(0, 3, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(7), -1))),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.structured(method)
+
+        assertNull(method.region, "two genuine normal exits must bail to a null region (honest), not a wrong tree")
+        assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true, "a bailed method must NOT be flagged FULLY_STRUCTURED")
+    }
 }

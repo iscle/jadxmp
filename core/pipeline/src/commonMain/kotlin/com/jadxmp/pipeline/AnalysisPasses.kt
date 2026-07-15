@@ -171,7 +171,7 @@ class OutOfSsaPass : MethodPass {
 
     override fun run(method: IrMethod, context: PassContext) {
         if (method.entryBlock == null) return
-        OutOfSsa(method, context.cancellation).run()
+        OutOfSsa(method, context.cancellation, context.hierarchy).run()
     }
 }
 

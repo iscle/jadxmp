@@ -1396,13 +1396,40 @@ internal class RegionMaker(
             }
         }
 
+        // Absorb internal non-throwing "bridge" blocks into the body. A compiler can leave a bare
+        // control-flow block (e.g. a `goto` sitting just past `try_end`, between two protected ranges) OUTSIDE
+        // the protected range even though it is fully enclosed by the try's control flow — reached ONLY from
+        // the body and flowing ONLY back into it. Such a block is unprotected, exception-free and side-effect-
+        // free (a move/const/goto/branch — anything that could throw or write memory keeps it out), so
+        // rendering it inside `try {}` is exception- and side-effect-neutral, yet it stops the block from being
+        // miscounted as a second "normal exit". Grown to a fixpoint over clean flow; only ever fires on shapes
+        // that otherwise multi-exit-bail (a genuinely single-exit try has no such enclosed block to absorb).
+        val bodyBlocks = HashSet(protectedBlocks)
+        var absorbedAny = true
+        while (absorbedAny) {
+            absorbedAny = false
+            for (b in method.blocks) {
+                if (b in bodyBlocks || b === exit) continue
+                if (isProtected(b)) continue // belongs to this/another try's protected range — handled as try flow
+                if (b.contains(PipelineAttrs.EXC_HANDLER)) continue // a handler entry is never absorbed as body
+                if (b in loopHeaders || startsSynchronized(b)) continue
+                if (b.instructions.any { mayThrow(it) }) continue // exception- & side-effect-free only
+                val preds = cleanPreds(b)
+                if (preds.isEmpty() || preds.any { it !in bodyBlocks }) continue // entered ONLY from the body
+                val succ = cleanSucc(b)
+                if (succ.isEmpty() || succ.any { it !in bodyBlocks }) continue // flows ONLY back into the body
+                bodyBlocks.add(b)
+                absorbedAny = true
+            }
+        }
+
         // Clean exits of the protected region: where normal flow leaves the try. A handler that appears
         // here is a *coincident* handler — its exception edge equals a real normal edge (the common empty
         // `catch` that just continues to the follow), so it stays in the clean CFG. Such a handler MUST be
         // the single follow; a coincident handler that is not the follow is a shape we don't model.
         //
         val exits = LinkedHashSet<BasicBlock>()
-        for (b in protectedBlocks) for (s in cleanSucc(b)) if (s !in protectedBlocks && s !== exit) exits.add(s)
+        for (b in bodyBlocks) for (s in cleanSucc(b)) if (s !in bodyBlocks && s !== exit) exits.add(s)
         val follow: BasicBlock? = when (exits.size) {
             0 -> null // the try body always returns/throws — nothing runs after the try/catch
             1 -> exits.first()
@@ -1416,8 +1443,9 @@ internal class RegionMaker(
 
         // A single-def value produced inside the try and read outside it (in a catch or after) would be
         // declared inside the `try {}` scope and not compile. Merged locals are hoisted by out-of-SSA;
-        // anything else here we cannot place safely, so bail (honest, not wrong).
-        if (tryDefsEscape(protectedBlocks)) throw Bail("try-scoped value escapes; declaration hoisting needed")
+        // anything else here we cannot place safely, so bail (honest, not wrong). Absorbed bridge blocks
+        // render inside the try, so they count as "inside" for the escape test.
+        if (tryDefsEscape(bodyBlocks)) throw Bail("try-scoped value escapes; declaration hoisting needed")
 
         // Structure the (possibly branchy) body over clean flow, up to the follow. While the region is
         // open its blocks must not re-trigger a nested try for the SAME handler set.
