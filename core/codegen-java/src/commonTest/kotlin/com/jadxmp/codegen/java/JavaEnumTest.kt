@@ -239,6 +239,68 @@ class JavaEnumTest {
             .doesNotContain("this(name") // the stripped name/ordinal must not be forwarded
     }
 
+    /**
+     * A delegating enum ctor whose `this(...)` receiver arrives through a `local = this` COPY (the register
+     * shuffle DEX emits before an `invoke-direct/range` delegation). The copy is dead — every read of a
+     * this-aliased local renders as `this` — but if left as a statement it precedes the delegation, and
+     * javac rejects a non-first `this(...)` ("call to this must be first statement in constructor"). The
+     * reconstruction suppresses the copy so `this(...)` is the first statement.
+     */
+    @Test
+    fun enumThisDelegationThroughThisCopyKeepsDelegationFirst() {
+        val cls = irClass("e.Size", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val sizeT = IrType.objectType("e.Size")
+        val arrT = IrType.array(sizeT)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "SMALL", sizeT, enumConst)
+        enumField(cls, "value", IrType.INT, Flags.PUBLIC or Flags.FINAL)
+
+        val small = Ssa(0, sizeT)
+        val arr = Ssa(1, arrT)
+        val targetParams = listOf(IrType.STRING, IrType.INT, IrType.INT) // name, ordinal, v
+        val smallCtor = ctorCall(sizeT, targetParams, listOf(strLit("SMALL"), intLit(0), intLit(7)), small.def())
+        val arrInsn = filledNewArray(arrT, listOf(small.use()), arr.def())
+        clinitOf(
+            cls,
+            smallCtor, staticPut(fieldRef(cls, "SMALL", sizeT), small.use()),
+            arrInsn, staticPut(fieldRef(cls, "\$VALUES", arrT), arr.use()),
+        )
+        cls.method("<init>", argTypes = targetParams, accessFlags = Flags.PRIVATE) {
+            this[com.jadxmp.codegen.CodegenKeys.PARAM_NAMES] = listOf("name", "ordinal", "v")
+            val self = Local(0, sizeT, isThis = true)
+            val name = Local(1, IrType.STRING, name = "name", isParam = true)
+            val ord = Local(2, IrType.INT, name = "ordinal", isParam = true)
+            val v = Local(3, IrType.INT, name = "v", isParam = true)
+            val superCall = InvokeInstruction(
+                MethodRef(enumSuper, MethodRef.CONSTRUCTOR_NAME, enumSuper, listOf(IrType.STRING, IrType.INT)),
+                InvokeKind.DIRECT, null, listOf(self.ref(), name.ref(), ord.ref()),
+            )
+            body(superCall, instancePut(self.ref(), v.ref(), fieldRef(cls, "value", IrType.INT)), ret())
+        }
+        // Delegating ctor <init>(String,int): `copy = this; this(name, ordinal, 0)` — the receiver is a
+        // this-aliasing COPY (a MOVE), exactly the DEX register-shuffle shape before an invoke-direct/range.
+        cls.method("<init>", argTypes = listOf(IrType.STRING, IrType.INT), accessFlags = Flags.PRIVATE) {
+            this[com.jadxmp.codegen.CodegenKeys.PARAM_NAMES] = listOf("name", "ordinal")
+            val self = Local(0, sizeT, isThis = true)
+            val copy = Local(4, sizeT, isThis = true) // a this-alias produced by the shuffle move
+            val name = Local(1, IrType.STRING, name = "name", isParam = true)
+            val ord = Local(2, IrType.INT, name = "ordinal", isParam = true)
+            val copyMove = Instruction(IrOpcode.MOVE, result = copy.ref(), args = listOf(self.ref()))
+            val thisCall = InvokeInstruction(
+                MethodRef(sizeT, MethodRef.CONSTRUCTOR_NAME, sizeT, targetParams),
+                InvokeKind.DIRECT, null, listOf(copy.ref(), name.ref(), ord.ref(), intLit(0)),
+            )
+            body(copyMove, thisCall, ret())
+        }
+        cls.method("values", returnType = arrT, accessFlags = Flags.PUBLIC or Flags.STATIC)
+        cls.method("valueOf", returnType = sizeT, argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC or Flags.STATIC)
+
+        assertThatCode(generate(cls))
+            .containsOne("public enum Size {")
+            .containsOne("this(0);") // delegation still rendered, receiver + synthetic args stripped
+            .doesNotContain("= this;") // the dead this-copy is suppressed (else it would precede this(...))
+    }
+
     @Test
     fun enumWithResidualStaticInitKeepsStaticBlock() {
         val cls = irClass("e.Mode", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
@@ -476,26 +538,65 @@ class JavaEnumTest {
     }
 
     /**
-     * MUST-FIX 1: a constant whose array arg is a `new String[n]` filled by SEPARATE `ARRAY_PUT`
-     * statements is NOT a self-contained expression — inlining it would emit an empty array and silently
-     * drop every element. The arg must bail to an honest marker instead.
+     * A constant whose array arg is a `new String[n]` filled by SEPARATE `ARRAY_PUT` statements folds into
+     * a `new String[]{…}` literal, recovering every element densely and in index order (jadx normalizes this
+     * upstream via ReplaceNewArray + CodeShrink; a codegen-only backend must fold it here). The support
+     * `NEW_ARRAY`/`ARRAY_PUT`s are suppressed from the residual `<clinit>` (no leftover `static {}`).
      */
     @Test
-    fun constantWithNewArrayArgBailsInsteadOfDroppingElements() {
+    fun constantWithNewArrayArgFoldsIntoArrayLiteral() {
         val cls = irClass("e.Holder", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
         val t = IrType.objectType("e.Holder")
         val strArrT = IrType.array(IrType.STRING)
         val arrT = IrType.array(t)
         enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
         enumField(cls, "A", t, enumConst)
-        enumField(cls, "tags", strArrT, Flags.PUBLIC or Flags.FINAL)
 
         val strArr = Ssa(5, strArrT)
         val a = Ssa(0, t)
         val vals = Ssa(1, arrT)
         val ctorParams = listOf(IrType.STRING, IrType.INT, strArrT)
-        val newArr = newArray(strArrT, intLit(1), strArr.def())
-        val put = arrayPut(strLit("x"), strArr.use(), intLit(0))
+        val newArr = newArray(strArrT, intLit(2), strArr.def())
+        val put0 = arrayPut(strLit("x"), strArr.use(), intLit(0))
+        val put1 = arrayPut(strLit("y"), strArr.use(), intLit(1))
+        val aCtor = ctorCall(t, ctorParams, listOf(strLit("A"), intLit(0), strArr.use()), a.def())
+        val valsInsn = filledNewArray(arrT, listOf(a.use()), vals.def())
+        clinitOf(
+            cls,
+            newArr, put0, put1,
+            aCtor, staticPut(fieldRef(cls, "A", t), a.use()),
+            valsInsn, staticPut(fieldRef(cls, "\$VALUES", arrT), vals.use()),
+        )
+        syntheticEnumCtor(cls, t, ctorParams)
+
+        val code = generate(cls)
+        assertThatCode(code)
+            .containsOne("public enum Holder {")
+            .containsOne("A(new String[]{\"x\", \"y\"})") // folded dense literal, elements in index order
+            .doesNotContain("JADXMP ERROR")
+            .doesNotContain("static {") // folded array's NEW_ARRAY/ARRAY_PUTs suppressed from residual
+    }
+
+    /**
+     * A constant whose array arg is a `new String[n]` filled only SPARSELY (a gap at some index) cannot be
+     * folded to a dense literal without inventing the missing element, so it BAILS to the honest marker
+     * rather than silently emit a differently-shaped array (rule 4).
+     */
+    @Test
+    fun constantWithSparseNewArrayArgBails() {
+        val cls = irClass("e.Sparse", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Sparse")
+        val strArrT = IrType.array(IrType.STRING)
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "A", t, enumConst)
+
+        val strArr = Ssa(5, strArrT)
+        val a = Ssa(0, t)
+        val vals = Ssa(1, arrT)
+        val ctorParams = listOf(IrType.STRING, IrType.INT, strArrT)
+        val newArr = newArray(strArrT, intLit(2), strArr.def()) // size 2 …
+        val put = arrayPut(strLit("x"), strArr.use(), intLit(0)) // … but only index 0 filled (gap at 1)
         val aCtor = ctorCall(t, ctorParams, listOf(strLit("A"), intLit(0), strArr.use()), a.def())
         val valsInsn = filledNewArray(arrT, listOf(a.use()), vals.def())
         clinitOf(
@@ -508,18 +609,19 @@ class JavaEnumTest {
 
         val code = generate(cls)
         assertThatCode(code)
-            .containsOne("public enum Holder {")
-            .containsOne("JADXMP ERROR") // honest bail, not a silent empty array
-        assertTrue(!code.contains("A(new String["), "constant must not silently emit an empty array arg")
+            .containsOne("public enum Sparse {")
+            .containsOne("JADXMP ERROR") // honest bail on the un-densely-filled array
+        assertTrue(!code.contains("new String[]{"), "a sparse array must not fold to a dense literal")
     }
 
     /**
-     * MUST-FIX 2: a constant whose arg references ANOTHER enum constant (a register whose SSA def is the
-     * enum-self CONSTRUCTOR) must NOT inline as `new EnumType(...)` — that is illegal Java and fabricates
-     * a fresh instance. A codegen-only backend can't rewrite it to the constant's SGET, so it bails.
+     * A constant whose arg references an EARLIER enum constant (a register whose SSA def is the enum-self
+     * CONSTRUCTOR of a strictly-lower ordinal) renders as that constant's simple NAME — never a fabricated
+     * `new EnumType(...)`. The referenced constant is already initialized when this one is, so the name is
+     * an exact, legal substitution (jadx: EnumVisitor.inlineExternalRegs).
      */
     @Test
-    fun constantReferencingAnotherEnumConstantBailsInsteadOfFabricatingInstance() {
+    fun constantReferencingEarlierEnumConstantRendersConstantName() {
         val cls = irClass("e.Ref", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
         val t = IrType.objectType("e.Ref")
         val arrT = IrType.array(t)
@@ -532,7 +634,7 @@ class JavaEnumTest {
         val vals = Ssa(2, arrT)
         val ctorParams = listOf(IrType.STRING, IrType.INT, t) // 3rd param is the enum type itself
         val aCtor = ctorCall(t, ctorParams, listOf(strLit("A"), intLit(0), nullLit(t)), a.def())
-        val bCtor = ctorCall(t, ctorParams, listOf(strLit("B"), intLit(1), a.use()), b.def()) // B refs A
+        val bCtor = ctorCall(t, ctorParams, listOf(strLit("B"), intLit(1), a.use()), b.def()) // B (ord 1) refs A (ord 0)
         val valsInsn = filledNewArray(arrT, listOf(a.use(), b.use()), vals.def())
         clinitOf(
             cls,
@@ -545,8 +647,46 @@ class JavaEnumTest {
         val code = generate(cls)
         assertThatCode(code)
             .containsOne("public enum Ref {")
-            .containsOne("JADXMP ERROR")
+            .containsOne("B(A)") // backward inter-constant reference renders as the constant's name
+            .doesNotContain("JADXMP ERROR")
         assertTrue(!code.contains("new Ref("), "must not fabricate a new enum instance for a constant reference")
+    }
+
+    /**
+     * A constant whose arg references a LATER enum constant (higher ordinal) is an illegal forward
+     * self-reference in Java (`A(B)` where `B` is declared after `A`). Rather than emit uncompilable code,
+     * reconstruction BAILS that arg to the honest marker (rule 4) — never a forward reference.
+     */
+    @Test
+    fun constantWithForwardEnumConstantReferenceBails() {
+        val cls = irClass("e.Fwd", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val t = IrType.objectType("e.Fwd")
+        val arrT = IrType.array(t)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "A", t, enumConst)
+        enumField(cls, "B", t, enumConst)
+
+        val a = Ssa(0, t)
+        val b = Ssa(1, t)
+        val vals = Ssa(2, arrT)
+        val ctorParams = listOf(IrType.STRING, IrType.INT, t)
+        // B (ordinal 1) is constructed first with no reference; A (ordinal 0) references B — a FORWARD ref.
+        val bCtor = ctorCall(t, ctorParams, listOf(strLit("B"), intLit(1), nullLit(t)), b.def())
+        val aCtor = ctorCall(t, ctorParams, listOf(strLit("A"), intLit(0), b.use()), a.def())
+        val valsInsn = filledNewArray(arrT, listOf(a.use(), b.use()), vals.def()) // [0]=A, [1]=B
+        clinitOf(
+            cls,
+            bCtor, staticPut(fieldRef(cls, "B", t), b.use()),
+            aCtor, staticPut(fieldRef(cls, "A", t), a.use()),
+            valsInsn, staticPut(fieldRef(cls, "\$VALUES", arrT), vals.use()),
+        )
+        syntheticEnumCtor(cls, t, ctorParams)
+
+        val code = generate(cls)
+        assertThatCode(code)
+            .containsOne("public enum Fwd {")
+            .containsOne("JADXMP ERROR") // forward reference ⇒ honest bail
+        assertTrue(!code.contains("A(B)"), "must not emit an illegal forward self-reference")
     }
 
     /**

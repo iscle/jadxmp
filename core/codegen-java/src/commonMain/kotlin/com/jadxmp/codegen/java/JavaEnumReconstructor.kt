@@ -9,11 +9,39 @@ import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.LiteralOperand
 import com.jadxmp.ir.insn.Operand
 import com.jadxmp.ir.insn.RegisterOperand
+import com.jadxmp.ir.insn.TypeInstruction
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.SsaValue
 import com.jadxmp.ir.type.IrType
+
+/**
+ * A reconstructed enum-constant constructor argument, resolved from the raw `<clinit>` operand into a
+ * form the codegen can emit as a self-contained expression — OUTSIDE the suppressed `<clinit>` variable
+ * scope, where the source registers have no declaration. [EnumReconstruction] produces one per argument
+ * and records exactly which `<clinit>` instructions each CONSUMES, so the codegen renders the argument
+ * while the analyzer suppresses the identical instructions from the residual `static {}` block — the two
+ * decisions come from a single computation and can never diverge (rule 4: no silent drop / miscompile).
+ */
+internal sealed interface EnumArg {
+    /** Inline the operand's self-contained expression tree (const / string / `Integer.valueOf` / null / …). */
+    class Inline(val op: Operand) : EnumArg
+
+    /**
+     * A `NEW_ARRAY` + dense `ARRAY_PUT` run folded into a `new <elementType>[]{ elements… }` literal.
+     * [elements] are the raw per-index operands in ascending index order (each independently inlinable).
+     */
+    class ArrayLiteral(val elementType: IrType, val elements: List<Operand>) : EnumArg
+
+    /**
+     * A reference to ANOTHER enum constant's construction result → the referenced constant's simple
+     * [name]. Gated to a STRICTLY-earlier ordinal (Java forbids a forward / self reference in an
+     * enum-constant initializer). [field] is the referenced constant's backing field (for jump-to-def
+     * metadata), or null for a fake (field-less) constant.
+     */
+    class ConstantRef(val name: String, val field: IrField?) : EnumArg
+}
 
 /**
  * Reconstructs a desugared `ACC_ENUM` class back into Java `enum` shape, entirely from the [IrClass]
@@ -93,6 +121,15 @@ internal class EnumReconstruction private constructor(
         val field: IrField?,
         val args: List<Operand>,
         val argParamTypes: List<IrType>,
+        /**
+         * The fully-resolved rendering plan for [args] — one [EnumArg] per argument — or null when at
+         * least one argument is not provably renderable (a `NEW_ARRAY` that isn't a clean dense fill, an
+         * unresolvable / forward inter-constant reference, or a non-inlinable expression). Non-null ⇒ the
+         * codegen renders from the plan and the analyzer has already suppressed every consumed `<clinit>`
+         * instruction; null ⇒ the codegen bails this constant to the honest inline marker (rule 4) and its
+         * support instructions stay visible in the residual `<clinit>`.
+         */
+        val renderedArgs: List<EnumArg>?,
     )
 
     companion object {
@@ -146,6 +183,7 @@ internal class EnumReconstruction private constructor(
                 computeSuppressed(
                     statements, recovery.constructors,
                     locatedConstantStores(statements, cls), valuesField, cls,
+                    recovery.argConsumedInsns,
                 )
             } else {
                 emptySet()
@@ -199,7 +237,27 @@ internal class EnumReconstruction private constructor(
             val constants: List<EnumConstant>,
             val constructors: List<Instruction>,
             val constantResultFields: Map<SsaValue, FieldRef>,
+            /**
+             * The `<clinit>` instructions consumed by the constants' rendered argument plans (folded array
+             * `NEW_ARRAY`/`ARRAY_PUT`s, inlined `Integer.valueOf` invokes, element/index consts, …) — the
+             * extra suppression that keeps those support statements out of the residual `static {}` block
+             * once the codegen relocates them into the enum-constant declarations. Empty unless EVERY
+             * constant's args resolved (see [recoverConstants]).
+             */
+            val argConsumedInsns: Set<Instruction>,
         )
+
+        /** One constant's raw data collected in [recoverConstants]'s first pass, before arg planning. */
+        private class RawConstant(
+            val name: String,
+            val field: IrField?,
+            val args: List<Operand>,
+            val params: List<IrType>,
+            val ctor: Instruction,
+        )
+
+        /** A constant's resolved argument plan plus the `<clinit>` instructions it consumes. */
+        private class ArgPlan(val rendered: List<EnumArg>, val consumed: Set<Instruction>)
 
         /**
          * Recover the enum's constants — field-backed AND field-less "fake" — in ordinal order, PROVABLY:
@@ -224,7 +282,7 @@ internal class EnumReconstruction private constructor(
             if (allCtors.isEmpty()) {
                 // A declared constant field with no construction ⇒ we can't recover its args ⇒ bail.
                 if (enumConstantFields.isNotEmpty()) return null
-                return Recovery(emptyList(), emptyList(), emptyMap())
+                return Recovery(emptyList(), emptyList(), emptyMap(), emptySet())
             }
             val allCtorSet = allCtors.toHashSet()
 
@@ -247,9 +305,13 @@ internal class EnumReconstruction private constructor(
             val ordered = orderFromValuesArray(statements, valuesField, cls, allCtors, allCtorSet, ctorByField, enumConstantFields)
                 ?: return null
 
-            val constants = ArrayList<EnumConstant>(ordered.size)
+            // Pass 1: recover each constant's name / backing field / (synthetic-stripped) args, plus the
+            // construction→ordinal-index map (needed to gate an inter-constant reference to a STRICTLY-earlier
+            // constant) and the construction-result → name aliases for residual reads.
+            val raws = ArrayList<RawConstant>(ordered.size)
             val resultFields = HashMap<SsaValue, FieldRef>()
             val usedNames = HashSet<String>()
+            val ctorToIndex = HashMap<Instruction, Int>()
             for ((index, ctor) in ordered.withIndex()) {
                 val inv = ctor as? InvokeInstruction ?: return null
                 if (ctor.argCount < 1) return null
@@ -266,12 +328,204 @@ internal class EnumReconstruction private constructor(
                 val n = syntheticArgCount(ctor.argCount)
                 val args = if (ctor.argCount > n) (n until ctor.argCount).map { ctor.getArg(it) } else emptyList()
                 val declaredParams = inv.methodRef.paramTypes.drop(n)
-                constants.add(EnumConstant(name, fieldByCtor[ctor], args, declaredParams))
+                raws.add(RawConstant(name, fieldByCtor[ctor], args, declaredParams, ctor))
+                ctorToIndex[ctor] = index
                 // Residual alias reads of this construction render as the constant's (string) name; the
                 // FieldRef carries that name so aliasForFieldRef falls through to it (no such field exists).
                 ctor.result?.ssaValue?.let { resultFields[it] = FieldRef(clsType, name, clsType) }
             }
-            return Recovery(constants, allCtors, resultFields)
+
+            // Pass 2: resolve each constant's ctor arguments into a self-contained rendering plan, recording
+            // the `<clinit>` instructions each plan consumes. Only if EVERY constant's args resolve are the
+            // plans honored (codegen renders them; analyze suppresses the consumed insns). If ANY constant
+            // has an unresolvable arg, NO plan is honored — that constant bails to a marker AND no
+            // arg-consumed suppression is applied, so a producer shared with a still-rendered sibling is
+            // never dropped and the residual `<clinit>` keeps every un-relocated statement (rule 4).
+            val plans = raws.map { raw ->
+                planConstantArgs(cls, raw.args, raw.params, ctorToIndex.getValue(raw.ctor), statements, ctorToIndex, raws)
+            }
+            val allRenderable = plans.all { it != null }
+            val argConsumed = HashSet<Instruction>()
+            if (allRenderable) for (p in plans) argConsumed.addAll(p!!.consumed)
+
+            val constants = raws.mapIndexed { i, raw ->
+                EnumConstant(raw.name, raw.field, raw.args, raw.params, if (allRenderable) plans[i]!!.rendered else null)
+            }
+            return Recovery(constants, allCtors, resultFields, argConsumed)
+        }
+
+        /**
+         * Resolve one constant's (synthetic-stripped) [args] into a full [ArgPlan], or null when any arg is
+         * not provably renderable as a self-contained expression. Each arg is one of: an inter-constant
+         * NAME reference (gated backward-ordinal-only), a folded `new T[]{…}` array literal, or an inlined
+         * expression tree; anything else fails the whole constant (which then bails to a marker, rule 4).
+         */
+        private fun planConstantArgs(
+            cls: IrClass,
+            args: List<Operand>,
+            paramTypes: List<IrType>,
+            currentIndex: Int,
+            statements: List<Instruction>,
+            ctorToIndex: Map<Instruction, Int>,
+            raws: List<RawConstant>,
+        ): ArgPlan? {
+            if (args.isEmpty()) return ArgPlan(emptyList(), emptySet())
+            val rendered = ArrayList<EnumArg>(args.size)
+            val consumed = HashSet<Instruction>()
+            for ((i, arg) in args.withIndex()) {
+                val resolved =
+                    resolveEnumArg(cls, arg, paramTypes.getOrNull(i), currentIndex, statements, ctorToIndex, raws, consumed)
+                        ?: return null
+                rendered.add(resolved)
+            }
+            return ArgPlan(rendered, consumed)
+        }
+
+        /**
+         * Resolve a single constant-constructor argument, adding the `<clinit>` instructions it consumes to
+         * [consumed]. Returns null (⇒ the constant bails) for anything not provably renderable.
+         */
+        private fun resolveEnumArg(
+            cls: IrClass,
+            arg: Operand,
+            paramType: IrType?,
+            currentIndex: Int,
+            statements: List<Instruction>,
+            ctorToIndex: Map<Instruction, Int>,
+            raws: List<RawConstant>,
+            consumed: MutableSet<Instruction>,
+        ): EnumArg? {
+            // 1) Inter-constant reference: the arg resolves (through moves) to another enum constant's
+            //    construction. Render the referenced constant's NAME — gated to a STRICTLY-earlier ordinal,
+            //    since Java forbids a forward / self reference in an enum-constant initializer (rule 4). The
+            //    move chain to the (suppressed) construction dies via the dead-code fixpoint, so nothing
+            //    extra is consumed here.
+            val refCtor = tracedConstructor(arg, cls.fullName)
+            if (refCtor != null) {
+                val refIndex = ctorToIndex[refCtor] ?: return null
+                if (refIndex >= currentIndex) return null
+                val ref = raws[refIndex]
+                return EnumArg.ConstantRef(ref.name, ref.field)
+            }
+            // 2) A sized `new T[n]` filled by SEPARATE dense `ARRAY_PUT`s ⇒ fold into a `new T[]{…}` literal.
+            val producer = producerOf(arg)
+            if (producer != null && producer.opcode == IrOpcode.NEW_ARRAY) {
+                return foldArrayLiteral(producer, paramType, statements, consumed)
+            }
+            // 3) A self-contained inlinable expression (const / string / valueOf / null / …).
+            val tree = collectInlinableTree(arg) ?: return null
+            consumed.addAll(tree)
+            return EnumArg.Inline(arg)
+        }
+
+        /**
+         * Fold a `NEW_ARRAY` whose elements are set by SEPARATE `ARRAY_PUT` statements into an
+         * [EnumArg.ArrayLiteral]. PROVABLY correct only when the puts assign indices `0, 1, …, size-1` IN
+         * THAT PROGRAM ORDER — a dense, in-order fill — and every element value is itself inlinable. The
+         * in-order requirement is what makes the emitted `new T[]{ e0, …, e(size-1) }` faithful for a
+         * side-effecting element too: the literal evaluates its elements left-to-right, exactly the order
+         * the original `ARRAY_PUT`s ran. Returns null (⇒ the constant bails) on any gap / duplicate /
+         * out-of-order / out-of-range index or non-inlinable element (rule 4). Consumed: the `NEW_ARRAY`,
+         * its size const, every `ARRAY_PUT`, and each element's + index's tree.
+         */
+        private fun foldArrayLiteral(
+            newArray: Instruction,
+            paramType: IrType?,
+            statements: List<Instruction>,
+            consumed: MutableSet<Instruction>,
+        ): EnumArg.ArrayLiteral? {
+            val size = if (newArray.argCount > 0) resolveIntLiteral(newArray.getArg(0)) else null
+            if (size == null || size < 0) return null
+            val arrayVar = newArray.result?.ssaValue ?: return null
+            val local = HashSet<Instruction>()
+            local.add(newArray)
+            collectInlinableTree(newArray.getArg(0))?.let { local.addAll(it) }
+            val elements = ArrayList<Operand>(size)
+            for (stmt in statements) {
+                if (stmt.opcode != IrOpcode.ARRAY_PUT || stmt.argCount < 3) continue
+                if ((stmt.getArg(1) as? RegisterOperand)?.ssaValue !== arrayVar) continue
+                // The k-th put into this array must set index k — dense, ascending, and in program order, so
+                // rendering the elements left-to-right preserves the original evaluation order exactly.
+                if (resolveIntLiteral(stmt.getArg(2)) != elements.size) return null
+                val elementTree = collectInlinableTree(stmt.getArg(0)) ?: return null
+                elements.add(stmt.getArg(0))
+                local.add(stmt)
+                local.addAll(elementTree)
+                collectInlinableTree(stmt.getArg(2))?.let { local.addAll(it) }
+            }
+            if (elements.size != size) return null // must fill exactly {0..size-1}
+            val elementType = paramType?.arrayElement
+                ?: newArray.result?.type?.takeIf { it.isArray }?.arrayElement
+                ?: (referencedTypeOf(newArray)?.arrayElement)
+                ?: return null
+            consumed.addAll(local)
+            return EnumArg.ArrayLiteral(elementType, elements)
+        }
+
+        /**
+         * The set of `<clinit>` instructions [op]'s inline expression tree consumes, or null when [op] is
+         * not a self-contained inlinable expression. Mirrors [MethodBodyWriter.canInline] EXACTLY (same
+         * [INLINABLE_ENUM_ARG_OPCODES], same per-arg cycle handling) so the analyzer's suppressed set equals
+         * the renderer's inlined set — the invariant that keeps the residual `<clinit>` neither dangling nor
+         * missing a live insn (rule 4).
+         */
+        private fun collectInlinableTree(op: Operand): Set<Instruction>? {
+            val out = HashSet<Instruction>()
+            return if (collectInlinable(op, out, HashSet())) out else null
+        }
+
+        private fun collectInlinable(
+            op: Operand,
+            out: MutableSet<Instruction>,
+            visiting: MutableSet<Instruction>,
+        ): Boolean = when (op) {
+            is LiteralOperand -> true
+            is InstructionOperand -> collectInlinableInsn(op.instruction, out, visiting)
+            is RegisterOperand -> {
+                if (op.ssaValue?.localVar?.isThis == true) {
+                    false
+                } else {
+                    val def = op.ssaValue?.assign?.parent
+                    def != null && def.opcode in INLINABLE_ENUM_ARG_OPCODES && collectInlinableInsn(def, out, visiting)
+                }
+            }
+        }
+
+        private fun collectInlinableInsn(
+            insn: Instruction,
+            out: MutableSet<Instruction>,
+            visiting: MutableSet<Instruction>,
+        ): Boolean {
+            if (!visiting.add(insn)) return false // cyclic ⇒ not inlinable (matches renderer)
+            if (insn.opcode !in INLINABLE_ENUM_ARG_OPCODES) return false
+            out.add(insn)
+            for (i in 0 until insn.argCount) if (!collectInlinable(insn.getArg(i), out, visiting)) return false
+            return true
+        }
+
+        private fun referencedTypeOf(insn: Instruction): IrType? = (insn as? TypeInstruction)?.referencedType
+
+        /**
+         * The redundant `local = this` copies in enum constructor [ctor]: a `MOVE`/`ONE_ARG` that forwards
+         * `this` and whose result is **never observed as a distinct variable** — either the result is itself
+         * a `this`-alias (every read renders as `this`; `MethodBodyWriter.emitRegister`) or the result has no
+         * reads at all (the delegation binds its receiver straight to `thisArg`, leaving the copy dead). Such
+         * a copy is pure dead weight, but when emitted just before a `this(…)` delegation it makes the call a
+         * non-first statement (javac: "call to this must be first statement in constructor"). Suppressing it
+         * changes no observable behavior — the receiver already renders as `this` — and restores a legal
+         * delegation. The source-is-`this` guard keeps this from ever dropping a live value (rule 4).
+         */
+        fun redundantThisCopies(ctor: IrMethod): Set<Instruction> {
+            val out = HashSet<Instruction>()
+            for (stmt in flatten(ctor)) {
+                if (stmt.opcode != IrOpcode.MOVE && stmt.opcode != IrOpcode.ONE_ARG) continue
+                val res = stmt.result?.ssaValue ?: continue
+                val src = (if (stmt.argCount > 0) stmt.getArg(0) else null) as? RegisterOperand
+                val sourceIsThis = src?.ssaValue?.let { it === ctor.thisArg || it.localVar?.isThis == true } == true
+                val resultIsThis = res === ctor.thisArg || res.localVar?.isThis == true
+                if (sourceIsThis && (resultIsThis || res.useCount == 0)) out.add(stmt)
+            }
+            return out
         }
 
         /**
@@ -675,10 +929,18 @@ internal class EnumReconstruction private constructor(
             constantStores: Set<Instruction>,
             valuesField: IrField,
             cls: IrClass,
+            argConsumedInsns: Set<Instruction>,
         ): Set<Instruction> {
             val suppressed = HashSet<Instruction>()
             suppressed.addAll(constructorInsns)
             suppressed.addAll(constantStores)
+            // A folded arg-array's element writes are relocated verbatim into the `new T[]{…}` literal, so
+            // drop them outright — an ARRAY_PUT has no result the liveness fixpoint could reason about.
+            // Every OTHER relocated instruction (the array's NEW_ARRAY, valueOf invokes, element/size/index
+            // consts) is dropped by the fixpoint below ONLY when nothing still reads it: a producer SHARED
+            // with a surviving residual statement (e.g. a bit-const reused as a `FOR_BITS` array index) is
+            // KEPT and re-rendered inline in the constant declaration, never yanked out from under it.
+            for (insn in argConsumedInsns) if (insn.opcode == IrOpcode.ARRAY_PUT) suppressed.add(insn)
 
             // The `$VALUES = <array>` store and the array it builds (+ its element puts).
             val valuesStore = statements.firstOrNull { stmt ->
@@ -704,14 +966,19 @@ internal class EnumReconstruction private constructor(
                 }
             }
 
-            // Dead-code fixpoint: a pure producer whose result no surviving statement reads is dead.
+            // Dead-code fixpoint: drop a producer whose result no surviving statement reads. Eligible
+            // producers are the side-effect-free ones AND any instruction RELOCATED into a rendered
+            // enum-constant argument ([argConsumedInsns] — the folded array's NEW_ARRAY, a valueOf invoke,
+            // element/size consts): once the constant declaration re-renders them inline, a clinit copy with
+            // no remaining reader is dead. The liveness gate keeps a producer shared with a surviving
+            // residual statement, so this never dangles that statement (rule 4).
             val reads = statements.associateWith { readSsaValues(it) }
             var changed = true
             while (changed) {
                 changed = false
                 for (stmt in statements) {
                     if (stmt in suppressed) continue
-                    if (!isPureProducer(stmt)) continue
+                    if (!isPureProducer(stmt) && stmt !in argConsumedInsns) continue
                     val v = stmt.result?.ssaValue ?: continue
                     val liveReader = statements.any { it !in suppressed && it !== stmt && v in (reads[it] ?: emptySet()) }
                     if (!liveReader) {

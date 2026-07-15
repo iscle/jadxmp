@@ -45,6 +45,32 @@ import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.type.TypeKind
 
 /**
+ * Opcodes an enum-constant argument may inline through — only producers that are genuinely
+ * **self-contained expressions** in the `<clinit>` context. Shared as the single source of truth
+ * between the RENDERER ([MethodBodyWriter.canInline]/`inlinableDef`, which folds an arg into an inline
+ * expression) and the ANALYZER ([EnumReconstruction], which computes exactly the same inlined-instruction
+ * set to suppress from the residual `<clinit>`). They MUST agree: a set the renderer inlines but the
+ * analyzer fails to suppress leaves a dangling residual statement; the reverse would drop a live insn.
+ *
+ * Deliberately EXCLUDES:
+ *  - `NEW_ARRAY` — a sized `new T[n]` whose elements are filled by SEPARATE `ARRAY_PUT` statements
+ *    living outside this expression DAG; a bare inline would emit an empty array and silently drop every
+ *    element (rule 4). [EnumReconstruction] instead FOLDS a `NEW_ARRAY`+dense-`ARRAY_PUT` run into a
+ *    `new T[]{…}` array literal; only `FILLED_NEW_ARRAY` (elements carried as args) is inline-safe here.
+ *  - `CONSTRUCTOR` — inlining `new X(…)` for a reference to ANOTHER enum constant (whose SSA def is the
+ *    enum-self constructor) is illegal Java and fabricates a fresh instance. [EnumReconstruction] instead
+ *    resolves such a reference to the referenced constant's NAME (gated backward-ordinal-only).
+ */
+internal val INLINABLE_ENUM_ARG_OPCODES = setOf(
+    IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.CONST_CLASS,
+    IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG,
+    IrOpcode.CAST, IrOpcode.CHECK_CAST, IrOpcode.ARITH, IrOpcode.NEG, IrOpcode.NOT,
+    IrOpcode.INSTANCE_OF, IrOpcode.ARRAY_LENGTH, IrOpcode.ARRAY_GET,
+    IrOpcode.FILLED_NEW_ARRAY, IrOpcode.STATIC_GET, IrOpcode.INSTANCE_GET,
+    IrOpcode.INVOKE, IrOpcode.TERNARY, IrOpcode.STRING_CONCAT,
+)
+
+/**
  * Emits one method body: statements, expression trees (with correct precedence), conditions, and the
  * structured region tree. **jadx: MethodGen + RegionGen + InsnGen + ConditionGen**
  *
@@ -1400,11 +1426,59 @@ internal class MethodBodyWriter(
         return true
     }
 
+    /**
+     * Render an enum constant's constructor argument list from a resolved [EnumArg] plan (built by
+     * [EnumReconstruction]). Each argument is one of: a folded `new T[]{…}` array literal (from a
+     * `NEW_ARRAY`+dense-`ARRAY_PUT` run), a backward inter-constant NAME reference, or an inlined
+     * expression tree — the last coerced to its declared [paramTypes] (a bare `null` pins the overload).
+     * The plan's support instructions have already been suppressed from the residual `<clinit>`, so this
+     * never leaves a dangling statement. Always succeeds (the plan is only built when fully renderable).
+     */
+    fun emitEnumConstantArgsPlanned(rendered: List<EnumArg>, paramTypes: List<IrType>): Boolean {
+        if (rendered.isEmpty()) return true
+        inlineRegisters = true
+        code.add("(")
+        for ((i, arg) in rendered.withIndex()) {
+            if (i > 0) code.add(", ")
+            when (arg) {
+                is EnumArg.ConstantRef -> {
+                    // Display the referenced constant's NAME; point jump-to-def at its backing field (the
+                    // same FieldNodeRef the constant's own declaration attaches), so the reference resolves.
+                    arg.field?.let { code.attachReference(FieldNodeRef(method.declaringClass.fullName, it.name)) }
+                    code.add(arg.name)
+                }
+                is EnumArg.ArrayLiteral -> {
+                    code.add("new ")
+                    emitTypeRef(arg.elementType)
+                    code.add("[]{")
+                    for ((j, el) in arg.elements.withIndex()) {
+                        if (j > 0) code.add(", ")
+                        emitCoerced(el, arg.elementType, Prec.LOWEST)
+                    }
+                    code.add("}")
+                }
+                is EnumArg.Inline -> {
+                    val target = paramTypes.getOrNull(i)
+                    if (target != null && target.isReferenceType() && isNullConstant(arg.op)) {
+                        code.add("(")
+                        emitTypeRef(target)
+                        code.add(") null")
+                    } else {
+                        emitCoerced(arg.op, target, Prec.LOWEST)
+                    }
+                }
+            }
+        }
+        code.add(")")
+        inlineRegisters = false
+        return true
+    }
+
     /** The defining instruction to inline for [reg], or null if it isn't a pure inlinable producer. */
     private fun inlinableDef(reg: RegisterOperand): Instruction? {
         if (isThis(reg)) return null
         val def = reg.ssaValue?.assign?.parent ?: return null
-        return if (def.opcode in INLINABLE_OPCODES) def else null
+        return if (def.opcode in INLINABLE_ENUM_ARG_OPCODES) def else null
     }
 
     /** Whether [op] resolves to a self-contained (no free register) expression tree. */
@@ -1416,14 +1490,14 @@ internal class MethodBodyWriter(
                 false
             } else {
                 val def = op.ssaValue?.assign?.parent
-                def != null && def.opcode in INLINABLE_OPCODES && canInlineInsn(def, visited)
+                def != null && def.opcode in INLINABLE_ENUM_ARG_OPCODES && canInlineInsn(def, visited)
             }
         }
     }
 
     private fun canInlineInsn(insn: Instruction, visited: MutableSet<Instruction>): Boolean {
         if (!visited.add(insn)) return false // cyclic ⇒ not inlinable
-        if (insn.opcode !in INLINABLE_OPCODES) return false
+        if (insn.opcode !in INLINABLE_ENUM_ARG_OPCODES) return false
         for (i in 0 until insn.argCount) {
             if (!canInline(insn.getArg(i), visited)) return false
         }
@@ -1543,30 +1617,6 @@ internal class MethodBodyWriter(
         /** The only supertypes an array is assignable to; a named class outside this set can't hold one. */
         val ARRAY_SUPERTYPE_CLASSES = setOf(
             IrType.OBJECT_CLASS, "java.io.Serializable", "java.lang.Cloneable",
-        )
-
-        /**
-         * Opcodes an enum-constant argument may inline through (see [emitEnumConstantArgs]) — only the
-         * producers that are genuinely **self-contained expressions** in the `<clinit>` context.
-         *
-         * Deliberately EXCLUDES:
-         *  - `NEW_ARRAY` — a sized `new T[n]` whose elements are filled by SEPARATE `ARRAY_PUT`
-         *    statements living outside this expression DAG; inlining it would emit an empty array and
-         *    silently drop every element (rule 4). Only `FILLED_NEW_ARRAY` (elements carried as args) is
-         *    a safe self-contained array literal.
-         *  - `CONSTRUCTOR` — inlining `new X(…)` for a reference to ANOTHER enum constant (whose SSA def
-         *    is the enum-self constructor) is both illegal Java (enums can't be `new`ed) and wrong (a
-         *    fabricated instance, not the existing constant). A codegen-only backend can't rewrite it to
-         *    the constant's SGET (that is jadx's pipeline `inlineExternalRegs`), so such an arg must bail
-         *    to an honest marker instead.
-         */
-        val INLINABLE_OPCODES = setOf(
-            IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.CONST_CLASS,
-            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG,
-            IrOpcode.CAST, IrOpcode.CHECK_CAST, IrOpcode.ARITH, IrOpcode.NEG, IrOpcode.NOT,
-            IrOpcode.INSTANCE_OF, IrOpcode.ARRAY_LENGTH, IrOpcode.ARRAY_GET,
-            IrOpcode.FILLED_NEW_ARRAY, IrOpcode.STATIC_GET, IrOpcode.INSTANCE_GET,
-            IrOpcode.INVOKE, IrOpcode.TERNARY, IrOpcode.STRING_CONCAT,
         )
     }
 }

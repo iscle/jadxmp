@@ -249,9 +249,17 @@ class JavaCodeGenerator {
 
         private fun emitEnumConstantArgs(cls: IrClass, e: EnumReconstruction, c: EnumReconstruction.EnumConstant) {
             val clinit = e.clinit
-            val ok = clinit != null &&
-                MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), e.suppressedClinitInsns)
-                    .emitEnumConstantArgs(c.args, c.argParamTypes)
+            val writer = clinit?.let {
+                MethodBodyWriter(code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns)
+            }
+            // A resolved plan (folded `new T[]{…}` arrays + backward inter-constant NAME references +
+            // inlined expressions) renders directly; its support instructions are already suppressed from
+            // the residual `<clinit>`. A null plan means at least one arg was not provably renderable, so
+            // fall back to the pure-inline path — which itself bails to the honest marker below (rule 4).
+            val ok = writer != null && (
+                c.renderedArgs?.let { writer.emitEnumConstantArgsPlanned(it, c.argParamTypes) }
+                    ?: writer.emitEnumConstantArgs(c.args, c.argParamTypes)
+                )
             if (!ok) {
                 // Args reference values we cannot inline to a self-contained expression (a NEW_ARRAY
                 // filled by separate puts, or a reference to another enum constant) — be honest with an
@@ -300,7 +308,12 @@ class JavaCodeGenerator {
             emitThrows(method)
             code.add(" ")
             val superCall = EnumReconstruction.enumSuperCall(method)
-            val suppressed = if (superCall != null) setOf(superCall) else emptySet()
+            // Drop the `super(name, ordinal)` call AND any redundant `local = this` copy: a same-class
+            // `this(...)` delegation reads a `this`-aliasing copy as its receiver, and leaving that copy as
+            // a statement would put it BEFORE the delegation ("call to this must be first statement in
+            // constructor"). Both are provably dead (rule 4) — see EnumReconstruction.redundantThisCopies.
+            val suppressed = EnumReconstruction.redundantThisCopies(method) +
+                (if (superCall != null) setOf(superCall) else emptySet())
             code.add("{").newLine()
             code.incIndent()
             MethodBodyWriter(
