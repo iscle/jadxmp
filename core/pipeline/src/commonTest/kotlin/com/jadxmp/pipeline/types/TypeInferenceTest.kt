@@ -181,6 +181,51 @@ class TypeInferenceTest {
         assertEquals(IrType.INT, defValue(method, IrOpcode.CONST).type)
     }
 
+    // ---- erased-Object receiver narrowing (oracle types/TestGenerics2) --------------
+
+    @Test
+    fun erasedObjectReceiverNarrowsToInvokeDeclaringType() {
+        // v0 = produce() : java.lang.Object (an erased signature the decoder sees only as Object). v0 is
+        // then used DIRECTLY as a `Map$Entry` receiver with no check-cast (DEX permits this; the JVM
+        // would not). Type inference must recover v0's real type as Map.Entry from that receiver use so
+        // `v0.getKey()` resolves (else javac: "cannot find symbol getKey() … of type java.lang.Object").
+        val produce = FakeMethodRef("Lcom/example/Foo;", "produce", "Ljava/lang/Object;", emptyList())
+        val getKey = FakeMethodRef("Ljava/util/Map\$Entry;", "getKey", "Ljava/lang/Object;", emptyList())
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), indexType = IndexType.METHOD_REF, methodRef = produce),
+                Insn(Opcode.MOVE_RESULT, 1, intArrayOf(0)), // v0 = produce() : Object
+                Insn(Opcode.INVOKE_INTERFACE, 2, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = getKey),
+                Insn(Opcode.RETURN_VOID, 3),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.full(method)
+        assertEquals(IrType.objectType("java.util.Map\$Entry"), defValue(method, IrOpcode.INVOKE).type)
+    }
+
+    @Test
+    fun erasedObjectWithOnlyObjectUseStaysObject() {
+        // Soundness guard: an erased-Object result with NO narrowing evidence (its only use is an
+        // Object-typed argument) must stay java.lang.Object — the narrowing above must fire only when a
+        // use genuinely requires the narrower type, never widen or invent one.
+        val produce = FakeMethodRef("Lcom/example/Foo;", "produce", "Ljava/lang/Object;", emptyList())
+        val useObj = FakeMethodRef("Lcom/example/Foo;", "u", "V", listOf("Ljava/lang/Object;"))
+        val reader = FakeCodeReader(
+            1,
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), indexType = IndexType.METHOD_REF, methodRef = produce),
+                Insn(Opcode.MOVE_RESULT, 1, intArrayOf(0)), // v0 = produce() : Object
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = useObj),
+                Insn(Opcode.RETURN_VOID, 3),
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader)
+        TestPipeline.full(method)
+        assertEquals(IrType.OBJECT, defValue(method, IrOpcode.INVOKE).type)
+    }
+
     // ---- const-0 / literal-operand typing (oracle types/* regression cluster) ----
 
     @Test
