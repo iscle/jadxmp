@@ -5,7 +5,7 @@ import com.jadxmp.ui.client.OpenRequest
 import kotlinx.coroutines.suspendCancellableCoroutine
 import web.blob.byteArray
 import web.dom.document
-import web.events.EventHandler
+import web.events.Event
 import web.events.EventType
 import web.events.addEventListener
 import web.events.removeEventListener
@@ -117,16 +117,24 @@ class BrowserFileOpener : FileOpener {
         var focusTimeout: Timeout? = null
         val blurType = EventType<FocusEvent>("blur")
         val focusType = EventType<FocusEvent>("focus")
+        // `change`/`cancel` are attached via addEventListener, NOT the `input.onchange`/`oncancel`
+        // property setters: those setters fail to link on wasmJs (IrLinkageError — the kotlin-wrappers
+        // `HTMLInputElement.onchange` accessor signature doesn't resolve at runtime), which crashed the
+        // whole Open flow. addEventListener is the same path blur/focus/drag already use successfully.
+        val changeType = EventType<Event>("change")
+        val cancelType = EventType<Event>("cancel")
         // Held so cleanup can removeEventListener the exact same references it registered.
         var blurListener: ((FocusEvent) -> Unit)? = null
         var focusListener: ((FocusEvent) -> Unit)? = null
+        var changeListener: ((Event) -> Unit)? = null
+        var cancelListener: ((Event) -> Unit)? = null
 
         fun cleanup() {
             blurListener?.let { window.removeEventListener(blurType, it) }
             focusListener?.let { window.removeEventListener(focusType, it) }
+            changeListener?.let { input.removeEventListener(changeType, it) }
+            cancelListener?.let { input.removeEventListener(cancelType, it) }
             clearTimeout(focusTimeout)
-            input.onchange = null
-            input.oncancel = null
         }
 
         fun settle(file: File?) {
@@ -151,8 +159,12 @@ class BrowserFileOpener : FileOpener {
         blurListener = onBlur
         focusListener = onFocus
 
-        input.onchange = EventHandler { settle(input.files?.item(0)) }
-        input.oncancel = EventHandler { settle(null) }
+        val onChange: (Event) -> Unit = { settle(input.files?.item(0)) }
+        val onCancel: (Event) -> Unit = { settle(null) }
+        changeListener = onChange
+        cancelListener = onCancel
+        input.addEventListener(changeType, onChange)
+        input.addEventListener(cancelType, onCancel)
         window.addEventListener(blurType, onBlur)
         window.addEventListener(focusType, onFocus)
         continuation.invokeOnCancellation { cleanup() }
