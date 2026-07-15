@@ -1624,12 +1624,38 @@ internal class RegionMaker(
         // the single follow; a coincident handler that is not the follow is a shape we don't model.
         //
         val exits = LinkedHashSet<BasicBlock>()
-        for (b in bodyBlocks) for (s in cleanSucc(b)) if (s !in bodyBlocks && s !== exit) exits.add(s)
+        computeExits(bodyBlocks, exits)
+
+        // Multi-exit collapse via TAIL-BRIDGE absorption. A compiler leaves an unprotected forwarding block
+        // (typically the bare `goto` just past `try_end`) OUTSIDE the protected range even though it sits on
+        // the normal path from the body to the try's single follow — so the body has two clean exits (the
+        // follow itself, reached directly from a returning arm, AND that goto). Absorb such a block into the
+        // body: it is reached ONLY from the body, forwards to a single successor, and is exception-free
+        // ([canAbsorbTailBridge]), so rendering it inside `try {}` is exception- and flow-neutral (a goto/pure
+        // forwarder cannot throw, so its being catch-covered changes nothing), yet it stops being miscounted
+        // as a second normal exit. Grown to a fixpoint (a chain of forwarders relays to the shared follow),
+        // collapsing the body toward a SINGLE follow. A body still holding ≥2 exits after this is a GENUINE
+        // multi-follow (paths to distinct post-try code, or a terminal exit we deliberately never absorb) that
+        // we do NOT model — bail honestly (rule 4). Runs ONLY when there is already >1 exit, so a try that
+        // structures today (0/1 exit) is byte-for-byte unchanged.
+        if (exits.size > 1) {
+            var changed = true
+            while (changed && exits.size > 1) {
+                changed = false
+                val bridge = exits.firstOrNull { canAbsorbTailBridge(it, bodyBlocks) }
+                if (bridge != null) {
+                    bodyBlocks.add(bridge)
+                    computeExits(bodyBlocks, exits)
+                    changed = true
+                }
+            }
+        }
+
         val follow: BasicBlock? = when (exits.size) {
             0 -> null // the try body always returns/throws — nothing runs after the try/catch
             1 -> exits.first()
-            // Multiple normal exits with no factorable finally (the multi-exit reconstruction above already
-            // had first crack and declined): a placement fix here could drop/change a path's cleanup, so bail.
+            // Still multiple normal exits after tail-bridge absorption: a genuine multi-follow (paths reach
+            // distinct post-try code). A placement fix here could drop/reorder a path, so bail (rule 4).
             else -> throw Bail("try body with multiple normal exits not supported yet")
         }
         for (h in handlerSet) {
@@ -1662,6 +1688,45 @@ internal class RegionMaker(
         reconstructFinally(protectedBlocks, handlerSet, follow, tryRegion)?.let { return it }
 
         return finishTry(tryRegion, handlerSet, follow, loopCtx)
+    }
+
+    /** The clean exits of [body]: successors of a body block that are neither in the body nor the method exit. */
+    private fun computeExits(body: Set<BasicBlock>, out: LinkedHashSet<BasicBlock>) {
+        out.clear()
+        for (b in body) for (s in cleanSucc(b)) if (s !in body && s !== exit) out.add(s)
+    }
+
+    /**
+     * Whether the exit block [b] is a **tail bridge** that can be absorbed into a try [body] to collapse a
+     * multi-exit body toward a single follow (see the call site in [makeTry]). A tail bridge is an
+     * unprotected, exception-free *forwarder* the compiler left just outside the protected range — e.g. the
+     * bare `goto` past `try_end` that carries a returning arm to the method's shared `return`. Absorbing it is
+     * behaviour-preserving because:
+     *  - it is UNPROTECTED and holds no potentially-throwing instruction ([mayThrow] over the whole operand
+     *    tree, catching an ExpressionShaping-inlined throwing sub-expression), so whether it renders inside or
+     *    outside `try {}` is observationally identical (nothing it does can raise an exception the catch sees);
+     *  - it is reached ONLY from the body ([cleanPreds] ⊆ [body], non-empty), so pulling it in captures no
+     *    flow that originates elsewhere;
+     *  - it FORWARDS to a single successor that is a REAL block (one clean successor, NOT the method exit),
+     *    so it merely relays control toward the follow — it introduces no new branch/merge inside the body.
+     * A **terminal** exit (a `return`/`throw`, whose single clean successor IS the method exit) is deliberately
+     * NOT a forwarder and is never absorbed: pulling an in-position `return` into the body would disturb the
+     * finally-factoring paths (which reason about exactly which normal exits carry an inlined cleanup — see
+     * [reconstructFinally]) and offers no benefit, since a genuinely body-only terminal exit already yields a
+     * clean 0/1-exit shape. Never absorbs a handler entry, loop header, or synchronized head (those carry
+     * structural meaning). A try-scoped value that would escape via the follow is still caught by the
+     * [tryDefsEscape] check the caller runs over the grown body.
+     */
+    private fun canAbsorbTailBridge(b: BasicBlock, body: Set<BasicBlock>): Boolean {
+        if (b === exit) return false
+        if (isProtected(b)) return false // belongs to this/another try's range — not a free forwarder
+        if (b.contains(PipelineAttrs.EXC_HANDLER)) return false // a handler entry is never absorbed as body
+        if (b in loopHeaders || startsSynchronized(b)) return false
+        if (b.instructions.any { mayThrow(it) }) return false // exception-free only (catch-coverage neutral)
+        val succs = cleanSucc(b)
+        if (succs.size != 1 || succs[0] === exit) return false // a pure forwarder to ONE real block (not terminal)
+        val preds = cleanPreds(b)
+        return preds.isNotEmpty() && preds.all { it in body } // entered ONLY from the body
     }
 
     /**
