@@ -477,6 +477,51 @@ class WorkbenchState(
         _ui.update { it.copy(tabs = it.tabs.togglePin(index)) }
     }
 
+    // ── Tab-menu ergonomics (P1#7 / P1#9 / P2#14) — thin, additive wrappers over TabsState transitions ──
+
+    /** Toggle the bookmark flag on a tab (tab context menu, P1#9). */
+    fun toggleBookmark(index: Int) {
+        _ui.update { it.copy(tabs = it.tabs.toggleBookmark(index)) }
+    }
+
+    /** Close every tab except [index] (and pinned tabs). */
+    fun closeOtherTabs(index: Int) {
+        _ui.update { it.copy(tabs = it.tabs.closeOthers(index)) }
+    }
+
+    /** Close every tab to the left of [index] (pinned tabs are kept). */
+    fun closeTabsToLeft(index: Int) {
+        _ui.update { it.copy(tabs = it.tabs.closeToLeft(index)) }
+    }
+
+    /** Close every tab to the right of [index] (pinned tabs are kept). */
+    fun closeTabsToRight(index: Int) {
+        _ui.update { it.copy(tabs = it.tabs.closeToRight(index)) }
+    }
+
+    /** Close all tabs except pinned ones. */
+    fun closeAllTabs() {
+        _ui.update { it.copy(tabs = it.tabs.closeAll()) }
+    }
+
+    /** Ctrl+Tab: activate the most-recently-used tab other than the current one (P2#14). */
+    fun switchToLastUsedTab() {
+        val index = _ui.value.tabs.lastUsedIndex() ?: return
+        // Reuse the full activate path so history/tree-selection/document-load all stay in sync.
+        activateTab(index)
+    }
+
+    /**
+     * "Select in tree" from the tab menu (P1#7): highlight the tab's node in the matching tree, switching
+     * the tree panel to Classes/Resources as needed. Best-effort — it selects the node but does not expand
+     * ancestors or scroll to it (a full reveal is a later batch).
+     */
+    fun selectTabInTree(index: Int) {
+        val tab = _ui.value.tabs.tabs.getOrNull(index) ?: return
+        val kind = if (tab.nodeId.value.startsWith("res:")) TreeKind.RESOURCES else TreeKind.CLASSES
+        _ui.update { it.copy(tree = it.tree.switchTree(kind).select(tab.nodeId)) }
+    }
+
     fun updateCaret(caret: Int) {
         _ui.update { it.copy(tabs = it.tabs.updateCaret(it.tabs.activeIndex, caret)) }
     }

@@ -41,6 +41,9 @@ enum class ShortcutAction {
     /** Ctrl/Cmd+W — close the active editor tab. */
     CloseTab,
 
+    /** Ctrl/Cmd+Tab — switch to the last-used editor tab (the most-recently-used before the current). */
+    LastUsedTab,
+
     /** Ctrl/Cmd+S — save the active document's rendered text to a file. */
     SaveFile,
 
@@ -84,6 +87,8 @@ val DefaultKeymap: Map<ShortcutAction, List<KeyStroke>> = mapOf(
         KeyStroke(Key.N, primary = true),
     ),
     ShortcutAction.CloseTab to listOf(KeyStroke(Key.W, primary = true)),
+    // Ctrl+Tab on every platform (Cmd+Tab is swallowed by macOS, but Ctrl+Tab folds into `primary` too).
+    ShortcutAction.LastUsedTab to listOf(KeyStroke(Key.Tab, primary = true)),
     ShortcutAction.SaveFile to listOf(KeyStroke(Key.S, primary = true)),
     ShortcutAction.GoBack to listOf(
         KeyStroke(Key.DirectionLeft, alt = true),

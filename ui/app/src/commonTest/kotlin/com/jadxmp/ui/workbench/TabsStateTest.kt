@@ -150,4 +150,97 @@ class TabsStateTest {
         assertEquals(CodeView.SMALI, s.active?.view)
         assertEquals(0, s.active?.caret)
     }
+
+    private fun abc() = TabsState()
+        .open(a, "A", CodeView.JAVA)
+        .open(b, "B", CodeView.JAVA)
+        .open(c, "C", CodeView.JAVA) // active = c (index 2)
+
+    @Test
+    fun closeToLeftKeepsTargetAndRightNeighbours() {
+        // [a, b, c] active c; close-to-left of b (index 1) drops a, keeps b (active) and c.
+        val s = abc().activate(1).closeToLeft(1)
+        assertEquals(listOf(b, c), s.tabs.map { it.nodeId })
+        assertEquals(b, s.active?.nodeId)
+    }
+
+    @Test
+    fun closeToLeftKeepsPinnedToTheLeft() {
+        // Pinned a survives even though it is to the left of the target c.
+        val s = abc().togglePin(0).closeToLeft(2)
+        assertEquals(listOf(a, c), s.tabs.map { it.nodeId })
+        assertEquals(c, s.active?.nodeId) // active c survives
+    }
+
+    @Test
+    fun closeToRightKeepsTargetAndLeftNeighbours() {
+        // [a, b, c]; close-to-right of b (index 1) drops c, keeps a and b.
+        val s = abc().closeToRight(1)
+        assertEquals(listOf(a, b), s.tabs.map { it.nodeId })
+        // Active was c (dropped) → falls back to the anchor tab b.
+        assertEquals(b, s.active?.nodeId)
+    }
+
+    @Test
+    fun closeToRightKeepsPinnedToTheRight() {
+        val s = abc().togglePin(2).closeToRight(0)
+        assertEquals(listOf(a, c), s.tabs.map { it.nodeId })
+    }
+
+    @Test
+    fun closeAllEmptiesWhenNonePinned() {
+        val s = abc().closeAll()
+        assertTrue(s.isEmpty)
+        assertEquals(-1, s.activeIndex)
+    }
+
+    @Test
+    fun closeAllKeepsPinned() {
+        val s = abc().togglePin(1).closeAll() // pin b
+        assertEquals(listOf(b), s.tabs.map { it.nodeId })
+        assertEquals(b, s.active?.nodeId)
+    }
+
+    @Test
+    fun toggleBookmarkFlipsIndependentlyOfPin() {
+        val s = TabsState().open(a, "A", CodeView.JAVA)
+        assertFalse(s.active!!.bookmarked)
+        val bm = s.toggleBookmark(0)
+        assertTrue(bm.active!!.bookmarked)
+        assertFalse(bm.active!!.pinned) // bookmarking does not pin
+        assertFalse(bm.toggleBookmark(0).active!!.bookmarked) // toggles back off
+    }
+
+    @Test
+    fun lastUsedIndexIsNullForSingleTab() {
+        assertNull(TabsState().open(a, "A", CodeView.JAVA).lastUsedIndex())
+        assertNull(TabsState().lastUsedIndex())
+    }
+
+    @Test
+    fun lastUsedTogglesBetweenTwoMostRecentTabs() {
+        // Open a then b → last-used is a; activating it makes last-used b again (a stable toggle).
+        val s = TabsState().open(a, "A", CodeView.JAVA).open(b, "B", CodeView.JAVA)
+        val toA = s.lastUsedIndex()
+        assertEquals(a, s.tabs[toA!!].nodeId)
+        val s2 = s.activate(toA)
+        assertEquals(b, s2.tabs[s2.lastUsedIndex()!!].nodeId)
+    }
+
+    @Test
+    fun lastUsedFollowsMostRecentlyUsedOrder() {
+        // Open a,b,c (mru = c,b,a). Last-used skips the active c → b. After activating a, last-used → c.
+        val s = abc()
+        assertEquals(b, s.tabs[s.lastUsedIndex()!!].nodeId)
+        val s2 = s.activate(0) // activate a (mru = a,c,b)
+        assertEquals(c, s2.tabs[s2.lastUsedIndex()!!].nodeId)
+    }
+
+    @Test
+    fun lastUsedOrderSurvivesClose() {
+        // Open a,b,c (active c), close c → active b; last-used is then a (c pruned from the order).
+        val s = abc().close(2)
+        assertEquals(b, s.active?.nodeId)
+        assertEquals(a, s.tabs[s.lastUsedIndex()!!].nodeId)
+    }
 }

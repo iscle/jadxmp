@@ -136,6 +136,10 @@ fun Workbench(
                 val i = ui.tabs.activeIndex
                 if (i >= 0) { state.closeTab(i); true } else false
             }
+            // Ctrl+Tab: jump to the last-used tab. Consume it (stops focus traversal) only when there is
+            // another tab to switch to, so plain Tab keeps traversing focus with 0/1 tabs open.
+            ShortcutAction.LastUsedTab ->
+                if (ui.tabs.tabs.size > 1) { state.switchToLastUsedTab(); true } else false
             // Consume Ctrl/Cmd+S whenever a saver is wired (also stops the browser's "save page" dialog
             // on web); save only when a document is actually loaded. Exact-modifier match keeps plain
             // "s" typing and Ctrl+Shift+S untouched (see [resolveShortcut]).
@@ -399,6 +403,12 @@ private fun EditorArea(
             onSelect = state::activateTab,
             onClose = state::closeTab,
             onTogglePin = state::togglePin,
+            onToggleBookmark = state::toggleBookmark,
+            onCloseOthers = state::closeOtherTabs,
+            onCloseToLeft = state::closeTabsToLeft,
+            onCloseToRight = state::closeTabsToRight,
+            onCloseAll = state::closeAllTabs,
+            onSelectInTree = state::selectTabInTree,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 

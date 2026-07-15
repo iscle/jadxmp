@@ -78,6 +78,24 @@ fun SquareDot(tint: Color, modifier: Modifier = Modifier) {
     Box(modifier.size(6.dp).clip(MaterialTheme.shapes.extraSmall).background(tint))
 }
 
+/** A small filled bookmark ribbon (pennant with a bottom notch) — the per-tab "bookmarked" badge (P1#9). */
+@Composable
+fun BookmarkGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(7.dp)) {
+        val w = size.width
+        val h = size.height
+        val path = Path().apply {
+            moveTo(w * 0.15f, 0f)
+            lineTo(w * 0.85f, 0f)
+            lineTo(w * 0.85f, h)
+            lineTo(w * 0.50f, h * 0.62f)
+            lineTo(w * 0.15f, h)
+            close()
+        }
+        drawPath(path, tint)
+    }
+}
+
 /** Magnifier glyph for search fields. */
 @Composable
 fun SearchGlyph(tint: Color, modifier: Modifier = Modifier) {
