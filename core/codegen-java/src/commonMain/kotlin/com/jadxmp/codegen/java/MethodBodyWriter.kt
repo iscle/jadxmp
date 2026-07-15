@@ -23,6 +23,7 @@ import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.LiteralOperand
+import com.jadxmp.ir.insn.MethodRef
 import com.jadxmp.ir.insn.Operand
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.insn.TypeInstruction
@@ -1031,7 +1032,18 @@ internal class MethodBodyWriter(
             return
         }
 
+        // Static-invoke / instance-declaration MISMATCH: an `invoke-static` whose target resolves to a
+        // NON-static method of THIS same class (e.g. jadx left a `this`-free helper as an instance method
+        // yet the bytecode calls it statically). javac rejects the `Class.method(...)` a static invoke would
+        // normally render here ("non-static method … cannot be referenced from a static context"). Render it
+        // instead as an UNQUALIFIED implicit-`this` call — which compiles and is behavior-preserving: the
+        // callee was invoked with no receiver, so it cannot depend on `this`, and `invoke-static` carries no
+        // receiver operand, so the argument list is byte-identical to the static form (offset 0). Matches
+        // jadx's emission. Fires ONLY on this exact mismatch; every consistent call is untouched below.
+        val staticInstanceMismatch =
+            kind == InvokeKind.STATIC && resolvesToSameClassInstanceMethod(method)
         when {
+            staticInstanceMismatch -> {} // unqualified: no receiver, no class qualifier
             kind == InvokeKind.STATIC -> emitTypeRef(method.declaringType)
             kind == InvokeKind.SUPER -> code.add("super")
             else -> {
@@ -1039,11 +1051,38 @@ internal class MethodBodyWriter(
                 if (receiver != null) emitOperand(receiver, Prec.PRIMARY) else code.add("this")
             }
         }
-        code.add(".")
+        if (!staticInstanceMismatch) code.add(".")
         code.attachReference(MethodNodeRef(className(method.declaringType), method.name, method.paramTypes.map { it.toString() }))
         code.add(methodCallName(method))
         // Instance forms carry the receiver as arg 0; skip it when listing the actual arguments.
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1, method.paramTypes)
+    }
+
+    /**
+     * True when [ref] is an `invoke-static` target that actually resolves to a **non-static** method of
+     * the ENCLOSING class — the static-invoke / instance-declaration mismatch that must render as an
+     * unqualified implicit-`this` call rather than `Class.method(…)`.
+     *
+     * Two firing preconditions keep the qualifier-drop provably behavior-preserving for EVERY admitted
+     * case (rule 4), not just the corpus-observed one:
+     *  - **The ENCLOSING method must be non-static.** An unqualified instance call needs an implicit `this`
+     *    in scope; inside a `static` method or `<clinit>` there is none, so dropping the qualifier would
+     *    either be rejected by javac or silently rebind to a widening static overload (a silent miscompile).
+     *  - **The resolved declaration must match name + declared params + RETURN type.** The JVM (and
+     *    obfuscator output, which this corpus is derived from) permits two same-class methods that differ
+     *    only in return type; matching on name+params alone could pick the instance sibling of a genuinely
+     *    static target via insertion order and wrongly drop a needed qualifier. `argTypes`/`paramTypes`
+     *    both exclude the implicit `this`.
+     * Returns false when the target is another class, is a genuine static method, or is not present in the
+     * class model — so consistent calls fall through to the normal qualifier rules unchanged.
+     */
+    private fun resolvesToSameClassInstanceMethod(ref: MethodRef): Boolean {
+        if (method.isStatic) return false
+        if ((ref.declaringType as? IrType.Object)?.className != method.declaringClass.fullName) return false
+        val decl = method.declaringClass.methods.firstOrNull {
+            it.name == ref.name && it.argTypes == ref.paramTypes && it.returnType == ref.returnType
+        } ?: return false
+        return !decl.isStatic
     }
 
     /**
