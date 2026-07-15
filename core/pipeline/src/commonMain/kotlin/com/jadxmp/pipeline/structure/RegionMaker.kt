@@ -152,11 +152,48 @@ internal class RegionMaker(
     private val activeLoopHeaders = HashSet<BasicBlock>()
 
     /**
-     * Protected blocks of every currently-open try (see [makeTry]). A protected block reached while a
-     * try enclosing it is already open must be structured as *ordinary* flow (its exception edges are
-     * already represented by the enclosing try/catch) — not re-opened as a fresh try.
+     * The open handlers of every currently-open try, **per block** (see [makeTry]). Maps a protected block
+     * to the set of handler-entry blocks (its [protectingHandlers] identity) that are already emitted by an
+     * enclosing open try/catch on THIS block. A protected block reached while a handler protecting it is
+     * already open must have that handler's exception edge represented by the enclosing try/catch — it is
+     * structured as *ordinary* flow for the already-open handlers, not re-opened as a fresh try for them.
+     *
+     * This is the HANDLER-GRANULAR replacement of the former block-granular `openTryBlocks: Set<BasicBlock>`.
+     * The former set recorded merely "some try is open on this block"; this records exactly *which* handlers.
+     * The gate [hasUnopenedHandler] re-triggers a nested try only for a block's protecting handlers that are
+     * NOT yet open — so a block shared between two handlers (one open, one not) can still open the other.
+     * Every current reconstruct/makeTry/makeSync path opens the FULL handler set it emits on each protected block,
+     * so on today's corpus every protected body block has all its protecting handlers opened at once — making
+     * this decision identical to the old block-granular one (a block was open iff its whole handler set was).
      */
-    private val openTryBlocks = HashSet<BasicBlock>()
+    private val openHandlers = HashMap<BasicBlock, MutableSet<BasicBlock>>()
+
+    /**
+     * Open [handlers] on each of [blocks] (add each handler to the block's open set). Mirrors the former
+     * `openTryBlocks.addAll(blocks)` but records the specific emitted handlers rather than a bare presence.
+     */
+    private fun openTryHandlers(blocks: Collection<BasicBlock>, handlers: Collection<BasicBlock>) {
+        for (b in blocks) openHandlers.getOrPut(b) { HashSet() }.addAll(handlers)
+    }
+
+    /** Close [handlers] on each of [blocks] (the LIFO-paired inverse of [openTryHandlers]). */
+    private fun closeTryHandlers(blocks: Collection<BasicBlock>, handlers: Collection<BasicBlock>) {
+        val hs = if (handlers is Set) handlers else handlers.toHashSet()
+        for (b in blocks) {
+            val open = openHandlers[b] ?: continue
+            open.removeAll(hs)
+            if (open.isEmpty()) openHandlers.remove(b)
+        }
+    }
+
+    /**
+     * Whether [block] still has a protecting handler that is NOT already open — i.e. reaching it must
+     * re-trigger a nested try for those handlers. The handler-granular successor of the old
+     * `isProtected(block) && block !in openTryBlocks` gate: an unprotected block never fires (no handlers to
+     * open); a fully-open block never fires (every protecting handler already emitted by an enclosing try).
+     */
+    private fun hasUnopenedHandler(block: BasicBlock): Boolean =
+        gateFires(protectingHandlers(block), openHandlers[block])
 
     /**
      * The `monitor-enter` instructions consumed into a [SyncRegion] by [makeSync]. Every monitor-enter
@@ -654,7 +691,7 @@ internal class RegionMaker(
                 cur = built.follow
                 continue
             }
-            if (isProtected(block) && block !in openTryBlocks) {
+            if (hasUnopenedHandler(block)) {
                 val built = makeTry(block, loopCtx)
                 seq.add(built.region)
                 cur = built.follow
@@ -1456,7 +1493,7 @@ internal class RegionMaker(
 
         // Structure the (possibly branchy) body over clean flow, up to the follow. While the region is
         // open its blocks must not re-trigger a nested try for the SAME handler set.
-        openTryBlocks.addAll(protectedBlocks)
+        openTryHandlers(protectedBlocks, handlerSet)
         val tryRegion: Region = try {
             // The try's normal follow is an active exit while the body is structured (a branchy body's arm
             // reaching the follow stops there; the follow is placed once after the try by the enclosing chain).
@@ -1464,7 +1501,7 @@ internal class RegionMaker(
                 makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
             }
         } finally {
-            openTryBlocks.removeAll(protectedBlocks)
+            closeTryHandlers(protectedBlocks, handlerSet)
         }
         // Every exception edge of the protected body is represented by the try/catch (coverage net).
         for (b in protectedBlocks) for (h in handlerSet) recordEdge(b, h)
@@ -1694,16 +1731,16 @@ internal class RegionMaker(
         // `try {}` scope. The handler here reads only pre-try values, so this normally passes.
         if (tryDefsEscape(body)) return null
 
-        // (4) Structure the body as ordinary branchy flow. The protected body blocks join openTryBlocks so
-        // makeRegion does NOT re-open this same handler when it walks into a later split range.
+        // (4) Structure the body as ordinary branchy flow. The catch-all [h] is opened on the protected body
+        // blocks so makeRegion does NOT re-open this same handler when it walks into a later split range.
         val protectedBody = body.filter { h in protectingHandlers(it) }
-        openTryBlocks.addAll(protectedBody)
+        openTryHandlers(protectedBody, setOf(h))
         val tryRegion: Region = try {
             withActiveExit(follow) {
                 makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
             }
         } finally {
-            openTryBlocks.removeAll(protectedBody)
+            closeTryHandlers(protectedBody, setOf(h))
         }
         // Every exception edge of a protected body block to the catch-all is represented (coverage net).
         for (b in protectedBody) recordEdge(b, h)
@@ -1766,11 +1803,11 @@ internal class RegionMaker(
         // Structure the whole body with NO normal follow: [makeRegion] walks from the head through the
         // between-code and branches into each exit's terminal `return`, pulling body + exits into the try.
         // (A shape [makeRegion] cannot cover throws Bail ⇒ the method bails honestly — never partial output.)
-        openTryBlocks.addAll(body)
+        openTryHandlers(body, setOf(h))
         val tryRegion: Region = try {
             makeRegion(head, chainFollow = null, loopCtx = loopCtx, bodyRootHeader = null)
         } finally {
-            openTryBlocks.removeAll(body)
+            closeTryHandlers(body, setOf(h))
         }
         // Every exception edge from a protected body block to the catch-all is represented (coverage net).
         for (b in body) if (h in b.successors) recordEdge(b, h)
@@ -1999,7 +2036,7 @@ internal class RegionMaker(
 
         // Structure both bodies with NO normal follow: every path leaves via a terminal return pulled inside
         // the try/catch, or (exceptionally) via the finally. Blocks stay open so no nested try re-triggers.
-        openTryBlocks.addAll(insideTry)
+        openTryHandlers(insideTry, handlerSet)
         val tryRegion: Region
         val catchRegion: Region
         try {
@@ -2007,7 +2044,7 @@ internal class RegionMaker(
             moveExc.add(AttrFlag.DONT_GENERATE) // the catch-param binder (becomes `catch (E e)`)
             catchRegion = makeRegion(explicit, chainFollow = null, loopCtx = loopCtx, bodyRootHeader = null)
         } finally {
-            openTryBlocks.removeAll(insideTry)
+            closeTryHandlers(insideTry, handlerSet)
         }
 
         // Coverage nets: exception edges from both bodies to their handlers; the finally chain's own edges.
@@ -2377,14 +2414,14 @@ internal class RegionMaker(
         placeLeaf(enterBlock)
         recordEdge(enterBlock, head)
 
-        openTryBlocks.addAll(protectedBlocks)
+        openTryHandlers(protectedBlocks, handlerSet)
         val body: Region = try {
             // The synchronized follow is an active exit while the (possibly branchy) body is structured.
             withActiveExit(follow) {
                 makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
             }
         } finally {
-            openTryBlocks.removeAll(protectedBlocks)
+            closeTryHandlers(protectedBlocks, handlerSet)
         }
         for (b in protectedBlocks) for (h in handlerSet) recordEdge(b, h)
         consumeCleanupHandler(handlerRegion)
@@ -2650,7 +2687,25 @@ internal class RegionMaker(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * The HANDLER-GRANULAR try-gate decision, factored pure for testability. Given a block's protecting
+         * handlers (its try membership, priority order) and the set of handlers already open on that block
+         * (null ⇒ none open), returns whether reaching the block must re-trigger a nested try — true iff some
+         * protecting handler is not yet open.
+         *
+         * Behaviour-preservation of the former block-granular gate (`isProtected(block) && block !in
+         * openTryBlocks`): the old code only ever opened a block's ENTIRE protecting-handler set at once, so
+         * `block in openTryBlocks` was equivalent to "every protecting handler open" — for which this returns
+         * false, matching. `block !in openTryBlocks` ⇒ no handler open ⇒ [open] is null/misses all ⇒ true.
+         * An unprotected block (empty [protecting]) is never a try head ⇒ false, as before.
+         */
+        internal fun <T> gateFires(protecting: List<T>, open: Set<T>?): Boolean {
+            if (protecting.isEmpty()) return false
+            if (open == null) return true
+            return protecting.any { it !in open }
+        }
+
         /** Id for synthetic break/continue leaves; identity (not id) distinguishes them. */
         const val SYNTHETIC_ID = -1
 
