@@ -76,7 +76,7 @@ import com.jadxmp.ui.theme.MonoFontFamily
  * The focus-owning overlays whose open/close SET drives root focus reclaim (see [Workbench]). Each grabs
  * focus for its own text field on mount; the usages panel is deliberately absent (it has no field).
  */
-private enum class OverlayFocus { FIND, GO_TO_LINE, SEARCH }
+private enum class OverlayFocus { FIND, GO_TO_LINE, SEARCH, RENAME }
 
 /**
  * Top-level application composable. Owns the [WorkbenchState] and the light/dark selection, and hosts
@@ -168,6 +168,8 @@ fun Workbench(
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
+                // The rename dialog is modal-topmost: Esc cancels it before any other overlay/back.
+                ui.rename != null -> { state.closeRenameDialog(); true }
                 ui.usages != null -> { state.closeUsages(); true }
                 ui.goToLine != null -> { state.closeGoToLine(); true }
                 ui.find != null -> { state.closeFind(); true }
@@ -199,6 +201,8 @@ fun Workbench(
         if (ui.find != null) add(OverlayFocus.FIND)
         if (ui.goToLine != null) add(OverlayFocus.GO_TO_LINE)
         if (showSearch) add(OverlayFocus.SEARCH)
+        // The rename dialog grabs focus for its name field, so its close must trigger root focus reclaim too.
+        if (ui.rename != null) add(OverlayFocus.RENAME)
     }
     var previousOverlays by remember { mutableStateOf(emptySet<OverlayFocus>()) }
     LaunchedEffect(openOverlays) {
@@ -348,6 +352,18 @@ fun Workbench(
                             onClose = { showSettings = false },
                         )
                     }
+                }
+
+                // Rename dialog — a centered modal over its own scrim, rendered last so it overlays every
+                // panel. Success closes it and refreshes the tree + open documents; a rejection keeps it
+                // open with the engine's reason shown inline (see WorkbenchState.submitRename).
+                ui.rename?.let { rename ->
+                    RenameDialog(
+                        state = rename,
+                        onInput = state::setRenameInput,
+                        onSubmit = state::submitRename,
+                        onCancel = state::closeRenameDialog,
+                    )
                 }
             }
 
@@ -551,6 +567,9 @@ private fun EditorArea(
                     // "Find usages" — resolve the clicked token against the OPEN class + view, then query
                     // the engine (the workbench adds the class/view the viewer's callback doesn't carry).
                     onFindUsages = { line, token -> state.findUsages(doc.nodeId, doc.view, line, token) },
+                    // "Rename…" — open the dialog for the clicked token; the workbench adds the open class +
+                    // view (resolved to the exact symbol at submit, like find-usages).
+                    onRename = { line, token -> state.openRenameDialog(doc.nodeId, doc.view, line, token) },
                     // "Save file" context-menu action — only offered when a saver is wired.
                     onSaveFile = if (state.hasSaver) state::saveActiveDocument else null,
                     // Editor polish (P1#11 word-wrap, P1#12 zoom).

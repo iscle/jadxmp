@@ -103,4 +103,28 @@ class StubDecompilerClient : DecompilerClient {
             ),
         )
     }
+
+    /**
+     * A benign stand-in so the Rename dialog + refresh flow is exercised end-to-end in the stub shell
+     * (android/previews): a legal-looking name is accepted, a blank/illegal one is rejected with a readable
+     * reason — mirroring the real backend's accept/reject shape without a live model to mutate (the static
+     * [StubData] tree does not actually change). A real rename runs through [CoreApiDecompilerClient].
+     */
+    override suspend fun rename(target: RenameQuery, newName: String): RenameOutcome {
+        delay(20)
+        val name = newName.trim()
+        val illegal = name.isEmpty() ||
+            !(name[0].isLetter() || name[0] == '_') ||
+            name.any { !(it.isLetterOrDigit() || it == '_') }
+        return if (illegal) {
+            RenameOutcome.Rejected("'$newName' is not a valid Java identifier.")
+        } else {
+            RenameOutcome.Applied(name)
+        }
+    }
+
+    /** No user renames are tracked in the stub, so clearing them is a no-op. */
+    override suspend fun clearRenames() {
+        delay(10)
+    }
 }

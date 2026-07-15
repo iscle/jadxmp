@@ -137,6 +137,15 @@ fun CodeViewer(
      * reference (the same predicate as "Copy reference"), so a package/local/keyword offers nothing.
      */
     onFindUsages: ((line: Int, token: CodeToken) -> Unit)? = null,
+    /**
+     * "Rename" — open the rename dialog for the clicked token's resolved symbol. Receives the clicked line +
+     * token; the workbench builds the engine query (adding the open class + view) and resolves it through the
+     * same click-to-definition path as "Find usages". Null hides the item; when present it is enabled only
+     * for a token that resolves to a class/method/field reference (the same predicate as "Copy reference"),
+     * so a package/local/keyword offers nothing. The engine still has the final say (it rejects a
+     * constructor / nested class / enum member with a reason shown in the dialog — fault isolation).
+     */
+    onRename: ((line: Int, token: CodeToken) -> Unit)? = null,
     /** "Save file" — write this document's rendered text to disk. Null hides the menu item (no saver). */
     onSaveFile: (() -> Unit)? = null,
     /** Word-wrap toggle (P1#11): when true, lines wrap instead of panning under a horizontal scroll. */
@@ -356,6 +365,11 @@ fun CodeViewer(
                     // only for a navigable class/method/field token); the engine query itself runs async.
                     onFindUsages?.let { find ->
                         ContextMenuItem("Find usages", enabled = reference != null) { find(m.line, m.token) }
+                    },
+                    // "Rename…" — same click-to-def resolution as "Find usages" (enabled only for a navigable
+                    // class/method/field token); opens a dialog, the rename runs async through the engine.
+                    onRename?.let { rename ->
+                        ContextMenuItem("Rename…", enabled = reference != null) { rename(m.line, m.token) }
                     },
                     // "Save file" (Ctrl/Cmd+S) — appended only when a FileSaver is wired.
                     onSaveFile?.let { save -> ContextMenuItem("Save file") { save() } },

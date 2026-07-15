@@ -17,6 +17,8 @@ import com.jadxmp.ui.client.ProjectExporter
 import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.OpenRequest
+import com.jadxmp.ui.client.RenameOutcome
+import com.jadxmp.ui.client.RenameQuery
 import com.jadxmp.ui.client.ResourceSurface
 import com.jadxmp.ui.client.SearchQuery
 import com.jadxmp.ui.client.SearchResults
@@ -139,6 +141,8 @@ data class WorkbenchUiState(
     val revealTarget: NodeId? = null,
     /** "Find usages" panel state (loading / results / unresolved). Null when the panel is closed. */
     val usages: UsagesUiState? = null,
+    /** Rename dialog state (target + typed input + inline rejection reason). Null when the dialog is closed. */
+    val rename: RenameDialogUiState? = null,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -242,6 +246,13 @@ class WorkbenchState(
      * can never overwrite a newer panel state. Access is on [scope]'s single dispatcher — no atomics.
      */
     private var usagesGeneration = 0
+
+    /**
+     * Generation guard for the Rename flow, bumped on every [submitRename] and on [closeRenameDialog], so a
+     * superseded rename's late result (its affected classes re-decompile on the client) can never write back
+     * over a newer dialog/close. Symmetric to [usagesGeneration]; access is on [scope]'s single dispatcher.
+     */
+    private var renameGeneration = 0
 
     /**
      * Best-effort seed for the Find bar / "Search selection", set from the last code token the user
@@ -1004,6 +1015,110 @@ class WorkbenchState(
                 codeNavNonce = it.codeNavNonce + 1,
             )
         }
+    }
+
+    // ── Rename (code-area right-click) ────────────────────────────────────────
+
+    /**
+     * Open the Rename dialog on the symbol under a code-area right-click, prefilled with the clicked
+     * [token]'s current name. The dialog resolves that exact clicked position to the engine symbol at submit
+     * time (the same click-to-definition path find-usages uses), so nothing is resolved yet here — this only
+     * captures where the user invoked it (the open class + view + line/token). A blank token opens nothing.
+     */
+    fun openRenameDialog(classNode: NodeId, view: CodeView, line: Int, token: CodeToken) {
+        val name = token.text.trim()
+        if (name.isEmpty()) return
+        val target = RenameQuery(classNode, view, line, token.text, token.kind)
+        _ui.update { it.copy(rename = RenameDialogUiState(target = target, originalName = name, input = name)) }
+    }
+
+    /** Update the typed new name; clears any prior rejection so the field's error state resets as they edit. */
+    fun setRenameInput(text: String) {
+        if (_ui.value.rename == null) return
+        _ui.update { it.copy(rename = it.rename?.copy(input = text, error = null)) }
+    }
+
+    /** Close the Rename dialog and invalidate any in-flight rename's late result (generation bump). */
+    fun closeRenameDialog() {
+        renameGeneration++
+        _ui.update { it.copy(rename = null) }
+    }
+
+    /**
+     * Commit the Rename: apply the typed name to the dialog's target through [DecompilerClient.rename] on
+     * [scope] (the caller's thread is never blocked; a successful rename re-decompiles the affected class).
+     * On **success** the dialog closes and the tree + open documents refresh so the new name shows
+     * ([refreshAfterRename]); on **rejection** (illegal/reserved name, a within-scope collision, an
+     * unrenamable target, or a token that didn't resolve) the dialog stays open with the reason shown inline
+     * — nothing is applied. A blank entry is rejected locally without hitting the engine. Epoch- and
+     * generation-guarded: a rename superseded by a new project or a newer dialog action is dropped.
+     */
+    fun submitRename() {
+        val dialog = _ui.value.rename ?: return
+        if (dialog.busy) return
+        val newName = dialog.input.trim()
+        if (newName.isEmpty()) {
+            _ui.update { it.copy(rename = it.rename?.copy(error = "Enter a new name.")) }
+            return
+        }
+        val epoch = openEpoch
+        val generation = ++renameGeneration
+        _ui.update { it.copy(rename = it.rename?.copy(busy = true, error = null)) }
+        scope.launch {
+            val outcome = runCatching { client.rename(dialog.target, newName) }
+                .getOrElse { RenameOutcome.Rejected("Rename failed.") }
+            // A superseding project drops the result entirely (nothing here belongs to it).
+            if (epoch != openEpoch) return@launch
+            when (outcome) {
+                is RenameOutcome.Applied -> {
+                    // The engine state changed, so the UI MUST refresh to match — even if the user closed
+                    // this dialog while the rename was in flight (Esc doesn't undo a submitted rename; there
+                    // is no engine-level undo). The refresh is idempotent and doesn't touch [rename]. Close
+                    // THIS dialog only if it is still the one showing, so a newer dialog is never clobbered.
+                    if (generation == renameGeneration) _ui.update { it.copy(rename = null) }
+                    refreshAfterRename(epoch, outcome.name)
+                }
+                // A rejection only writes back to the dialog it came from — a superseded one is left alone.
+                is RenameOutcome.Rejected ->
+                    if (generation == renameGeneration) {
+                        _ui.update { it.copy(rename = it.rename?.copy(busy = false, error = outcome.reason)) }
+                    }
+            }
+        }
+    }
+
+    /**
+     * Refresh the UI's cached tree + documents after a successful rename so the new name shows. The engine
+     * (and the client's own caches) were already invalidated by the rename; here we rebuild the WORKBENCH's
+     * copies: re-fetch the tree roots, and re-fetch children only for the parents the user already expanded
+     * (bounded — the tree keeps its expansion, now with rename-aware labels), then drop every rendered
+     * document and reload the active one so its source shows the new name immediately (other open tabs
+     * reload lazily when next focused). Tabs, the active selection and tree expansion are preserved (this
+     * touches neither [TabsState] nor the [TreeUiState] beyond its cached children). Epoch-guarded so a
+     * refresh superseded by a new [openProject] is dropped. Runs inside [submitRename]'s coroutine.
+     */
+    private suspend fun refreshAfterRename(epoch: Int, appliedName: String) {
+        val classRoots = client.rootNodes(TreeKind.CLASSES)
+        val resRoots = client.rootNodes(TreeKind.RESOURCES)
+        val freshChildren = LinkedHashMap<NodeId, List<TreeNode>>()
+        for (parent in _ui.value.childrenCache.keys.toList()) {
+            if (epoch != openEpoch) return
+            freshChildren[parent] = client.childNodes(parent)
+        }
+        if (epoch != openEpoch) return
+        _ui.update { state ->
+            state.copy(
+                roots = mapOf(TreeKind.CLASSES to classRoots, TreeKind.RESOURCES to resRoots),
+                childrenCache = freshChildren,
+                // The engine cache is invalidated; drop the UI's rendered copies so a re-fetch is fresh.
+                documents = emptyMap(),
+                status = "Renamed to $appliedName",
+            )
+        }
+        // Reload the visible document so the new name renders now (not on next focus). ensureDocument
+        // re-syncs Find and adopts the (possibly renamed) tab title too.
+        val active = _ui.value.tabs.active
+        if (active != null) ensureDocument(active.nodeId, active.view)
     }
 
     // ── In-editor Find bar (Ctrl+F) ───────────────────────────────────────────

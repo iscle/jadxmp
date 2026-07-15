@@ -91,6 +91,35 @@ interface DecompilerClient {
      * The default is `null`: a client with no engine backing offers no usages.
      */
     suspend fun findUsages(query: UsageQuery): UsageResults? = null
+
+    /**
+     * User-driven **rename** of the symbol at a code-area position — jadx-gui's Rename, driven from the code
+     * viewer's right-click. [target] carries where the user invoked it (the open class node + shown view +
+     * clicked line/token); the client resolves that position to the engine's exact reference key (the SAME
+     * `CodeNodeRef` space go-to-definition / find-usages use) and applies the rename at the symbol's
+     * definition and every use (see `com.jadxmp.api.Decompiler.rename`).
+     *
+     * The engine **validates and collision-checks** the request against the loaded model, so a rename is
+     * either [RenameOutcome.Applied] (it took effect; the render + usage caches are invalidated so a
+     * re-fetch shows the new name) or [RenameOutcome.Rejected] with a UI-ready reason (an illegal/reserved
+     * name, a within-scope collision, or a target that can't be renamed in this version) — jadxmp never
+     * silently clobbers a name. A token that does not resolve to a renamable symbol (a package/local/keyword,
+     * an unresolved position) is likewise a [RenameOutcome.Rejected], never a throw (rule 4).
+     *
+     * `suspend` and cancelable because a successful rename invalidates the engine's caches, so the affected
+     * class(es) re-decompile on the next fetch. The default rejects (a client with no engine backing cannot
+     * rename); the production client maps the engine result, the stub returns a benign outcome.
+     */
+    suspend fun rename(target: RenameQuery, newName: String): RenameOutcome =
+        RenameOutcome.Rejected("Renaming is not available for this project.")
+
+    /**
+     * Drop every user rename applied so far, reverting names to the engine's automatic naming on the next
+     * fetch (see `com.jadxmp.api.Decompiler.clearRenames`). The default is a no-op — a client with no engine
+     * backing has nothing to clear; the production client also invalidates its own render/tree caches so a
+     * subsequent fetch reflects the revert. Backs a future "Clear renames" affordance.
+     */
+    suspend fun clearRenames() {}
 }
 
 /**
@@ -140,3 +169,42 @@ data class UsageSiteRow(
     val line: Int,
     val kind: NodeKind,
 )
+
+/**
+ * Where the user invoked "Rename" in the code area — the same clicked-position shape as [UsageQuery], since
+ * a rename resolves its target through the exact click-to-definition mechanism find-usages uses. Deliberately
+ * UI-typed (no engine `CodeNodeRef`) so the [DecompilerClient] seam stays engine-free; the impl does the ref
+ * resolution internally.
+ *
+ * @property classNode the open class (`cls:`) node whose decompiled source was right-clicked.
+ * @property view the shown source view — the engine annotates positions per format, so the query must match it.
+ * @property line the 1-based clicked line within that document.
+ * @property token the clicked identifier token's text (the symbol name at the caret).
+ * @property tokenKind the token's [TokenKind], disambiguating a name used as both, say, a field and a method.
+ */
+@Immutable
+data class RenameQuery(
+    val classNode: NodeId,
+    val view: CodeView,
+    val line: Int,
+    val token: String,
+    val tokenKind: TokenKind,
+)
+
+/**
+ * The outcome of a [DecompilerClient.rename] — the UI-facing projection of the engine's `RenameResult`
+ * (kept engine-type-free like the rest of the seam; the production client maps one to the other). A rename
+ * either takes effect ([Applied], carrying the [Applied.name] now emitted everywhere) or is **rejected
+ * without changing anything** ([Rejected], carrying a short human-readable [Rejected.reason] a dialog can
+ * surface directly). The three engine rejections (illegal/reserved name, within-scope collision, unrenamable
+ * target) and the "token didn't resolve to a symbol" case all fold to [Rejected] — the dialog treats them
+ * identically: keep open, show the reason.
+ */
+@Immutable
+sealed interface RenameOutcome {
+    /** The rename took effect; [name] is the identifier now emitted at the definition and every use. */
+    data class Applied(val name: String) : RenameOutcome
+
+    /** The rename was rejected and nothing changed; [reason] is a ready-to-show explanation. */
+    data class Rejected(val reason: String) : RenameOutcome
+}

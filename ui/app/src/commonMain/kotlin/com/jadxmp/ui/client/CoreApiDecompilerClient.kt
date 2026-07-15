@@ -6,6 +6,7 @@ import com.jadxmp.api.DecompilerArgs
 import com.jadxmp.api.MemberInfo
 import com.jadxmp.api.MemberKind
 import com.jadxmp.api.OutputFormat
+import com.jadxmp.api.RenameResult
 import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.CodeMetadata
 import com.jadxmp.codegen.CodeNodeRef
@@ -61,6 +62,15 @@ class CoreApiDecompilerClient(
     /** Immutable, whole-swap snapshot of everything derived from the loaded input. Guarded by [lock]. */
     private var model = LoadedModel()
 
+    /**
+     * The user renames in effect, as the engine's `CodeNodeRef → chosen name` map, overlaid onto the tree
+     * labels so a renamed class/member shows its new name in the navigation tree (the engine's
+     * [Decompiler.classNames]/[Decompiler.classMembers] report *binary/raw* names, which are invariant under
+     * renaming — an alias is a codegen spelling only). Empty by construction on [open] (a fresh load has no
+     * renames) and refreshed by [rebuildModel] on every rename/clear. Guarded by [lock]; read only under it.
+     */
+    private var renameOverlay: Map<CodeNodeRef, String> = emptyMap()
+
     /** Rendered documents cached by node+view. Guarded by [lock]. */
     private val documentCache = LinkedHashMap<DocCacheKey, CodeDocument>()
 
@@ -98,9 +108,9 @@ class CoreApiDecompilerClient(
                 // Badge each class row by its kind (interface/enum/annotation/class) AND its access
                 // visibility (public/protected/private/package), read cheaply from the model with no
                 // decompilation and fault-isolated to the generic CLASS badge (no overlay) on any fault.
-                model = LoadedModel.build(decompiler.classNames) { fqn ->
-                    classNodeBadge(runCatching { decompiler.classInfo(fqn) }.getOrNull())
-                }
+                // A fresh load carries no user renames, so [rebuildModel]'s overlay is empty here (labels
+                // are the raw binary names, byte-identical to the pre-rename tree).
+                rebuildModel()
                 // Build the resources tree here (under the same lock) so a non-APK input honestly yields
                 // an empty Resources tree, and so the one-time manifest/arsc decode the tree needs runs on
                 // Dispatchers.Default off the UI thread rather than on first tree paint. Fault-isolated:
@@ -172,7 +182,8 @@ class CoreApiDecompilerClient(
         model.classNames.sorted().map { fqn ->
             TreeNode(
                 id = NodeId("cls:$fqn"),
-                label = fqn.substringAfterLast('.'),
+                // Rename-aware label (the `cls:` id stays the binary name); raw simple name with no renames.
+                label = classLabel(fqn),
                 kind = model.kindOf(fqn),
                 // A class expands to its declared members (childNodes(cls:…)); show the expander.
                 hasChildren = true,
@@ -406,7 +417,88 @@ class CoreApiDecompilerClient(
         }
     }
 
+    /**
+     * Resolve the clicked token to its exact engine [CodeNodeRef] — the SAME click-to-definition step
+     * [findUsages] uses ([referenceOnLine] over a fresh [Decompiler.decompileClass] render) — then apply
+     * [Decompiler.rename], all under the single [lock] on [Dispatchers.Default]. On success the engine has
+     * already invalidated ITS render + usage caches; we additionally drop THIS client's own caches so a
+     * re-fetch renders the new name: [documentCache] (stale rendered text) and [model] via [rebuildModel]
+     * (so the tree re-derives with the new [renameOverlay] label). The [RenameResult] is projected to the
+     * engine-free [RenameOutcome] the workbench consumes.
+     *
+     * Fault-isolated (rule 4): a token that resolves to nothing (or a non-renamable kind), a class that
+     * won't decompile, or any thrown fault yields a [RenameOutcome.Rejected] with a readable reason — never
+     * a crash. The engine's own validation/collision rejections come back as [RenameOutcome.Rejected] too,
+     * so jadxmp never silently mangles a name.
+     */
+    override suspend fun rename(target: RenameQuery, newName: String): RenameOutcome {
+        val fqn = classFqnOf(target.classNode)
+            ?: return RenameOutcome.Rejected("Select a class, method or field in the code to rename.")
+        val format = outputFormatFor(target.view)
+        return withContext(Dispatchers.Default) {
+            lock.withLock {
+                try {
+                    val origin = decompiler.decompileClass(fqn, format)
+                        ?: return@withLock RenameOutcome.Rejected("This class could not be decompiled.")
+                    val meta = origin.metadata.code
+                        ?: return@withLock RenameOutcome.Rejected("No symbol information is available here.")
+                    val ref = referenceOnLine(origin.code, meta, target.line, target.token, target.tokenKind)
+                        ?: return@withLock RenameOutcome.Rejected("Select a class, method or field in the code to rename.")
+                    val result = decompiler.rename(ref, newName)
+                    if (result is RenameResult.Applied) {
+                        // The engine invalidated its caches; drop the client's own so a re-fetch is fresh.
+                        documentCache.clear()
+                        rebuildModel()
+                    }
+                    result.toRenameOutcome()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    RenameOutcome.Rejected("Rename failed: ${e.message ?: e.toString()}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Drop every user rename ([Decompiler.clearRenames]) and invalidate this client's own render/tree caches
+     * so a subsequent fetch reflects the revert. Held under [lock] on [Dispatchers.Default] like [rename];
+     * a no-op cost when there were no renames (the engine short-circuits and [rebuildModel] rebuilds an
+     * identical tree).
+     */
+    override suspend fun clearRenames() {
+        withContext(Dispatchers.Default) {
+            lock.withLock {
+                decompiler.clearRenames()
+                documentCache.clear()
+                rebuildModel()
+            }
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Re-derive the class-tree [model] from the engine's current [Decompiler.classNames], refreshing the
+     * [renameOverlay] first so class-row labels reflect any user rename. Must be called under [lock] (it
+     * reads the engine). Cheap — no decompilation; the badge lookup is a no-decompile model read, fault-
+     * isolated to the generic CLASS badge. With no renames the overlay is empty, so labels are the raw
+     * binary names — byte-identical to the pre-rename tree.
+     */
+    private fun rebuildModel() {
+        renameOverlay = decompiler.renames
+        model = LoadedModel.build(decompiler.classNames, ::classLabel) { fqn ->
+            classNodeBadge(runCatching { decompiler.classInfo(fqn) }.getOrNull())
+        }
+    }
+
+    /**
+     * The tree label for a class by its binary [fqn]: its user-renamed name if one is in effect, else the
+     * simple binary name. The `cls:` NodeId stays keyed on the binary [fqn] (invariant under renaming), so
+     * only the shown label changes — navigation is unaffected. Reads [renameOverlay]; call under [lock].
+     */
+    private fun classLabel(fqn: String): String =
+        renameOverlay[ClassNodeRef(fqn)] ?: fqn.substringAfterLast('.')
 
     /** Member rows for [owner] (top-level ancestor [topLevel]), enumerated from the model under [lock]. */
     private suspend fun memberNodesUnder(topLevel: String, owner: String): List<TreeNode> =
@@ -449,7 +541,10 @@ class CoreApiDecompilerClient(
         val nestedFqn = (key as? ClassNodeRef)?.fullName
         return MemberDescriptor(
             sort = sortOf(kind),
-            displayName = displayName,
+            // Rename-aware label if the user renamed this member (matched by its exact engine key). The
+            // [signature] is deliberately left RAW: it feeds the member NodeId slug (MemberTree.slug), which
+            // must stay stable for navigation to keep resolving; only the shown label follows the rename.
+            displayName = renameOverlay[key] ?: displayName,
             signature = signature,
             nestedFqn = nestedFqn,
             // A nested-class row badges by its own kind; the lookup is cheap (no decompile) and fault-isolated.
@@ -589,11 +684,16 @@ class CoreApiDecompilerClient(
 
         companion object {
             /**
-             * Build the class tree. [badgeOf] supplies each class row's kind + access visibility, derived
-             * once per load from the model (no decompilation) so the whole tree — roots, package children,
-             * the scan index and search results — badges consistently from a single cached map.
+             * Build the class tree. [labelOf] supplies each class row's shown label (rename-aware; the
+             * `cls:` id stays the binary name), and [badgeOf] its kind + access visibility, both derived
+             * once per (re)build from the model (no decompilation) so the whole tree — roots, package
+             * children, the scan index and search results — labels/badges consistently.
              */
-            fun build(names: List<String>, badgeOf: (String) -> ClassNodeBadge): LoadedModel {
+            fun build(
+                names: List<String>,
+                labelOf: (String) -> String,
+                badgeOf: (String) -> ClassNodeBadge,
+            ): LoadedModel {
                 // childrenByPackage[""] holds the roots (top-level packages + default-package classes).
                 val childrenByPackage = HashMap<String, MutableList<TreeNode>>()
                 val allPackages = HashSet<String>()
@@ -609,7 +709,7 @@ class CoreApiDecompilerClient(
                     }
                     childrenByPackage.getOrPut(pkg) { mutableListOf() } += TreeNode(
                         id = NodeId("cls:$fqn"),
-                        label = fqn.substringAfterLast('.'),
+                        label = labelOf(fqn),
                         // Distinct badge per class kind (interface/enum/annotation), generic CLASS otherwise.
                         kind = badge.kind,
                         // Expands to the class's declared members (childNodes(cls:…)).
@@ -752,4 +852,20 @@ internal fun simpleTypeName(raw: String): String {
     val head = core.substringBefore('<')
     val generics = core.substring(head.length)
     return head.substringAfterLast('.').substringAfterLast('$') + generics + arraySuffix
+}
+
+// ── Rename result projection (pure, unit-tested) ─────────────────────────────────
+
+/**
+ * Project the engine's `RenameResult` to the engine-free [RenameOutcome] the workbench consumes. The one
+ * success case carries the applied name; the three rejections ([RenameResult.InvalidName],
+ * [RenameResult.Collision], [RenameResult.UnrenamableTarget]) all fold to [RenameOutcome.Rejected], each
+ * surfacing the engine's own ready-to-show reason/conflict text verbatim — so the dialog reports exactly
+ * why a rename was refused without the seam leaking a codegen type. Pure; `internal` for direct testing.
+ */
+internal fun RenameResult.toRenameOutcome(): RenameOutcome = when (this) {
+    is RenameResult.Applied -> RenameOutcome.Applied(name)
+    is RenameResult.InvalidName -> RenameOutcome.Rejected(reason)
+    is RenameResult.Collision -> RenameOutcome.Rejected(conflict)
+    is RenameResult.UnrenamableTarget -> RenameOutcome.Rejected(reason)
 }
