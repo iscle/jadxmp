@@ -3,12 +3,15 @@ package com.jadxmp.codegen.java
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.CodeInfo
+import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
+import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
 import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
+import com.jadxmp.codegen.emitLineComment
 import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.attr.AttrKey
 import com.jadxmp.ir.attr.AttrNode
@@ -46,15 +49,22 @@ class JavaCodeGenerator {
 
     /**
      * Render [cls] to Java source and metadata. [aliasMap] carries deobfuscation/user rename overrides
-     * (default [AliasMap.EMPTY] ⇒ no renaming ⇒ output byte-identical to the pre-feature backend). It is
-     * read-only here, so the parallel per-class render path stays race-free.
+     * (default [AliasMap.EMPTY] ⇒ no renaming); [commentMap] carries user comments to inject before a
+     * class/method/field definition (default [CommentMap.EMPTY] ⇒ no injection). With both at their empty
+     * defaults the output is byte-identical to the pre-feature backend. Both are read-only here, so the
+     * parallel per-class render path stays race-free.
      */
-    fun generate(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): CodeInfo {
+    fun generate(
+        cls: IrClass,
+        aliasMap: AliasMap = AliasMap.EMPTY,
+        commentMap: CommentMap = CommentMap.EMPTY,
+    ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = ImportCollector(packageName)
 
-        // Pass 1: populate imports (output discarded).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root).emitClass(cls, topLevel = true)
+        // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
+        // used so both passes make identical name/variable choices (the comment injection is a no-op here).
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -67,7 +77,7 @@ class JavaCodeGenerator {
             for (imp in importList) code.add("import ").add(JavaIdentifiers.sanitizeQualified(imp)).add(";").newLine()
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -89,11 +99,29 @@ class JavaCodeGenerator {
         private val imports: ImportCollector,
         private val aliasMap: AliasMap = AliasMap.EMPTY,
         private val root: IrRoot? = null,
+        private val commentMap: CommentMap = CommentMap.EMPTY,
     ) {
         private val types = JavaTypeRenderer(imports, aliasMap, root)
 
+        /**
+         * Inject the user's comment (if any) for [ref] as `//` line(s) at the current indent, immediately
+         * before the definition that follows. Byte-identical fast path: with no comments loaded
+         * ([CommentMap.EMPTY], the default) this emits nothing, so accurate output is unchanged. The comment
+         * carries NO annotation — it is pure decoration, so it never appears as a definition/reference and
+         * cannot perturb `nodeAt`/find-usages (which read only this render's recomputed metadata); it merely
+         * shifts the following definition annotation's offset, which is internally consistent per render.
+         * Sanitization (multi-line → multiple `//` lines; anything that could escape the line comment is
+         * defused) lives in [emitLineComment], so a weird comment can never break the source (rule 4).
+         */
+        private fun emitUserComment(ref: CodeNodeRef) {
+            if (commentMap.isEmpty) return
+            val text = commentMap.commentFor(ref) ?: return
+            code.emitLineComment(text)
+        }
+
         fun emitClass(cls: IrClass, topLevel: Boolean) {
             emitErrorComment(cls)
+            emitUserComment(ClassNodeRef(cls.fullName))
             // An ACC_ENUM class that reconstructs cleanly renders as a Java `enum` (constants first, the
             // synthetic `$VALUES`/`values()`/`valueOf` hidden, its enum-construction `<clinit>`
             // suppressed); null ⇒ not a confidently-reconstructable enum, emit as an ordinary class.
@@ -365,6 +393,7 @@ class JavaCodeGenerator {
         }
 
         private fun emitField(cls: IrClass, field: IrField) {
+            emitUserComment(FieldNodeRef(cls.fullName, field.name))
             code.add(JavaModifiers.forField(field.accessFlags))
             code.add(types.render(field.type)).add(" ")
             code.attachDefinition(FieldNodeRef(cls.fullName, field.name))
@@ -432,6 +461,11 @@ class JavaCodeGenerator {
             }
 
         private fun emitMethodBody(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) {
+            // Emitted INSIDE the caller's guardMember (see emitMethod): a comment on a member is part of
+            // that member's guarded emission, so if the body fails the comment rolls back with it and the
+            // honest `// JADXMP ERROR` marker replaces the whole member. The <clinit> path below has no
+            // MethodNodeRef definition of its own, so a comment keys the method by its binary name/args.
+            emitUserComment(MethodNodeRef(cls.fullName, method.name, method.argTypes.map { it.toString() }))
             emitErrorComment(method)
             // Static initializer: `static { ... }`, no signature.
             if (method.name == "<clinit>") {

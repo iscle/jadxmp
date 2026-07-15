@@ -5,6 +5,7 @@ import com.jadxmp.api.internal.RenderabilityGuard
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeInfo
 import com.jadxmp.codegen.CodeNodeRef
+import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.java.JavaCodeGenerator
 import com.jadxmp.codegen.kotlin.KotlinCodeGenerator
 import com.jadxmp.ir.attr.AttrFlag
@@ -70,6 +71,17 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     // single-threaded cached path, alongside the [cache] it shares invalidation with. Validated +
     // collision-checked against the model before an entry is accepted (see [UserRenameStore]).
     private val userRenames = UserRenameStore()
+    // The effective user-comment map codegen reads at each definition site to inject a `//` note before it.
+    // Rebuilt by [rebuildCommentMap] from [userComments] on load and on any comment edit; READ-ONLY between
+    // rebuilds (like [aliasMap]), so the parallel per-class render path reads it race-free. With no user
+    // comments it is [CommentMap.EMPTY] BY IDENTITY (CommentMap.of(emptyMap()) === EMPTY), so the comment
+    // seam emits nothing and output is byte-for-byte identical to a build without this feature — which is
+    // why default-args runs (the differential oracle) are completely unaffected.
+    private var commentMap: CommentMap = CommentMap.EMPTY
+    // Session-local user comments (this loaded input only; no persistence this phase). Free text — no
+    // validation beyond trimming (codegen sanitizes it to always-valid source). Mutated only on the
+    // single-threaded cached path, alongside the [cache] it shares invalidation with (see [UserCommentStore]).
+    private val userComments = UserCommentStore()
     // The loaded input model, retained so [smali] can disassemble a class's raw bytecode straight from
     // the parser output — no pipeline decompile. Keyed by the same binary (dotted) name as [classNames]
     // (the parser's descriptor `Lp/C;` folded to `p.C`), so a UI/tool selection resolves without a scan.
@@ -119,6 +131,9 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         userRenames.clear()
         deobfOverrides = emptyMap()
         aliasMap = AliasMap.EMPTY
+        // Likewise a fresh input starts with no user comments; the map stays EMPTY by identity (byte-identical).
+        userComments.clear()
+        commentMap = CommentMap.EMPTY
         val loader = try {
             args.registry.load(name, bytes) ?: ListCodeLoader(emptyList())
         } catch (e: Exception) {
@@ -198,6 +213,64 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
      * future rename-list UI and the deferred `.jadx` persistence; independent of later [rename]/[clearRenames].
      */
     val renames: Map<CodeNodeRef, String> get() = userRenames.snapshot()
+
+    /**
+     * Attach a **user comment** [text] to [target], rendered as `//` line(s) immediately before that
+     * symbol's definition on the next render — or, when [text] is blank, remove any existing comment (one
+     * call serves a UI's edit and its clear). [target] is the one symbol identity the whole engine speaks —
+     * a [MemberInfo.key] from the navigation tree, a find-usages ([findUsages]) target, or
+     * `ClassNodeRef(binaryName)` for a class — so a UI can comment the symbol under the cursor exactly as it
+     * would rename it. The comment attaches to the *binary* identity the metadata records, which is invariant
+     * under renaming, so a commented symbol stays commented after it is renamed.
+     *
+     * Unlike [rename], a comment is **free text and never rejected**: it needs no legal-identifier or
+     * collision check because codegen renders it as line comment(s) and sanitizes it so it can never break
+     * the source (a multi-line note becomes multiple `//` lines; anything that could escape a `//` comment is
+     * defused). The only normalization is trimming. When the comment actually changes, this invalidates the
+     * render caches so the next [decompileClass]/[decompileAll]/[findUsages] shows it (same coarse-but-correct
+     * invalidation as [rename]); an unchanged set is a no-op with no cache churn.
+     *
+     * The comment is **decoration only** — it is not part of any symbol's definition range, so it does not
+     * change [findUsages]/`nodeAt` results (it merely shifts later offsets, and the metadata is recomputed
+     * per render). Comments are Kotlin-render-agnostic for now: the Kotlin backend does not yet inject them
+     * (a documented follow-up, like Kotlin renaming). Not thread-safe (like [rename]): drive it only on the
+     * cached, sequential path, never concurrently with [decompileAllParallel].
+     */
+    fun setComment(target: CodeNodeRef, text: String) {
+        if (userComments.set(target, text)) {
+            rebuildCommentMap()
+            invalidateRenderCaches()
+        }
+    }
+
+    /**
+     * Remove any user comment on [target] (a no-op, with no cache churn, when there is none). Equivalent to
+     * [setComment] with blank text. Not thread-safe (see [setComment]).
+     */
+    fun removeComment(target: CodeNodeRef) {
+        if (userComments.remove(target)) {
+            rebuildCommentMap()
+            invalidateRenderCaches()
+        }
+    }
+
+    /**
+     * The user comments currently in effect, as an immutable `CodeNodeRef → comment text` snapshot in
+     * authoring order. Backs a future comment-list UI and the deferred `.jadx` persistence; independent of
+     * later [setComment]/[removeComment]/[clearComments].
+     */
+    val comments: Map<CodeNodeRef, String> get() = userComments.snapshot()
+
+    /**
+     * Drop every user comment, reverting the next render to un-commented output. A no-op — with no cache
+     * churn — when there are no user comments. Not thread-safe (see [setComment]).
+     */
+    fun clearComments() {
+        if (userComments.isEmpty) return
+        userComments.clear()
+        rebuildCommentMap()
+        invalidateRenderCaches()
+    }
 
     /**
      * Fully-qualified names of the **top-level** loaded classes, in input order. A nested class is not
@@ -452,6 +525,16 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     }
 
     /**
+     * Recompute the effective [commentMap] from the user comment store. With no user comments this is
+     * [CommentMap.EMPTY] **by identity** (`CommentMap.of(emptyMap()) === EMPTY`), so the codegen comment seam
+     * stays on its byte-identical (emit-nothing) fast path. Rebuilt on every comment edit, mirroring
+     * [rebuildAliasMap].
+     */
+    private fun rebuildCommentMap() {
+        commentMap = CommentMap.of(userComments.comments())
+    }
+
+    /**
      * Discard every cached render and the find-usages index after a rename/clear. Coarse but obviously
      * correct: no stale spelling (or stale reference offset) can survive. Cheap because it only drops
      * memoized *codegen* output — the once-only destructive lowering stays on the IR ([LOWERED]), so a
@@ -575,9 +658,10 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         // metadata contract are shared across formats. [format] is the per-call override, not necessarily
         // args.outputFormat — the same lowered class can be re-emitted in either format.
         val info: CodeInfo = when (format) {
-            // Java applies the deobfuscation alias map (EMPTY unless opted in ⇒ byte-identical when off);
-            // Kotlin renaming is a follow-up, so it always renders with the raw names.
-            OutputFormat.JAVA -> JavaCodeGenerator().generate(cls, aliasMap)
+            // Java applies the deobfuscation/user alias map AND the user comment map (both EMPTY unless the
+            // user opted in ⇒ byte-identical when off). Kotlin renaming and comments are follow-ups, so it
+            // always renders with the raw names and no injected comments.
+            OutputFormat.JAVA -> JavaCodeGenerator().generate(cls, aliasMap, commentMap)
             OutputFormat.KOTLIN -> KotlinCodeGenerator().generate(cls)
         }
         return DecompiledClass(
