@@ -9,6 +9,7 @@ import com.jadxmp.ir.insn.PhiInstruction
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.insn.TypeInstruction
 import com.jadxmp.ir.node.BasicBlock
+import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.SsaValue
 import com.jadxmp.pipeline.PipelineAttrs
@@ -53,7 +54,7 @@ class ConstructorReconstruction(
                 if (invoke.invokeKind != InvokeKind.DIRECT) continue
                 if (!invoke.methodRef.isConstructor) continue
                 val receiver = invoke.instanceArg as? RegisterOperand ?: continue
-                if (receiver.ssaValue === method.thisArg) continue // super()/this() delegation
+                if (redirectThisDelegation(invoke, receiver)) continue // this()/super() delegation
                 val newInsn = resolveNewInstance(receiver) ?: continue
                 consumers.getOrPut(newInsn) { ArrayList() }.add(InitSite(block, invoke, receiver))
             }
@@ -280,6 +281,66 @@ class ConstructorReconstruction(
     private fun blockOf(insn: Instruction): BasicBlock? {
         for (block in method.blocks) if (insn in block.instructions) return block
         return null
+    }
+
+    /**
+     * A `this(...)` constructor *delegation* invokes another `<init>` of the SAME class on the object
+     * under construction — `this`. DEX routinely routes `this` onto the invoke's receiver register through
+     * `move-object` copies (and, when the delegation follows a branch — e.g. a Kotlin default-args
+     * synthetic ctor — a φ that merges `this` from every arm), so the receiver's SSA value is not
+     * literally [IrMethod.thisArg]. When the receiver PROVABLY resolves to `this`, repoint it directly
+     * onto `thisArg` (collapsing the alias) and return true. Downstream — the ternary-arg fold, out-of-SSA
+     * and codegen — then all recognize the plain `this` receiver and render `this(...)`, never a spurious
+     * `new T(...)` that would construct and DISCARD a distinct object (a rule-4 silent miscompile).
+     * Returning true also skips new-instance fusion: a delegation has no `new-instance` behind its receiver.
+     *
+     * Scope: only SAME-CLASS delegations (`this(...)`) are collapsed. A `super(...)` whose receiver is a
+     * moved `this` is left untouched here — recognizing it would emit `super(...)` after the register
+     * shuffle's residual assignments, which is illegal Java (no statement may precede `super()`) until the
+     * separate instructions-before-super reordering exists; collapsing it would trade one honest state for
+     * another without a net correctness gain, so it is out of scope.
+     *
+     * The gate is *proof*, not heuristic: a genuine `new T(...)` whose receiver is a fresh `new-instance`
+     * (or any value other than `this`) does not resolve to `this`, so it is never mis-detected here.
+     */
+    private fun redirectThisDelegation(invoke: InvokeInstruction, receiver: RegisterOperand): Boolean {
+        if (!isSameClassConstructor(invoke)) return false
+        val thisArg = method.thisArg ?: return false
+        if (!resolvesToThis(receiver.ssaValue, thisArg, HashSet())) return false
+        if (receiver.ssaValue !== thisArg) {
+            receiver.ssaValue?.removeUse(receiver)
+            receiver.ssaValue = thisArg
+            thisArg.addUse(receiver)
+        }
+        return true
+    }
+
+    /** Whether [invoke]'s `<init>` target is declared by the enclosing class itself (a `this(...)` target). */
+    private fun isSameClassConstructor(invoke: InvokeInstruction): Boolean =
+        (invoke.methodRef.declaringType as? IrType.Object)?.className == method.declaringClass.fullName
+
+    /**
+     * Whether [value] provably denotes `this`: it IS [thisArg], or it is defined by a single-source `move`
+     * copy / a φ whose *every* operand also denotes `this`. A φ operand that re-reads a value already on
+     * the walk stack (a loop back-edge) is treated as satisfied — its contribution is `this` exactly when
+     * the φ's other operands are, which the surrounding `all { }` still enforces. Anything else (a
+     * `new-instance`, a field/array read, an invoke result, a parameter other than `this`, …) is NOT
+     * `this`, so the walk is sound in both directions.
+     */
+    private fun resolvesToThis(value: SsaValue?, thisArg: SsaValue, seen: MutableSet<SsaValue>): Boolean {
+        if (value == null) return false
+        if (value === thisArg) return true
+        if (!seen.add(value)) return true // φ back-edge: corroborated by the φ's other operands
+        val def = value.assign.parent ?: return false
+        return when {
+            def.opcode == IrOpcode.MOVE && def.argCount == 1 ->
+                resolvesToThis((def.getArg(0) as? RegisterOperand)?.ssaValue, thisArg, seen)
+            def is PhiInstruction && def.argCount > 0 ->
+                (0 until def.argCount).all {
+                    resolvesToThis((def.getArg(it) as? RegisterOperand)?.ssaValue, thisArg, seen)
+                }
+            else -> false
+        }
     }
 
     /** Follow the receiver's definition back to a `new-instance`, chasing `move` copies. */

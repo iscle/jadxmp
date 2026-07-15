@@ -182,6 +182,64 @@ class JavaEnumTest {
     }
 
     @Test
+    fun enumThisDelegationStripsSyntheticNameOrdinalArgs() {
+        // A same-class `this(...)` delegation between enum constructors forwards the synthetic
+        // `name`/`ordinal` the enclosing enum ctor received. The sibling ctor's DECLARATION has those two
+        // params stripped, so the forwarded args must be stripped too — else the call wouldn't line up with
+        // the stripped signature (and would reference the now-removed name/ordinal). jadx renders `this(0)`.
+        val cls = irClass("e.Size", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val sizeT = IrType.objectType("e.Size")
+        val arrT = IrType.array(sizeT)
+        enumField(cls, "\$VALUES", arrT, staticFinal or 0x1000).also { it.add(AttrFlag.SYNTHETIC) }
+        enumField(cls, "SMALL", sizeT, enumConst)
+        enumField(cls, "value", IrType.INT, Flags.PUBLIC or Flags.FINAL)
+
+        val small = Ssa(0, sizeT)
+        val arr = Ssa(1, arrT)
+        val targetParams = listOf(IrType.STRING, IrType.INT, IrType.INT) // name, ordinal, v
+        val smallCtor = ctorCall(sizeT, targetParams, listOf(strLit("SMALL"), intLit(0), intLit(7)), small.def())
+        val arrInsn = filledNewArray(arrT, listOf(small.use()), arr.def())
+        clinitOf(
+            cls,
+            smallCtor, staticPut(fieldRef(cls, "SMALL", sizeT), small.use()),
+            arrInsn, staticPut(fieldRef(cls, "\$VALUES", arrT), arr.use()),
+        )
+        // Target ctor <init>(String,int,int): super(name,ord); this.value = v.
+        cls.method("<init>", argTypes = targetParams, accessFlags = Flags.PRIVATE) {
+            this[com.jadxmp.codegen.CodegenKeys.PARAM_NAMES] = listOf("name", "ordinal", "v")
+            val self = Local(0, sizeT, isThis = true)
+            val name = Local(1, IrType.STRING, name = "name", isParam = true)
+            val ord = Local(2, IrType.INT, name = "ordinal", isParam = true)
+            val v = Local(3, IrType.INT, name = "v", isParam = true)
+            val superCall = InvokeInstruction(
+                MethodRef(enumSuper, MethodRef.CONSTRUCTOR_NAME, enumSuper, listOf(IrType.STRING, IrType.INT)),
+                InvokeKind.DIRECT, null, listOf(self.ref(), name.ref(), ord.ref()),
+            )
+            body(superCall, instancePut(self.ref(), v.ref(), fieldRef(cls, "value", IrType.INT)), ret())
+        }
+        // Delegating ctor <init>(String,int): this(name, ordinal, 0) — a same-class this() on `this`.
+        cls.method("<init>", argTypes = listOf(IrType.STRING, IrType.INT), accessFlags = Flags.PRIVATE) {
+            this[com.jadxmp.codegen.CodegenKeys.PARAM_NAMES] = listOf("name", "ordinal")
+            val self = Local(0, sizeT, isThis = true)
+            val name = Local(1, IrType.STRING, name = "name", isParam = true)
+            val ord = Local(2, IrType.INT, name = "ordinal", isParam = true)
+            val thisCall = InvokeInstruction(
+                MethodRef(sizeT, MethodRef.CONSTRUCTOR_NAME, sizeT, targetParams),
+                InvokeKind.DIRECT, null, listOf(self.ref(), name.ref(), ord.ref(), intLit(0)),
+            )
+            body(thisCall, ret())
+        }
+        cls.method("values", returnType = arrT, accessFlags = Flags.PUBLIC or Flags.STATIC)
+        cls.method("valueOf", returnType = sizeT, argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC or Flags.STATIC)
+
+        assertThatCode(generate(cls))
+            .containsOne("public enum Size {")
+            .containsOne("this(0);") // receiver + synthetic name/ordinal stripped, only the real `0` remains
+            .doesNotContain("new Size(") // never a spurious construct-and-discard of a distinct instance
+            .doesNotContain("this(name") // the stripped name/ordinal must not be forwarded
+    }
+
+    @Test
     fun enumWithResidualStaticInitKeepsStaticBlock() {
         val cls = irClass("e.Mode", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
         val modeT = IrType.objectType("e.Mode")
