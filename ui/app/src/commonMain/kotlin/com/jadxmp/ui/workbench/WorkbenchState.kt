@@ -16,6 +16,7 @@ import com.jadxmp.ui.client.ProjectExporter
 import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.OpenRequest
+import com.jadxmp.ui.client.ResourceSurface
 import com.jadxmp.ui.client.SearchQuery
 import com.jadxmp.ui.client.SearchResults
 import com.jadxmp.ui.client.SessionState
@@ -107,6 +108,15 @@ data class WorkbenchUiState(
     val showLineNumbers: Boolean = true,
     /** Wash the caret's current line in the code editor (Preferences → Editor). Persisted; defaults on. */
     val highlightCurrentLine: Boolean = true,
+    /**
+     * One-shot "reveal in tree" token. [WorkbenchState.revealInTree]/[WorkbenchState.revealTabInTree]
+     * bump it after expanding a target's ancestor containers; the tree pane keys a scroll effect on it so
+     * the freshly-revealed [revealTarget] lands on-screen exactly once (never on ordinary selection). Its
+     * value is meaningless — only the change matters, like [codeNavNonce].
+     */
+    val revealNonce: Int = 0,
+    /** The node the tree pane should scroll into view on the current [revealNonce]; null = nothing to reveal. */
+    val revealTarget: NodeId? = null,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -1098,6 +1108,95 @@ class WorkbenchState(
             else -> v.substringAfterLast(':')
         }
     }
+
+    // ── Reveal in tree + subtree expand/collapse (tree wave: tab "Select in tree" + tree context menu) ──
+
+    /**
+     * The full "Select in tree" reveal: switch to the target's Classes/Resources tree, expand every
+     * ancestor container so the node becomes a visible row, select it, and signal the tree pane (via
+     * [WorkbenchUiState.revealNonce]) to scroll it on-screen. A strict superset of [selectTabInTree],
+     * which only selected. Async on [scope] (it loads each ancestor's children) and epoch-guarded so a
+     * superseded project's reveal is dropped. Fault isolation (rule 4): unresolved ancestors are skipped
+     * — the client's own [DecompilerClient.childNodes] is fault-isolated, exactly as [loadChildren] relies.
+     */
+    fun revealInTree(target: NodeId) {
+        val kind = if (ResourceSurface.isResourceNode(target)) TreeKind.RESOURCES else TreeKind.CLASSES
+        val ancestors = ancestorContainerIds(target)
+        val epoch = openEpoch
+        scope.launch {
+            _ui.update { it.copy(tree = it.tree.switchTree(kind)) }
+            // Expand root-most first, loading each container's children so the flattened row list reaches
+            // down to the target. Phantom ancestor ids (a prefix scheme the current client doesn't use)
+            // just load empty and expand to nothing — harmless (see [ancestorContainerIds]).
+            for (ancestor in ancestors) {
+                if (epoch != openEpoch) return@launch
+                if (ancestor !in _ui.value.childrenCache) {
+                    val kids = client.childNodes(ancestor)
+                    if (epoch != openEpoch) return@launch
+                    _ui.update { it.copy(childrenCache = it.childrenCache + (ancestor to kids)) }
+                }
+                _ui.update { it.copy(tree = it.tree.expand(ancestor)) }
+            }
+            if (epoch != openEpoch) return@launch
+            // Select + arm the one-shot scroll now that the chain is loaded and the target is a visible row.
+            _ui.update {
+                it.copy(
+                    tree = it.tree.select(target),
+                    revealTarget = target,
+                    revealNonce = it.revealNonce + 1,
+                )
+            }
+        }
+    }
+
+    /** Reveal the tab at [index]'s node in the tree (tab context-menu "Select in tree"). */
+    fun revealTabInTree(index: Int) {
+        val tab = _ui.value.tabs.tabs.getOrNull(index) ?: return
+        revealInTree(tab.nodeId)
+    }
+
+    /**
+     * "Expand subtree" (tree context menu): recursively load and expand [root] and every expandable
+     * descendant, so a whole package/class opens in one action (jadx-gui parity). Bounded by
+     * [MAX_SUBTREE_EXPAND] and yields between loads so a huge subtree never freezes the single wasm
+     * dispatcher (rule 1); epoch-guarded so a superseded project's walk is dropped.
+     */
+    fun expandSubtree(root: TreeNode) {
+        if (!root.hasChildren) return
+        val epoch = openEpoch
+        scope.launch {
+            val toExpand = LinkedHashSet<NodeId>()
+            val queue = ArrayDeque<NodeId>().apply { add(root.id) }
+            var budget = MAX_SUBTREE_EXPAND
+            while (queue.isNotEmpty() && budget-- > 0) {
+                if (epoch != openEpoch) return@launch
+                val id = queue.removeFirst()
+                toExpand += id
+                val kids = _ui.value.childrenCache[id] ?: run {
+                    val loaded = client.childNodes(id)
+                    if (epoch != openEpoch) return@launch
+                    _ui.update { it.copy(childrenCache = it.childrenCache + (id to loaded)) }
+                    loaded
+                }
+                kids.forEach { if (it.hasChildren) queue += it.id }
+                yield()
+            }
+            if (epoch != openEpoch) return@launch
+            _ui.update { it.copy(tree = it.tree.copy(expanded = it.tree.expanded + toExpand)) }
+        }
+    }
+
+    /**
+     * "Collapse subtree" (tree context menu): collapse [root] and every already-loaded descendant, so
+     * re-expanding [root] shows its children collapsed again (jadx-gui parity). Synchronous — it only
+     * drops ids from the expanded set (nothing to load), reading descendants from the current cache.
+     */
+    fun collapseSubtree(root: TreeNode) {
+        _ui.update { state ->
+            val gone = collectLoadedDescendantIds(root.id, state.childrenCache) + root.id
+            state.copy(tree = state.tree.copy(expanded = state.tree.expanded - gone))
+        }
+    }
 }
 
 /**
@@ -1168,4 +1267,77 @@ fun rememberWorkbenchState(
     return remember(client, fileOpener, settingsStore, fileSaver, projectExporter) {
         WorkbenchState(client, scope, fileOpener, settingsStore, fileSaver, projectExporter)
     }
+}
+
+/** Cap on nodes visited by [WorkbenchState.expandSubtree] so "expand subtree" on a giant package can't freeze the single wasm dispatcher (rule 1). */
+private const val MAX_SUBTREE_EXPAND: Int = 2000
+
+/**
+ * Container node ids to expand so [target] becomes a visible tree row, root-most first. Pure and
+ * unit-tested. It reconstructs the chain from the id scheme rather than walking the lazily-loaded tree:
+ *  - `cls:<fqn>` → the `pkg:` chain of its package (`com`, `com.example`, …); empty in the default package.
+ *  - `mbr:<top>#<owner>#…` → the top-level class's package chain plus the `cls:` node itself.
+ *  - `res:`/`resdir:<path>` → the folder chain above the leaf, emitted under BOTH the production `resdir:`
+ *    prefix and the stub `res:` prefix — expanding a non-existent id is a harmless no-op, so one list
+ *    reveals the target whichever resource-tree shape backs the UI.
+ *  - `restype:<name>` → the `restable:` root.
+ * A root node (default-package class, manifest, table root) yields an empty list.
+ */
+internal fun ancestorContainerIds(target: NodeId): List<NodeId> {
+    val v = target.value
+    return when {
+        v.startsWith("cls:") -> packageChainIds(v.removePrefix("cls:").substringBeforeLast('.', ""))
+        v.startsWith("mbr:") -> MemberTree.parse(target)?.let { (top, _, _) ->
+            packageChainIds(top.substringBeforeLast('.', "")) + NodeId("cls:$top")
+        } ?: emptyList()
+        v.startsWith("resdir:") -> resourceDirChainIds(v.removePrefix("resdir:"))
+        v.startsWith("res:") -> resourceDirChainIds(v.removePrefix("res:"))
+        v.startsWith("restype:") -> listOf(NodeId("restable:"))
+        else -> emptyList()
+    }
+}
+
+/** `pkg:` node ids for every prefix of a dotted [pkg], root-most first (empty for the default package). */
+private fun packageChainIds(pkg: String): List<NodeId> {
+    if (pkg.isEmpty()) return emptyList()
+    val parts = pkg.split('.')
+    return (1..parts.size).map { NodeId("pkg:" + parts.subList(0, it).joinToString(".")) }
+}
+
+/** Folder ids above a resource [path], root-most first, under both the `resdir:` and `res:` prefixes (see [ancestorContainerIds]). */
+private fun resourceDirChainIds(path: String): List<NodeId> {
+    val segs = path.split('/').filter { it.isNotEmpty() }
+    if (segs.size <= 1) return emptyList()
+    val result = ArrayList<NodeId>(2 * (segs.size - 1))
+    for (depth in 1 until segs.size) {
+        val dir = segs.subList(0, depth).joinToString("/")
+        result += NodeId("resdir:$dir")
+        result += NodeId("res:$dir")
+    }
+    return result
+}
+
+/** The fully-qualified name to copy for a tree [node] (class fqn, `owner.member`, package, or resource path). Pure. */
+internal fun qualifiedNodeName(node: TreeNode): String {
+    val v = node.id.value
+    return when {
+        v.startsWith("cls:") -> v.removePrefix("cls:")
+        v.startsWith("mbr:") -> MemberTree.parse(node.id)?.let { (_, owner, _) -> "$owner.${node.label}" } ?: node.label
+        v.startsWith("pkg:") -> v.removePrefix("pkg:")
+        v.startsWith("resdir:") -> v.removePrefix("resdir:")
+        v.startsWith("res:") -> v.removePrefix("res:")
+        v.startsWith("restype:") -> v.removePrefix("restype:")
+        else -> node.label
+    }
+}
+
+/** All already-loaded descendant ids of [rootId] (BFS over [cache]); excludes [rootId] itself. Pure. */
+internal fun collectLoadedDescendantIds(rootId: NodeId, cache: Map<NodeId, List<TreeNode>>): Set<NodeId> {
+    val result = HashSet<NodeId>()
+    val queue = ArrayDeque<NodeId>().apply { add(rootId) }
+    while (queue.isNotEmpty()) {
+        val kids = cache[queue.removeFirst()] ?: continue
+        for (k in kids) if (result.add(k.id)) queue += k.id
+    }
+    return result
 }

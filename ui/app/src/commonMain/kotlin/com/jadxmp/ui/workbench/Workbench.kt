@@ -238,6 +238,8 @@ fun Workbench(
                                 onActivate = state::onNodeActivated,
                                 onToggle = state::toggleExpand,
                                 onEnsureChildrenLoaded = state::ensureChildrenLoaded,
+                                onExpandSubtree = state::expandSubtree,
+                                onCollapseSubtree = state::collapseSubtree,
                             )
                         },
                         second = { EditorArea(state, ui, onSearchSelection = ::openSearch) },
@@ -432,7 +434,8 @@ private fun EditorArea(
             onCloseToLeft = state::closeTabsToLeft,
             onCloseToRight = state::closeTabsToRight,
             onCloseAll = state::closeAllTabs,
-            onSelectInTree = state::selectTabInTree,
+            // Full reveal (P0#5 tree wave): expand the tab node's ancestors, select it, scroll it on-screen.
+            onSelectInTree = state::revealTabInTree,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 

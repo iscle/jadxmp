@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +39,8 @@ fun TreePane(
     onActivate: (TreeNode) -> Unit,
     onToggle: (TreeNode) -> Unit,
     onEnsureChildrenLoaded: (NodeId) -> Unit = {},
+    onExpandSubtree: (TreeNode) -> Unit = {},
+    onCollapseSubtree: (TreeNode) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val tree = state.tree
@@ -101,15 +104,31 @@ fun TreePane(
         Row(Modifier.fillMaxWidth().padding(horizontal = JadxTheme.spacing.lg, vertical = JadxTheme.spacing.xs)) {
             SearchField(value = tree.filter, onValueChange = onFilter, placeholder = "Filter tree…")
         }
-        LazyColumn(Modifier.fillMaxSize().padding(top = JadxTheme.spacing.xs)) {
+        // Reveal in tree: when the workbench arms a reveal ([WorkbenchUiState.revealNonce] bumped by
+        // revealInTree *after* it has expanded the target's ancestors), scroll the now-visible target
+        // on-screen. Keyed only on the nonce, so ordinary selection/expansion never yanks the list; rows
+        // already reflects the expanded ancestors (same recomposition), so the flattened index resolves here.
+        val listState = rememberLazyListState()
+        LaunchedEffect(state.revealNonce) {
+            val target = state.revealTarget ?: return@LaunchedEffect
+            val index = rows.indexOfFirst { it.node.id == target }
+            // Bias a couple of rows up so the target lands with a little context, not pinned to the very top.
+            if (index >= 0) listState.scrollToItem((index - REVEAL_CONTEXT_ROWS).coerceAtLeast(0))
+        }
+        LazyColumn(Modifier.fillMaxSize().padding(top = JadxTheme.spacing.xs), state = listState) {
             items(rows, key = { it.node.id.value }) { row ->
                 TreeRow(
                     item = row,
                     selected = row.node.id == tree.selected,
                     onActivate = { onActivate(row.node) },
                     onToggle = { onToggle(row.node) },
+                    onExpandSubtree = { onExpandSubtree(row.node) },
+                    onCollapseSubtree = { onCollapseSubtree(row.node) },
                 )
             }
         }
     }
 }
+
+/** Rows of context kept above a revealed tree node when scrolling it into view (see [TreePane]). */
+private const val REVEAL_CONTEXT_ROWS: Int = 2
