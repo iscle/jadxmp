@@ -230,7 +230,19 @@ class TypeInference(
             val produced = def.result?.type ?: continue
             // Only anchor genuinely resolved types; partial hints (const NARROW, aget-object) keep
             // flowing so uses can refine them.
-            if (produced.isTypeKnown && produced != IrType.UNKNOWN_OBJECT) {
+            //
+            // The **root** `java.lang.Object` (the erased result of `next()`/`get()`/… — a signature
+            // the decoder can only see as `Object`) is deliberately NOT anchored: it is the top of the
+            // reference lattice and carries no more information than "some reference", so locking it
+            // would suppress the very use-driven narrowing that reconstructs the real type. DEX (unlike
+            // the JVM) lets an `invoke-{interface,virtual}` dispatch on such an erased value with no
+            // preceding `check-cast` (see types/TestGenerics2: `next()` → `Map$Entry.getKey()`), so the
+            // receiver operand's declaring class is the only evidence of the value's true type. Left to
+            // flow, [computeType] meets it with every use bound; because SSA guarantees all uses of a
+            // value are mutually consistent, that meet is a sound narrowing every use accepts (a
+            // receiver bound is bytecode-guaranteed by the verifier). A value with only `Object`-typed
+            // uses simply stays `Object`.
+            if (produced.isTypeKnown && produced != IrType.UNKNOWN_OBJECT && produced != IrType.OBJECT) {
                 v.typeCell.fix(produced)
             }
         }

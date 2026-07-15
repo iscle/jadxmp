@@ -638,7 +638,7 @@ internal class MethodBodyWriter(
             }
             IrOpcode.INSTANCE_GET -> emitInstanceGet(insn)
             IrOpcode.STATIC_GET -> emitStaticGet(insn)
-            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvoke(insn, minPrec)
+            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvokeExpr(insn, minPrec)
             else -> emitUnknownExpr(insn)
         }
     }
@@ -980,6 +980,35 @@ internal class MethodBodyWriter(
             code.add(".")
         }
         emitFieldName(field)
+    }
+
+    /**
+     * Emit an invoke expression, inserting a downcast when the value's inferred type was narrowed below
+     * the call's erased `java.lang.Object` return type. DEX lets an `invoke-{interface,virtual}`
+     * dispatch on an erased `Object` value with no preceding `check-cast` (e.g. `Iterator.next()` used
+     * directly as a `Map.Entry` receiver — types/TestGenerics2); type inference recovers the real type
+     * from that receiver use, but the *Java* expression `it.next()` is still statically `Object`, so
+     * assigning it to — or using it at — the narrower type needs an explicit `(T)` cast to compile
+     * (this is what jadx emits). The cast is always safe: the narrowing was proven from a
+     * bytecode-guaranteed receiver, so it can never throw. Fires ONLY when the declared return is the
+     * root `Object` and the inferred result is a strictly narrower reference type — exactly the cases
+     * type inference can now recover — so every other call renders unchanged.
+     */
+    private fun emitInvokeExpr(insn: Instruction, minPrec: Int) {
+        val ret = (insn as? InvokeInstruction)?.methodRef?.returnType
+        val resultType = insn.result?.type
+        if (ret == IrType.OBJECT && resultType != null &&
+            resultType.isReferenceType() && resultType != IrType.OBJECT
+        ) {
+            wrapped(Prec.UNARY, minPrec) {
+                code.add("(")
+                emitTypeRef(resultType)
+                code.add(") ")
+                emitInvoke(insn, Prec.UNARY)
+            }
+            return
+        }
+        emitInvoke(insn, minPrec)
     }
 
     private fun emitInvoke(insn: Instruction, minPrec: Int) {
