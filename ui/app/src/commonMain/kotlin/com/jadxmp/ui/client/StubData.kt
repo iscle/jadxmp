@@ -1,5 +1,7 @@
 package com.jadxmp.ui.client
 
+import kotlin.io.encoding.Base64
+
 /**
  * A small, deterministic fake project so the shell renders (tree + code + search) with no engine.
  * Pure and synchronous — [StubDecompilerClient] wraps it in suspend/StateFlow, and tests exercise it
@@ -85,6 +87,8 @@ object StubData {
     private val resLayoutMain = NodeId("res:res/layout/activity_main.xml")
     private val resDrawableDir = NodeId("res:res/drawable")
     private val resIcon = NodeId("res:res/drawable/ic_launcher.png")
+    private val resRawDir = NodeId("res:res/raw")
+    private val resSession = NodeId("res:res/raw/session.bin")
 
     private val resourceRoots = listOf(
         TreeNode(resManifest, "AndroidManifest.xml", NodeKind.FILE, hasChildren = false),
@@ -95,12 +99,17 @@ object StubData {
         resDir to listOf(
             TreeNode(resLayoutDir, "layout", NodeKind.DIRECTORY, hasChildren = true),
             TreeNode(resDrawableDir, "drawable", NodeKind.DIRECTORY, hasChildren = true),
+            TreeNode(resRawDir, "raw", NodeKind.DIRECTORY, hasChildren = true),
         ),
         resLayoutDir to listOf(
             TreeNode(resLayoutMain, "activity_main.xml", NodeKind.RESOURCE, hasChildren = false),
         ),
         resDrawableDir to listOf(
             TreeNode(resIcon, "ic_launcher.png", NodeKind.IMAGE, hasChildren = false),
+        ),
+        // A non-image binary blob, so the hex viewer is exercised by the stub (and the app preview).
+        resRawDir to listOf(
+            TreeNode(resSession, "session.bin", NodeKind.FILE, hasChildren = false),
         ),
     )
 
@@ -168,7 +177,20 @@ object StubData {
         resManifest -> manifestXml
         resLayoutMain -> layoutXml
         resIcon -> "// binary image — rendered by the image viewer, not the code viewer"
+        resSession -> "// binary resource — rendered by the hex viewer, not the code viewer"
         else -> "// ${titleOf(node)}"
+    }
+
+    /**
+     * Raw bytes for the sample binary resources, so the image + hex viewers render real content in the
+     * stub-backed app (previews / Android) and in tests. A text/xml node returns `null`, keeping it on the
+     * code viewer. [ICON_PNG] is a real (tiny) PNG; [SESSION_BIN] is an opaque blob with a NUL byte so it
+     * classifies as hex.
+     */
+    fun resourceBytes(node: NodeId): ByteArray? = when (node) {
+        resIcon -> ICON_PNG
+        resSession -> SESSION_BIN
+        else -> null
     }
 
     // ── Fake sources ──────────────────────────────────────────────────────────
@@ -328,4 +350,16 @@ object StubData {
             }
         return SearchResults(query, matches)
     }
+
+    // ── Sample binary resource bytes (image + blob) ─────────────────────────────
+    /** A tiny real PNG so the image viewer decodes and renders actual pixels in the stub-backed app. */
+    private val ICON_PNG: ByteArray = Base64.Default.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    )
+
+    /** An opaque binary blob with an embedded NUL, so it classifies as hex (not text). */
+    private val SESSION_BIN: ByteArray =
+        "JADXMP\u0000session\u0000".encodeToByteArray() +
+            byteArrayOf(0x00, 0x01, 0x02, 0x03, 0x7F, 0x10, 0x1B, 0x00) +
+            byteArrayOf(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte())
 }

@@ -284,6 +284,13 @@ class WorkbenchState(
     /** Views a node can be shown in (sync — used by the toolbar view switcher). */
     fun availableViews(nodeId: NodeId): List<CodeView> = client.availableViews(nodeId)
 
+    /**
+     * Raw bytes for a resource node (an image or an opaque binary), for the image / hex viewers. Delegates
+     * to the client; `null` for a non-resource node or a backend with no bytes (→ the editor stays on the
+     * text/placeholder path). Cancelable — called from the editor area's byte-fetch effect.
+     */
+    suspend fun resourceBytes(nodeId: NodeId): ByteArray? = client.resourceBytes(nodeId)
+
     fun switchTree(kind: TreeKind) {
         _ui.update { it.copy(tree = it.tree.switchTree(kind)) }
     }
@@ -534,7 +541,9 @@ class WorkbenchState(
             // chevron (a nested class) still toggles expansion via the separate onToggle path.
             node.id.value.startsWith(MemberTree.PREFIX) -> openMember(node.id)
             node.kind == NodeKind.PACKAGE || node.kind == NodeKind.DIRECTORY -> toggleExpand(node)
-            node.kind == NodeKind.IMAGE -> _ui.update { it.copy(status = "Image preview: ${node.label}") }
+            // Everything else (a class, a text/xml resource, an IMAGE or a binary FILE leaf) opens a tab.
+            // The editor area routes a resource node's raw bytes to the image / hex viewer, falling back to
+            // hex and then to the text placeholder (see EditorArea + rememberResourceRender).
             else -> openDocument(node.id, node.label, kind = node.kind)
         }
     }

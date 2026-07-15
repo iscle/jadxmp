@@ -243,6 +243,25 @@ class CoreApiDecompilerClient(
         }
     }
 
+    /**
+     * Raw bytes of a resource node for the image / hex viewer, forwarded from the [ResourceProvider] seam
+     * under the same [lock] as the other resource decodes.
+     *
+     * NOTE (engine gap): the current `core:api` [ApkResources] retains only `AndroidManifest.xml`,
+     * `resources.arsc` and `res/…xml`, and exposes no raw-byte accessor — so [ApkResourcesProvider.rawResource]
+     * returns `null` and this yields `null` today (the viewers degrade to the existing text/placeholder
+     * path). The seam is in place: once `ApkResources` retains image/binary entries and exposes their bytes,
+     * that one adapter method forwards them and the image/hex viewers light up here with no UI change.
+     */
+    override suspend fun resourceBytes(node: NodeId): ByteArray? {
+        val v = node.value
+        if (!ResourceSurface.isResourceNode(node) || !v.startsWith("res:")) return null
+        val path = v.removePrefix("res:")
+        return withContext(Dispatchers.Default) {
+            lock.withLock { resourceProvider?.rawResource(path) }
+        }
+    }
+
     override suspend fun search(query: SearchQuery): SearchResults {
         val needle = query.text.trim()
         if (needle.isEmpty() || SearchScope.CLASS !in query.scopes) {

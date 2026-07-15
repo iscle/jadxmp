@@ -45,6 +45,12 @@ class StubDecompilerClient : DecompilerClient {
         return StubData.document(node, view)
     }
 
+    /** Raw bytes for the sample image / binary resource nodes, so the image + hex viewers are live in the stub. */
+    override suspend fun resourceBytes(node: NodeId): ByteArray? {
+        delay(10)
+        return StubData.resourceBytes(node)
+    }
+
     override suspend fun search(query: SearchQuery): SearchResults {
         delay(20)
         return StubData.search(query)

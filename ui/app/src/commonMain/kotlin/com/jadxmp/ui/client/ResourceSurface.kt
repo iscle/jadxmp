@@ -52,6 +52,92 @@ public object ResourceSurface {
             v.startsWith(TYPE_PREFIX)
     }
 
+    // ── Content detection (route raw bytes → image / hex / text viewer) ─────────────
+
+    /**
+     * Classify a resource's raw [bytes] into the viewer that should render it (the router the workbench
+     * uses to pick [com.jadxmp.ui.workbench.ImageViewer] / [com.jadxmp.ui.workbench.HexViewer] / the text
+     * code viewer). Pure and total — never throws, so a hostile blob always resolves to *some* viewer
+     * (rule 4). Image magic wins first; otherwise a NUL byte or a dense run of control characters marks
+     * the content binary (→ hex); everything else is treated as text and left to the existing colorizer
+     * path. [path] is accepted for symmetry/future extension but the decision is content-driven (magic
+     * bytes are authoritative — an extension can lie).
+     */
+    public fun classifyContent(path: String, bytes: ByteArray): ResourceContentKind = when {
+        imageFormatOf(bytes) != null -> ResourceContentKind.IMAGE
+        looksLikeText(bytes) -> ResourceContentKind.TEXT
+        else -> ResourceContentKind.HEX
+    }
+
+    /**
+     * The raster-image container [bytes] begins with, sniffed from its magic bytes, or `null` when the
+     * head matches no known image format. Recognizes PNG, JPEG, GIF, WebP (RIFF/WEBP) and BMP — the
+     * formats jadx-gui previews. Content-based (never trusts an extension) and bounds-checked, so a short
+     * or empty array is simply "not an image".
+     */
+    public fun imageFormatOf(bytes: ByteArray): ImageFormat? = when {
+        // PNG: 89 50 4E 47 0D 0A 1A 0A
+        startsWith(bytes, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) -> ImageFormat.PNG
+        // JPEG (JFIF/EXIF/raw): FF D8 FF
+        startsWith(bytes, 0xFF, 0xD8, 0xFF) -> ImageFormat.JPEG
+        // GIF: "GIF8" (covers both 87a and 89a)
+        startsWith(bytes, 0x47, 0x49, 0x46, 0x38) -> ImageFormat.GIF
+        // BMP: "BM"
+        startsWith(bytes, 0x42, 0x4D) -> ImageFormat.BMP
+        // WebP: "RIFF" <4-byte size> "WEBP"
+        bytes.size >= 12 && startsWith(bytes, 0x52, 0x49, 0x46, 0x46) &&
+            byteAt(bytes, 8) == 0x57 && byteAt(bytes, 9) == 0x45 &&
+            byteAt(bytes, 10) == 0x42 && byteAt(bytes, 11) == 0x50 -> ImageFormat.WEBP
+        else -> null
+    }
+
+    /**
+     * Heuristic "is this text?" over a bounded prefix of [bytes]. A single NUL byte marks it binary
+     * outright (the classic text/binary discriminator); otherwise a **dense** run of non-whitespace
+     * control characters (≥ ~5% of the sampled bytes) also marks it binary. Tab/CR/LF are text, and
+     * high bytes (0x80–0xFF, i.e. UTF-8 lead/continuation) are allowed so genuine UTF-8 text is not
+     * misfiled as binary. Empty content is treated as text (nothing to hex-dump). Bounded to the first
+     * few KB so classification stays O(1)-ish on a multi-MB blob (rule 1).
+     */
+    private fun looksLikeText(bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return true
+        val limit = minOf(bytes.size, TEXT_SNIFF_LIMIT)
+        // Skip a leading UTF-8 BOM so its bytes don't count against the control-character budget.
+        var i = if (startsWith(bytes, 0xEF, 0xBB, 0xBF)) 3 else 0
+        var suspicious = 0
+        while (i < limit) {
+            when (val b = bytes[i].toInt() and 0xFF) {
+                0x00 -> return false // NUL → definitely binary
+                0x09, 0x0A, 0x0D -> {} // tab / LF / CR are ordinary text
+                0x7F -> suspicious++ // DEL
+                else -> if (b < 0x20) suspicious++ // other C0 control char
+            }
+            i++
+        }
+        // Allow a small fraction of stray control bytes; beyond that, treat as binary.
+        return suspicious * 20 < limit
+    }
+
+    /** True when file [name]'s extension is a raster image type — a cheap TREE-icon hint (see [imageFormatOf]). */
+    private fun isImageName(name: String): Boolean =
+        name.substringAfterLast('.', "").lowercase() in IMAGE_EXTENSIONS
+
+    /** [bytes][index] as an unsigned 0..255 int, or -1 when out of range (keeps sniffing branch-safe). */
+    private fun byteAt(bytes: ByteArray, index: Int): Int =
+        if (index < bytes.size) bytes[index].toInt() and 0xFF else -1
+
+    /** True when [bytes] begins with the given unsigned-byte [prefix]. Bounds-checked. */
+    private fun startsWith(bytes: ByteArray, vararg prefix: Int): Boolean {
+        if (bytes.size < prefix.size) return false
+        for (i in prefix.indices) if (bytes[i].toInt() and 0xFF != prefix[i]) return false
+        return true
+    }
+
+    private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+
+    /** Prefix of a resource sampled by [looksLikeText]; a few KB is plenty to decide text vs binary. */
+    private const val TEXT_SNIFF_LIMIT = 8 * 1024
+
     // ── Tree ────────────────────────────────────────────────────────────────────
 
     /**
@@ -86,10 +172,16 @@ public object ResourceSurface {
             )
         }
 
-        val paths = provider.xmlResourcePaths.filter { it.isNotBlank() }
-        if (paths.isNotEmpty()) {
+        // res/ leaves: text XML (decoded lazily) plus any binary blobs (images / raw files), folded into
+        // one directory tree. Binary paths are gated to the res/ subtree so buildResFolders' "segs[0] is
+        // the res root" invariant holds; a bytes-carrying backend supplies them via binaryResourcePaths
+        // (empty by default, so a text-only provider builds exactly the tree it did before).
+        val xmlPaths = provider.xmlResourcePaths.filter { it.isNotBlank() }
+        val binPaths = provider.binaryResourcePaths.filter { it.isNotBlank() && it.startsWith("res/") }
+        val resPaths = xmlPaths + binPaths
+        if (resPaths.isNotEmpty()) {
             roots += TreeNode(NodeId(dirId("res")), "res", NodeKind.DIRECTORY, hasChildren = true)
-            buildResFolders(paths, children)
+            buildResFolders(resPaths, children)
         }
 
         val types = provider.tableTypes
@@ -136,9 +228,18 @@ public object ResourceSurface {
                 val childId = if (isFile) NodeId(RES_PREFIX + childPath) else NodeId(dirId(childPath))
                 if (!added.getOrPut(parentId) { HashSet() }.add(childId.value)) continue
                 val node = if (isFile) {
-                    // Leaf id carries the full `res/…xml` path (childPath == the whole path when isFile), so
-                    // markResourceChildren/document can recover the decodeXml key from the id later.
-                    TreeNode(childId, segs[j], NodeKind.RESOURCE, hasChildren = false)
+                    // Leaf id carries the full `res/…` path (childPath == the whole path when isFile), so
+                    // markResourceChildren/document/rawResource can recover the key from the id later. Kind
+                    // is by extension: `.xml` → RESOURCE (lazily decoded + markable), an image → IMAGE, any
+                    // other binary → FILE. Only RESOURCE (xml) leaves are decode-probed by
+                    // markResourceChildren, so an image/binary leaf never gains a spurious "(could not
+                    // decode)" marker.
+                    val kind = when {
+                        isImageName(segs[j]) -> NodeKind.IMAGE
+                        segs[j].endsWith(".xml", ignoreCase = true) -> NodeKind.RESOURCE
+                        else -> NodeKind.FILE
+                    }
+                    TreeNode(childId, segs[j], kind, hasChildren = false)
                 } else {
                     TreeNode(childId, segs[j], NodeKind.DIRECTORY, hasChildren = true)
                 }
@@ -280,6 +381,27 @@ public object ResourceSurface {
         node.value.substringAfter(':').substringAfterLast('/').ifEmpty { "resource" }
 }
 
+/** Which viewer a resource's raw bytes route to. See [ResourceSurface.classifyContent]. */
+public enum class ResourceContentKind {
+    /** Human-readable text — the existing colorized code viewer renders it. */
+    TEXT,
+
+    /** A raster image ([ResourceSurface.imageFormatOf] matched) — the image viewer renders it. */
+    IMAGE,
+
+    /** Opaque binary — the hex viewer renders an offset / hex / ASCII dump. */
+    HEX,
+}
+
+/** A raster-image container recognized by magic bytes. [label] is the short name shown in captions. */
+public enum class ImageFormat(public val label: String) {
+    PNG("PNG"),
+    JPEG("JPEG"),
+    GIF("GIF"),
+    WEBP("WebP"),
+    BMP("BMP"),
+}
+
 /**
  * The minimal projection of the engine's resource facade the [ResourceSurface] needs. Implemented for
  * production by `CoreApiDecompilerClient`'s `ApkResourcesProvider` (a thin wrapper over `ApkResources`)
@@ -301,6 +423,22 @@ public interface ResourceProvider {
 
     /** Decode one `res/…xml` path to text, or `null` if it cannot be decoded. */
     public fun decodeXml(path: String): String?
+
+    /**
+     * Every non-text binary resource path present (images and other raw blobs under `res/`), sorted.
+     * Feeds the image/hex leaves [buildTree] adds alongside the `res/…xml` leaves. Defaults to empty so
+     * a provider (or test fake) that surfaces only text resources is unaffected — this is the seam a
+     * bytes-carrying engine backend fills in.
+     */
+    public val binaryResourcePaths: List<String> get() = emptyList()
+
+    /**
+     * The raw (already-inflated) bytes of a resource entry by [path], or `null` when the entry is absent
+     * or its bytes are not reachable. The workbench sniffs these to pick an image/hex viewer (see
+     * [classifyContent]). Defaults to `null`: a text-only provider exposes no bytes, and the viewers
+     * degrade to the existing text/placeholder path (rule 4).
+     */
+    public fun rawResource(path: String): ByteArray? = null
 
     /** The resource-table types (name + entry count), sorted; empty when there is no `resources.arsc`. */
     public val tableTypes: List<ResTableType>

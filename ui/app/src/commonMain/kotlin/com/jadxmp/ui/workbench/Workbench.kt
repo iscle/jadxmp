@@ -40,8 +40,11 @@ import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.client.FileOpener
 import com.jadxmp.ui.client.FileSaver
+import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.ProjectExporter
+import com.jadxmp.ui.client.ResourceContentKind
+import com.jadxmp.ui.client.ResourceSurface
 import com.jadxmp.ui.client.SessionState
 import com.jadxmp.ui.client.SettingsStore
 import com.jadxmp.ui.client.StubDecompilerClient
@@ -452,8 +455,16 @@ private fun EditorArea(
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             val doc = ui.activeDocument
-            if (doc != null) {
-                CodeViewer(
+            // Route a resource node's raw bytes to the image / hex viewer; a class node, a text resource,
+            // or any node with no reachable bytes falls through to the code viewer (rule 4: always shown
+            // *somehow*). The byte fetch + content sniff runs off the composition (see rememberResourceRender).
+            val resource = rememberResourceRender(state, active?.nodeId)
+            when {
+                resource is ResourceRender.Image ->
+                    ImageViewer(resource.bytes, resource.format, Modifier.fillMaxSize())
+                resource is ResourceRender.Hex ->
+                    HexViewer(resource.bytes, Modifier.fillMaxSize())
+                doc != null -> CodeViewer(
                     document = doc,
                     onNavigate = { state.openDocument(it) },
                     onCaretLine = { state.updateCaret(it) },
@@ -474,13 +485,13 @@ private fun EditorArea(
                     showLineNumbers = ui.showLineNumbers,
                     highlightCurrentLine = ui.highlightCurrentLine,
                 )
-            } else {
-                EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())
+                else -> EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())
             }
 
-            // In-editor Find bar (Ctrl+F): a floating toolbar over the active document, top-right.
+            // In-editor Find bar (Ctrl+F): a floating toolbar over the active document, top-right. It only
+            // applies to the code viewer, so it is suppressed while an image / hex viewer is showing.
             val find = ui.find
-            if (find != null) {
+            if (find != null && resource == null) {
                 Box(
                     Modifier.fillMaxWidth().padding(JadxTheme.spacing.sm),
                     contentAlignment = Alignment.TopEnd,
@@ -497,6 +508,48 @@ private fun EditorArea(
             }
         }
     }
+}
+
+/** What the editor area renders for the active tab's resource bytes (null → fall through to the code viewer). */
+private sealed interface ResourceRender {
+    /** A decodable raster image (bytes + short format label for the caption). */
+    class Image(val bytes: ByteArray, val format: String?) : ResourceRender
+
+    /** Opaque binary shown as a hex dump. */
+    class Hex(val bytes: ByteArray) : ResourceRender
+}
+
+/**
+ * Fetch and classify the active resource node's raw bytes — off the composition, via a [LaunchedEffect]
+ * keyed on the node id — into an image / hex render, or `null` to fall through to the code viewer. A
+ * class node or a resource with no reachable bytes (the current engine backend, which exposes none)
+ * resolves to `null`, so ordinary navigation is unaffected. Fault-isolated: a failed fetch yields `null`.
+ *
+ * Hooks are called unconditionally (Compose contract): the fetch effect runs for every node and simply
+ * writes `null` for a non-resource one; the returned value is gated to resource nodes.
+ */
+@Composable
+private fun rememberResourceRender(state: WorkbenchState, nodeId: NodeId?): ResourceRender? {
+    val isResource = nodeId != null && ResourceSurface.isResourceNode(nodeId)
+    var render by remember(nodeId) { mutableStateOf<ResourceRender?>(null) }
+    LaunchedEffect(nodeId, isResource) {
+        // nodeId-null first so the compiler smart-casts it non-null in the else (isResource implies it).
+        render = if (nodeId == null || !isResource) {
+            null
+        } else {
+            val bytes = runCatching { state.resourceBytes(nodeId) }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) {
+                null
+            } else {
+                when (ResourceSurface.classifyContent(nodeId.value, bytes)) {
+                    ResourceContentKind.IMAGE -> ResourceRender.Image(bytes, ResourceSurface.imageFormatOf(bytes)?.label)
+                    ResourceContentKind.HEX -> ResourceRender.Hex(bytes)
+                    ResourceContentKind.TEXT -> null
+                }
+            }
+        }
+    }
+    return if (isResource) render else null
 }
 
 @Composable

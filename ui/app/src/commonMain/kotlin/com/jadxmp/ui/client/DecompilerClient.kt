@@ -40,6 +40,15 @@ interface DecompilerClient {
     /** Rendered source for a node in a given view, with per-token metadata for highlighting/nav. */
     suspend fun code(node: NodeId, view: CodeView): CodeDocument
 
+    /**
+     * Raw (already-inflated) bytes of a resource node — an image or an opaque binary the workbench routes
+     * to the image / hex viewer instead of the text code viewer. Returns `null` for a non-resource node,
+     * a resource with no reachable bytes, or a client with no engine backing. The default is `null`, so a
+     * client that surfaces only text resources need not implement it (the viewers then degrade to the
+     * existing text/placeholder path — rule 4).
+     */
+    suspend fun resourceBytes(node: NodeId): ByteArray? = null
+
     /** Run a search across the selected scopes. */
     suspend fun search(query: SearchQuery): SearchResults
 
