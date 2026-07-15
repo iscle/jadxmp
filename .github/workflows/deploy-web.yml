@@ -1,0 +1,78 @@
+name: Deploy Web to GitHub Pages
+
+# Publishes the Compose Multiplatform web app (wasmJs browser build) to GitHub Pages
+# on every push to main, so https://iscle.github.io/jadxmp/ always serves the latest build.
+# The engine runs fully client-side in the browser (no backend) — this is just a static host.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Least-privilege token that can still publish to Pages: read the repo, write the Pages
+# deployment, and mint the OIDC token that actions/deploy-pages exchanges with the Pages service.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize Pages deployments. Do NOT cancel an in-progress run: a half-cancelled deploy could
+# leave the live site partially published, and we prefer letting a running deploy finish.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build web distribution (wasmJs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Match build.yml: Temurin JDK 17.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The engine modules use the Android Multiplatform Library plugin, so the whole Gradle
+      # build needs the Android SDK just to CONFIGURE — even to assemble the browser bundle,
+      # because :webApp depends on ui:app -> core:api -> the engine. (Same reason as build.yml.)
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # Provides the Gradle build + dependency/configuration-cache caching automatically.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # Kotlin/Wasm + Compose production browser bundle. Output (verified locally):
+      #   webApp/build/dist/wasmJs/productionExecutable/
+      #   -> index.html, webApp.js, *.wasm (app + skiko), styles.css, composeResources/
+      # It is subpath-safe for the /jadxmp/ project site with no extra config: index.html uses
+      # relative asset paths and webpack resolves its public path at runtime from the script URL.
+      - name: Build wasmJs browser distribution
+        run: ./gradlew :webApp:wasmJsBrowserDistribution --stacktrace
+
+      # GitHub Pages' Actions-artifact flow does not run Jekyll, but .nojekyll is cheap insurance
+      # so any underscore-prefixed asset (now or later) is always served verbatim.
+      - name: Add .nojekyll
+        run: touch webApp/build/dist/wasmJs/productionExecutable/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: webApp/build/dist/wasmJs/productionExecutable
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    # Binds the run to the github-pages environment and surfaces the live URL in the run summary.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
