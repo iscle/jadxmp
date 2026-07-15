@@ -89,6 +89,49 @@ class CodeWriter(
         return this
     }
 
+    // ---- rule-4 fault-isolation checkpoint ----
+
+    /**
+     * An opaque snapshot of the writer's full mutable state ([checkpoint]), rolled back by [restore].
+     * This is the CodeWriter half of the codegen backends' per-member fault barrier (CLAUDE rule 4): if
+     * rendering ONE member throws — an unrenderable instruction, an out-of-bounds operand access, or the
+     * StackOverflowError a pathological single-use inline chain can trigger — the member's partially
+     * emitted text AND its offset→annotation metadata AND the indent/line state are rolled back to the
+     * point BEFORE the member, so the writer is pristine for an honest error marker and the FOLLOWING
+     * members render uncorrupted. jadx does the narrower `code.setIndent(savedIndent)` in
+     * `ClassGen.addMethod`; we roll back the whole fragment so it never reaches the output or its metadata
+     * (a half-emitted method that opened a brace but never wrote its matching NodeEnd would otherwise
+     * corrupt the brace-nesting model `nodeAt` relies on, and leave annotations past the truncated text).
+     */
+    class Checkpoint internal constructor(
+        internal val length: Int,
+        internal val indentLevel: Int,
+        internal val lineStartPending: Boolean,
+        internal val currentLine: Int,
+    )
+
+    /** Snapshot the writer so a later [restore] can roll a failed member's partial output back. Emits nothing. */
+    fun checkpoint(): Checkpoint = Checkpoint(out.length, indentLevel, lineStartPending, currentLine)
+
+    /**
+     * Roll the writer back to [checkpoint]: truncate the emitted text, restore the indent / line / pending-
+     * line-start state, and drop every annotation and line→bytecode mapping recorded after the checkpoint
+     * (their offsets and lines no longer exist). Emits nothing; leaves the writer exactly as it was at
+     * [checkpoint] so an error marker can be written at the failed member's position.
+     */
+    fun restore(checkpoint: Checkpoint) {
+        out.setLength(checkpoint.length)
+        indentLevel = checkpoint.indentLevel
+        lineStartPending = checkpoint.lineStartPending
+        currentLine = checkpoint.currentLine
+        // Offsets are absolute, so any annotation at or past the truncated length belongs to the rolled-back
+        // fragment. A line the checkpoint had not yet started (lineStartPending) is wholly the fragment's, so
+        // its bytecode mapping is dropped too; a line already begun keeps whatever earlier mapping it had.
+        annotations.keys.removeAll { it >= checkpoint.length }
+        val firstDroppedLine = if (checkpoint.lineStartPending) checkpoint.currentLine else checkpoint.currentLine + 1
+        lineToBytecode.keys.removeAll { it >= firstDroppedLine }
+    }
+
     // ---- metadata ----
 
     /**

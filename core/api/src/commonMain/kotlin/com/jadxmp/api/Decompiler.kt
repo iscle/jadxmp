@@ -510,6 +510,47 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         cls: IrClass,
         format: OutputFormat,
         cancellation: CancellationCheck,
+    ): DecompiledClass =
+        // Rule-4 per-CLASS net. The per-method backstop (both codegen backends) contains a throwing METHOD
+        // inside generate(); this catches a failure OUTSIDE any method — class-level emission (a field /
+        // header / enum reconstruction) or lower() itself — so it is contained to THIS class instead of
+        // sinking decompileAll / decompileAllParallel's whole batch. It never fires for valid input (both
+        // backends render class scope cleanly), so accurate output stays byte-identical. Structured
+        // cancellation is re-thrown, never swallowed.
+        try {
+            decompileClassUnit(model, cls, format, cancellation)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            errorMarkedClass(cls, format)
+        }
+
+    /**
+     * A minimal honest stub for a class whose lowering/rendering threw OUTSIDE the per-method backstop
+     * (the rule-4 per-class net). Flags the class [AttrFlag.HAS_ERROR] so `countErrors` / the accuracy
+     * signal see the failure, and returns a one-line `// JADXMP ERROR` source so the batch keeps every
+     * other class. The source-name derivation is itself guarded (falls back to the binary name) so the net
+     * can never throw.
+     */
+    private fun errorMarkedClass(cls: IrClass, format: OutputFormat): DecompiledClass {
+        cls.add(AttrFlag.HAS_ERROR)
+        val name = try {
+            sourceFullName(cls, format, aliasMap)
+        } catch (e: Exception) {
+            cls.fullName
+        }
+        return DecompiledClass(
+            fullName = name,
+            code = "// JADXMP ERROR: class '${cls.fullName}' failed to decompile\n",
+            metadata = ClassMetadata(code = null, errorCount = 1, fullyStructured = false),
+        )
+    }
+
+    private fun decompileClassUnit(
+        model: IrRoot,
+        cls: IrClass,
+        format: OutputFormat,
+        cancellation: CancellationCheck,
     ): DecompiledClass {
         // A top-level class is emitted as ONE unit that also contains its whole nested-class tree, so every
         // inner class must be lowered (analysis is destructive → run it at most once per class) before the

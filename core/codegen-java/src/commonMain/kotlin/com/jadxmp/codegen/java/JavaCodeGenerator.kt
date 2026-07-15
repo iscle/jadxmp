@@ -149,7 +149,11 @@ class JavaCodeGenerator {
             for (inner in cls.innerClasses) {
                 if (inner.contains(AttrFlag.DONT_GENERATE)) continue
                 if (wroteMember) code.newLine()
-                emitClass(inner, topLevel = false)
+                // Per-inner-class fault barrier: a class-level failure of one inner (its methods are already
+                // individually guarded) becomes a marker, so its siblings and the outer class still render.
+                guardMember(inner, { "class '${inner.fullName}' failed to render" }) {
+                    emitClass(inner, topLevel = false)
+                }
                 wroteMember = true
             }
         }
@@ -197,14 +201,18 @@ class JavaCodeGenerator {
                 if (method.name == "<clinit>") {
                     if (e.dropClinit) continue
                     if (wrote) code.newLine()
-                    emitEnumClinit(cls, method, e, ctx)
+                    guardMember(method, { "method '${signatureOf(method)}' failed to render" }) {
+                        emitEnumClinit(cls, method, e, ctx)
+                    }
                     wrote = true
                     continue
                 }
                 if (method.name == "<init>") {
                     if (EnumReconstruction.isDefaultEnumConstructor(method)) continue
                     if (wrote) code.newLine()
-                    emitEnumConstructor(cls, method, ctx)
+                    guardMember(method, { "method '${signatureOf(method)}' failed to render" }) {
+                        emitEnumConstructor(cls, method, ctx)
+                    }
                     wrote = true
                     continue
                 }
@@ -215,7 +223,9 @@ class JavaCodeGenerator {
             for (inner in cls.innerClasses) {
                 if (inner.contains(AttrFlag.DONT_GENERATE)) continue
                 if (wrote) code.newLine()
-                emitClass(inner, topLevel = false)
+                guardMember(inner, { "class '${inner.fullName}' failed to render" }) {
+                    emitClass(inner, topLevel = false)
+                }
                 wrote = true
             }
         }
@@ -416,7 +426,12 @@ class JavaCodeGenerator {
             if ((type as? IrType.Primitive)?.kind == TypeKind.CHAR) "0"
             else JavaLiterals.format(LiteralOperand(0L, type))
 
-        private fun emitMethod(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) {
+        private fun emitMethod(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) =
+            guardMember(method, { "method '${signatureOf(method)}' failed to render" }) {
+                emitMethodBody(cls, method, ctx)
+            }
+
+        private fun emitMethodBody(cls: IrClass, method: IrMethod, ctx: EnumContext? = null) {
             emitErrorComment(method)
             // Static initializer: `static { ... }`, no signature.
             if (method.name == "<clinit>") {
@@ -545,6 +560,33 @@ class JavaCodeGenerator {
             owner.add(AttrFlag.HAS_ERROR)
             if (surfacedInline) owner[ERROR_SURFACED_INLINE] = true
         }
+
+        /**
+         * Rule-4 per-member fault barrier (jadx: `ClassGen.addMethod` saves the indent + catches; the SOE
+         * is caught in `MethodGen.addRegionInsns`). Runs [emit]; if it throws ANYTHING — an ordinary
+         * exception, a dropped-operand `IndexOutOfBounds`, or the `StackOverflowError` /
+         * `ExpressionTooDeepException` a pathological single-use inline chain triggers (an [Error] the inner
+         * `catch(Exception)` markers miss) — the member's partial text + metadata + indent/line state are
+         * rolled back to before it and replaced by an honest `// JADXMP ERROR: <reason>` marker with
+         * [AttrFlag.HAS_ERROR] set on [node]. The class still renders its OTHER members and the enclosing
+         * batch survives: one bad method never crashes the file (CLAUDE rule 4). Catching [Throwable] — not
+         * just [Exception] — is what contains the F2 `StackOverflowError`; codegen is synchronous, so there
+         * is no coroutine cancellation to swallow here. The marker↔flag coupling keeps error accounting
+         * honest (the class's `no-error` signal is truthfully false).
+         */
+        private inline fun guardMember(node: AttrNode, reason: () -> String, emit: () -> Unit) {
+            val checkpoint = code.checkpoint()
+            try {
+                emit()
+            } catch (t: Throwable) {
+                code.restore(checkpoint)
+                code.emitErrorMarker(node, reason())
+            }
+        }
+
+        /** A short, human signature for an error marker — raw type names, so it never touches imports / never throws. */
+        private fun signatureOf(method: IrMethod): String =
+            "${method.name}(${method.argTypes.joinToString(", ") { it.toString() }})"
 
         private fun classKeyword(flags: Int): String = when {
             JavaModifiers.has(flags, JavaModifiers.ANNOTATION) -> "@interface"

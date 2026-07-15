@@ -189,7 +189,11 @@ class KotlinCodeGenerator {
             for (inner in cls.innerClasses) {
                 if (inner.contains(AttrFlag.DONT_GENERATE)) continue
                 if (wrote) code.newLine()
-                emitClass(inner, topLevel = false)
+                // Per-inner-class fault barrier: a class-level failure of one inner (its methods are already
+                // individually guarded) becomes a marker, so its siblings and the outer class still render.
+                guardMember(inner, { "class '${inner.fullName}' failed to render" }) {
+                    emitClass(inner, topLevel = false)
+                }
                 wrote = true
             }
             if (hasCompanion) {
@@ -626,7 +630,12 @@ class KotlinCodeGenerator {
 
         // ---------- methods ----------
 
-        private fun emitMethod(cls: IrClass, method: IrMethod, kind: ClassKind) {
+        private fun emitMethod(cls: IrClass, method: IrMethod, kind: ClassKind) =
+            guardMember(method, { "method '${signatureOf(method)}' failed to render" }) {
+                emitMethodBody(cls, method, kind)
+            }
+
+        private fun emitMethodBody(cls: IrClass, method: IrMethod, kind: ClassKind) {
             emitErrorComment(method)
             val isConstructor = method.name == "<init>"
             val overrides = isOverride(cls, method, kind)
@@ -795,7 +804,12 @@ class KotlinCodeGenerator {
             code.add("}").newLine()
         }
 
-        private fun emitInitBlock(cls: IrClass, method: IrMethod, suppressed: Set<Instruction> = emptySet()) {
+        private fun emitInitBlock(cls: IrClass, method: IrMethod, suppressed: Set<Instruction> = emptySet()) =
+            guardMember(method, { "method '${signatureOf(method)}' failed to render" }) {
+                emitInitBlockBody(cls, method, suppressed)
+            }
+
+        private fun emitInitBlockBody(cls: IrClass, method: IrMethod, suppressed: Set<Instruction>) {
             emitErrorComment(method)
             code.attachDefinition(methodRef(cls, method))
             code.add("init {").newLine()
@@ -835,5 +849,31 @@ class KotlinCodeGenerator {
                 ?: "decompilation failed"
             code.add("// JADXMP ERROR: ").add(message).newLine()
         }
+
+        /**
+         * Rule-4 per-member fault barrier (jadx: `ClassGen.addMethod` saves the indent + catches; the SOE
+         * is caught in `MethodGen.addRegionInsns`). Runs [emit]; if it throws ANYTHING — an ordinary
+         * exception, a dropped-operand `IndexOutOfBounds`, or the `StackOverflowError` /
+         * `ExpressionTooDeepException` a pathological single-use inline chain triggers (an [Error] the inner
+         * `catch(Exception)` markers miss) — the member's partial text + metadata + indent/line state are
+         * rolled back to before it and replaced by an honest `// JADXMP ERROR: <reason>` marker with
+         * [AttrFlag.HAS_ERROR] set on [node]. The class still renders its OTHER members and the enclosing
+         * batch survives: one bad method never crashes the file (CLAUDE rule 4). Catching [Throwable] — not
+         * just [Exception] — is what contains the F2 `StackOverflowError`; codegen is synchronous, so there
+         * is no coroutine cancellation to swallow. The marker↔flag coupling keeps error accounting honest.
+         */
+        private inline fun guardMember(node: AttrNode, reason: () -> String, emit: () -> Unit) {
+            val checkpoint = code.checkpoint()
+            try {
+                emit()
+            } catch (t: Throwable) {
+                code.restore(checkpoint)
+                code.emitErrorMarker(node, reason())
+            }
+        }
+
+        /** A short, human signature for an error marker — raw type names, so it never touches imports / never throws. */
+        private fun signatureOf(method: IrMethod): String =
+            "${method.name}(${method.argTypes.joinToString(", ") { it.toString() }})"
     }
 }

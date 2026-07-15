@@ -72,6 +72,25 @@ internal val INLINABLE_ENUM_ARG_OPCODES = setOf(
 )
 
 /**
+ * Cap on inlined-expression nesting depth (CLAUDE rule-4 fault isolation). `ExpressionShaping` folds each
+ * single-use def into its use as a nested operand to a FIXPOINT, so a length-N single-use chain — a big
+ * arithmetic / string-concat / nested-ternary run, routine in generated & obfuscated code — collapses into
+ * ONE N-deep expression, which [MethodBodyWriter.emitInsnExpr] renders with N-deep recursion → a
+ * `StackOverflowError`. An SOE is an [Error], not an [Exception], so the historical per-member
+ * `catch(Exception)` guards missed it, and on wasmJs the stack is far shallower than the JVM's. We bound
+ * the depth FAR above any faithful nesting (real code is a few dozen deep at most) yet FAR below overflow,
+ * and THROW past it so the per-member backstop rolls the whole method back to one honest marker — a
+ * proactive defense that never relies on catching a real SOE. (jadx instead catches the SOE in
+ * `MethodGen.addRegionInsns`; we keep it from arising.) Verified transparent to accurate output: no valid
+ * corpus sample nests anywhere near this, so the differential oracle is unchanged.
+ */
+private const val MAX_EXPR_DEPTH = 300
+
+/** Thrown by [MethodBodyWriter.emitInsnExpr] past [MAX_EXPR_DEPTH]; caught by the per-member backstop (rule 4). */
+private class ExpressionTooDeepException :
+    RuntimeException("expression nesting exceeded $MAX_EXPR_DEPTH (single-use inline chain or cycle)")
+
+/**
  * Emits one method body: statements, expression trees (with correct precedence), conditions, and the
  * structured region tree. **jadx: MethodGen + RegionGen + InsnGen + ConditionGen**
  *
@@ -158,6 +177,10 @@ internal class MethodBodyWriter(
     private val varRefs = HashMap<Any, VarRef>()
     private val declared = HashSet<Any>()
     private var nextVarId = 0
+
+    // Current expression-tree nesting depth (rule-4 F2 guard — see [MAX_EXPR_DEPTH]). A fresh
+    // MethodBodyWriter renders each member, so this counter never leaks across methods.
+    private var exprDepth = 0
 
     // The <clinit>'s TERMINAL return-void, if any: the fall-off `return;` that is illegal inside a
     // `static { … }` block. Only this exact instruction is suppressed — an early/conditional return-void
@@ -596,6 +619,12 @@ internal class MethodBodyWriter(
     }
 
     private fun emitInsnExpr(insn: Instruction, minPrec: Int) {
+        // Rule-4 F2 depth guard (see [MAX_EXPR_DEPTH]). Throwing past the cap lets the per-member backstop
+        // convert the whole method to one honest marker instead of recursing into a StackOverflowError.
+        // Increment/decrement are balanced on the normal path; a throw abandons this per-method writer, so
+        // the decrement skipped by the exception below can never leak into another member.
+        if (exprDepth >= MAX_EXPR_DEPTH) throw ExpressionTooDeepException()
+        exprDepth++
         when (insn.opcode) {
             // A CONST always carries its literal operand and a CONST_STRING is always a ConstStringInstruction
             // (the decoder guarantees both), so the else/`?:` arms are unreachable today. Fabricating `0` / `""`
@@ -686,6 +715,7 @@ internal class MethodBodyWriter(
             IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvokeExpr(insn, minPrec)
             else -> emitUnknownExpr(insn)
         }
+        exprDepth--
     }
 
     private fun emitArith(insn: Instruction, minPrec: Int) {
