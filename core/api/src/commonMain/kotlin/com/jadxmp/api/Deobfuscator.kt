@@ -54,11 +54,20 @@ internal object Deobfuscator {
     private const val ACC_ANNOTATION = 0x2000
 
     /** Scan [root] and return the (possibly empty) alias map of renamed symbols. */
-    fun buildAliasMap(root: IrRoot): AliasMap {
+    fun buildAliasMap(root: IrRoot): AliasMap = AliasMap.of(buildOverrides(root))
+
+    /**
+     * Scan [root] and return the raw `CodeNodeRef → alias` overrides of every renamed symbol, in the
+     * deterministic model order they were assigned. This is the same content [buildAliasMap] wraps; it is
+     * exposed separately so the [Decompiler] can **merge** the auto-map with the user rename store (which
+     * takes precedence) into one effective [AliasMap] without re-deriving it. An empty map means nothing
+     * was obfuscated — the caller then keeps codegen on its byte-identical [AliasMap.EMPTY] path.
+     */
+    fun buildOverrides(root: IrRoot): Map<CodeNodeRef, String> {
         val overrides = LinkedHashMap<CodeNodeRef, String>()
         renameClasses(root, overrides)
         renameMembers(root, overrides)
-        return AliasMap.of(overrides)
+        return overrides
     }
 
     // ---- classes ------------------------------------------------------------

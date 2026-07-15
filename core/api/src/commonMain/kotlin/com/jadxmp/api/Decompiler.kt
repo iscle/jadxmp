@@ -53,13 +53,23 @@ import kotlinx.coroutines.yield
 class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
 
     private var root: IrRoot? = null
-    // The deobfuscation alias map for the loaded model. Built ONCE in [load] — only when
-    // args.deobfuscation is on, else [AliasMap.EMPTY] — and thereafter READ-ONLY, so the parallel per-class
-    // render path reads it race-free (mirrors the "pure, built-once" naming design in codegen). The safety
-    // invariant: EMPTY makes every codegen naming seam take its pre-feature path, so output is byte-identical
-    // to a build without this feature — which is why default-args runs (the differential oracle) are
-    // completely unaffected.
+    // The EFFECTIVE alias map codegen reads at every definition and use site: the deobfuscation auto-map
+    // ([deobfOverrides]) merged with the user rename store ([userRenames]), user winning. Rebuilt by
+    // [rebuildAliasMap] on load and on any rename/clear; READ-ONLY between rebuilds, so the parallel
+    // per-class render path reads it race-free (mirrors the "pure, built-once" naming design in codegen).
+    // The safety invariant: with deobfuscation off AND no user renames it is [AliasMap.EMPTY] BY IDENTITY
+    // (AliasMap.of(emptyMap()) === EMPTY), so every codegen naming seam takes its pre-feature fast path and
+    // output is byte-for-byte identical to a build without this feature — which is why default-args runs
+    // (the differential oracle) are completely unaffected by either populator.
     private var aliasMap: AliasMap = AliasMap.EMPTY
+    // The deobfuscation auto-map's raw overrides (empty unless [DecompilerArgs.deobfuscation]). Kept as the
+    // raw map — not just the built [AliasMap] — so [rebuildAliasMap] can merge it with the user renames.
+    // Built ONCE per load; the user store is layered on top at merge time (user precedence).
+    private var deobfOverrides: Map<CodeNodeRef, String> = emptyMap()
+    // Session-local user renames (this loaded input only; no persistence this phase). Mutated only on the
+    // single-threaded cached path, alongside the [cache] it shares invalidation with. Validated +
+    // collision-checked against the model before an entry is accepted (see [UserRenameStore]).
+    private val userRenames = UserRenameStore()
     // The loaded input model, retained so [smali] can disassemble a class's raw bytecode straight from
     // the parser output — no pipeline decompile. Keyed by the same binary (dotted) name as [classNames]
     // (the parser's descriptor `Lp/C;` folded to `p.C`), so a UI/tool selection resolves without a scan.
@@ -104,6 +114,10 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         usageIndexCache.clear()
         resourcesInternal = null
         inputClasses = emptyMap()
+        // A fresh input starts with no renames and no auto-map; [rebuildAliasMap] below sets the effective
+        // map (EMPTY by identity when deobfuscation is off, keeping the load path byte-identical).
+        userRenames.clear()
+        deobfOverrides = emptyMap()
         aliasMap = AliasMap.EMPTY
         val loader = try {
             args.registry.load(name, bytes) ?: ListCodeLoader(emptyList())
@@ -122,11 +136,68 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         }
         val built = ModelBuilder.build(loader)
         root = built
-        // Build the deobfuscation alias map once for this model — empty unless opted in via
-        // [DecompilerArgs.deobfuscation]. Read-only after this point (see the [aliasMap] field).
-        aliasMap = if (args.deobfuscation) Deobfuscator.buildAliasMap(built) else AliasMap.EMPTY
+        // Build the deobfuscation auto-map once for this model — empty unless opted in via
+        // [DecompilerArgs.deobfuscation]. The effective [aliasMap] is then derived from it plus the (empty)
+        // user store; with deobfuscation off this yields [AliasMap.EMPTY] by identity (byte-identical load).
+        deobfOverrides = if (args.deobfuscation) Deobfuscator.buildOverrides(built) else emptyMap()
+        rebuildAliasMap()
         return built.classes.size
     }
+
+    /**
+     * Record a **user rename** of [target] to [newName] and apply it everywhere on the next render, or
+     * reject it without changing anything (see [RenameResult]). [target] is the one symbol identity the
+     * whole engine speaks — a [MemberInfo.key] from the navigation tree, a find-usages
+     * ([findUsages]) target, or `ClassNodeRef(binaryName)` for a class — so a UI can go
+     * "find usages → rename" coherently: the rename key is the *binary* identity the metadata records, which
+     * is **invariant under renaming** (an alias is a codegen spelling only, never a change to the model), so
+     * the same ref keeps resolving before and after.
+     *
+     * The rename is **validated and collision-checked against the loaded model** first: the new name must be
+     * a legal, non-reserved Java identifier (codegen emits a user override verbatim), and must not clash with
+     * a sibling in the same scope. A user rename **takes precedence** over a deobfuscation alias on the same
+     * symbol. On success this merges the override into the effective alias map and invalidates the render
+     * caches so the next [decompileClass]/[decompileAll]/[findUsages] reflects it.
+     *
+     * **Cost (honest):** applying a rename is O(1) plus a rebuild of the small effective map; invalidation
+     * clears the whole per-class render cache and the find-usages index. That is deliberately coarse
+     * (simplest-correct): re-rendering is **pure codegen only** — the destructive analysis/lowering is
+     * guarded per class ([LOWERED] persists on the IR), so it is never repeated — and it is **lazy**, so a
+     * class is re-rendered only when next requested. Refining invalidation to just the declaring class plus
+     * its referrers (via the find-usages index) is a documented follow-up.
+     *
+     * Not thread-safe (like [decompileClass]): drive it only on the cached, sequential path, never
+     * concurrently with [decompileAllParallel]. Returns [RenameResult.UnrenamableTarget] when nothing is
+     * loaded.
+     */
+    fun rename(target: CodeNodeRef, newName: String): RenameResult {
+        val model = root ?: return RenameResult.UnrenamableTarget(target, "no input is loaded")
+        val result = userRenames.tryRename(model, deobfOverrides, target, newName)
+        if (result is RenameResult.Applied) {
+            rebuildAliasMap()
+            invalidateRenderCaches()
+        }
+        return result
+    }
+
+    /**
+     * Drop every user rename, reverting names to the deobfuscation auto-map (or the raw names when
+     * deobfuscation is off) on the next render. A no-op — with no cache churn — when there are no user
+     * renames. Not thread-safe (see [rename]).
+     */
+    fun clearRenames() {
+        if (userRenames.isEmpty) return
+        userRenames.clear()
+        rebuildAliasMap()
+        invalidateRenderCaches()
+    }
+
+    /**
+     * The user renames currently in effect, as an immutable `CodeNodeRef → chosen name` snapshot in
+     * application order (excludes deobfuscation aliases — those are automatic, not user edits). Backs a
+     * future rename-list UI and the deferred `.jadx` persistence; independent of later [rename]/[clearRenames].
+     */
+    val renames: Map<CodeNodeRef, String> get() = userRenames.snapshot()
 
     /**
      * Fully-qualified names of the **top-level** loaded classes, in input order. A nested class is not
@@ -368,6 +439,28 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         "// JADXMP: could not export '$binaryName': $reason\n".encodeToByteArray()
 
     // ---- internals ----------------------------------------------------------
+
+    /**
+     * Recompute the effective [aliasMap] = deobfuscation auto-map ⊕ user renames (user winning). When both
+     * are empty this is [AliasMap.EMPTY] **by identity** (`AliasMap.of(emptyMap()) === EMPTY`), so codegen
+     * stays on its byte-identical fast path; when only the deobf map is present the result equals the
+     * pre-rename-feature `AliasMap.of(deobfOverrides)` exactly. `Map.plus` gives the user entries precedence
+     * on a shared key, satisfying "a user rename overrides a deobfuscation alias on the same symbol".
+     */
+    private fun rebuildAliasMap() {
+        aliasMap = AliasMap.of(if (userRenames.isEmpty) deobfOverrides else deobfOverrides + userRenames.overrides())
+    }
+
+    /**
+     * Discard every cached render and the find-usages index after a rename/clear. Coarse but obviously
+     * correct: no stale spelling (or stale reference offset) can survive. Cheap because it only drops
+     * memoized *codegen* output — the once-only destructive lowering stays on the IR ([LOWERED]), so a
+     * subsequent [decompileClass] re-runs only the pure backend, lazily, for classes actually re-requested.
+     */
+    private fun invalidateRenderCaches() {
+        cache.clear()
+        usageIndexCache.clear()
+    }
 
     /**
      * Build the inverse (target → uses) index for [format] by decompiling every top-level class through the
