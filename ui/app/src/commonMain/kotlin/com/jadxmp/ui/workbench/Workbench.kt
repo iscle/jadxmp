@@ -41,6 +41,7 @@ import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.client.FileOpener
 import com.jadxmp.ui.client.FileSaver
 import com.jadxmp.ui.client.NodeKind
+import com.jadxmp.ui.client.ProjectExporter
 import com.jadxmp.ui.client.SessionState
 import com.jadxmp.ui.client.SettingsStore
 import com.jadxmp.ui.client.StubDecompilerClient
@@ -86,9 +87,10 @@ fun JadxWorkbenchApp(
     dropController: FileDropController? = null,
     settingsStore: SettingsStore? = null,
     fileSaver: FileSaver? = null,
+    projectExporter: ProjectExporter? = null,
 ) {
     val systemDark = isSystemInDarkTheme()
-    val state = rememberWorkbenchState(client, fileOpener, settingsStore, fileSaver)
+    val state = rememberWorkbenchState(client, fileOpener, settingsStore, fileSaver, projectExporter)
     val ui by state.ui.collectAsState()
     val dark = ui.themeMode.resolveDark(systemDark)
 
@@ -145,6 +147,10 @@ fun Workbench(
             // "s" typing and Ctrl+Shift+S untouched (see [resolveShortcut]).
             ShortcutAction.SaveFile ->
                 if (state.hasSaver) { if (ui.activeDocument != null) state.saveActiveDocument(); true } else false
+            // Export the whole project (Ctrl/Cmd+Shift+E). Consume the key whenever an exporter is wired;
+            // export only when a project is actually open (a Ready session).
+            ShortcutAction.ExportSources ->
+                if (state.hasExporter) { if (session is SessionState.Ready) state.exportProject(); true } else false
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
@@ -196,6 +202,8 @@ fun Workbench(
                 onOpen = state::requestOpen,
                 canSave = state.hasSaver && ui.activeDocument != null,
                 onSave = state::saveActiveDocument,
+                canExport = state.hasExporter && session is SessionState.Ready,
+                onExport = state::exportProject,
                 hasManifest = ui.manifestNode != null,
                 onOpenManifest = state::openManifest,
                 onJumpMainActivity = state::jumpToMainActivity,
@@ -304,6 +312,8 @@ private fun WorkbenchToolbar(
     onOpen: () -> Unit,
     canSave: Boolean,
     onSave: () -> Unit,
+    canExport: Boolean,
+    onExport: () -> Unit,
     hasManifest: Boolean,
     onOpenManifest: () -> Unit,
     onJumpMainActivity: () -> Unit,
@@ -332,6 +342,8 @@ private fun WorkbenchToolbar(
         ToolbarTextButton("Open", onClick = onOpen)
         // Save the active document's rendered text (P0#7). Disabled with no document open / no saver.
         ToolbarTextButton("Save", onClick = onSave, enabled = canSave)
+        // Export the WHOLE project's sources + resources (P0#7). Disabled with no project open / no exporter.
+        ToolbarTextButton("Export", onClick = onExport, enabled = canExport)
         VDivider()
         ToolbarButton(onClick = onBack, enabled = canBack, square = true) { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
         ToolbarButton(onClick = onForward, enabled = canForward, square = true) { tint -> DirectionCaret(pointsLeft = false, tint = tint) }

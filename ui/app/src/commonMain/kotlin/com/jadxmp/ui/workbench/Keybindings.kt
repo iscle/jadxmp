@@ -47,6 +47,9 @@ enum class ShortcutAction {
     /** Ctrl/Cmd+S — save the active document's rendered text to a file. */
     SaveFile,
 
+    /** Ctrl/Cmd+Shift+E — export the whole decompiled project (all classes + resources). */
+    ExportSources,
+
     /** Alt+Left or Cmd/Ctrl+[ — navigate back in history. */
     GoBack,
 
@@ -99,6 +102,7 @@ val DefaultKeymap: Map<ShortcutAction, List<KeyStroke>> = mapOf(
     // Ctrl+Tab on every platform (Cmd+Tab is swallowed by macOS, but Ctrl+Tab folds into `primary` too).
     ShortcutAction.LastUsedTab to listOf(KeyStroke(Key.Tab, primary = true)),
     ShortcutAction.SaveFile to listOf(KeyStroke(Key.S, primary = true)),
+    ShortcutAction.ExportSources to listOf(KeyStroke(Key.E, primary = true, shift = true)),
     ShortcutAction.GoBack to listOf(
         KeyStroke(Key.DirectionLeft, alt = true),
         KeyStroke(Key.LeftBracket, primary = true),

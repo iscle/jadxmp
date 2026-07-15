@@ -8,9 +8,11 @@ import com.jadxmp.ui.client.CodeDocument
 import com.jadxmp.ui.client.CodeView
 import com.jadxmp.ui.client.DEFAULT_CODE_FONT_SIZE_SP
 import com.jadxmp.ui.client.DecompilerClient
+import com.jadxmp.ui.client.ExportRequest
 import com.jadxmp.ui.client.FileOpener
 import com.jadxmp.ui.client.FileSaver
 import com.jadxmp.ui.client.MemberTree
+import com.jadxmp.ui.client.ProjectExporter
 import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.OpenRequest
@@ -23,6 +25,7 @@ import com.jadxmp.ui.client.TreeKind
 import com.jadxmp.ui.client.TreeNode
 import com.jadxmp.ui.client.UiSettings
 import com.jadxmp.ui.client.resolveDark
+import com.jadxmp.ui.client.zipExport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -124,6 +127,7 @@ class WorkbenchState(
     private val fileOpener: FileOpener? = null,
     private val settingsStore: SettingsStore? = null,
     private val fileSaver: FileSaver? = null,
+    private val projectExporter: ProjectExporter? = null,
 ) {
     /**
      * Persisted preferences, loaded once synchronously on construction so the very first frame already
@@ -146,6 +150,9 @@ class WorkbenchState(
 
     /** True when a [FileSaver] is wired, so the workbench can show/hide the "Save file" affordances. */
     val hasSaver: Boolean get() = fileSaver != null
+
+    /** True when a [ProjectExporter] is wired, so the workbench can show/hide the "Export" affordance. */
+    val hasExporter: Boolean get() = projectExporter != null
 
     /**
      * Generation counter bumped on every [openProject]. Async results from a superseded project
@@ -311,6 +318,43 @@ class WorkbenchState(
         val name = suggestedFileName(doc.nodeId.value, doc.view)
         val bytes = doc.plainText().encodeToByteArray()
         scope.launch { runCatching { saver.save(name, bytes) } }
+    }
+
+    /**
+     * "Export decompiled sources" (P0#7): decompile the WHOLE project and hand it to the injected
+     * [ProjectExporter] — a directory tree on desktop, a downloaded ZIP on web/android. A no-op when no
+     * exporter is wired or no project is open (the affordance is disabled then). Uses the current
+     * [WorkbenchUiState.preferredView] as the output language (Java by default; Smali falls back to Java).
+     * The whole thing runs on [scope] and is fault-isolated (rule 4): a failed/cancelled export is
+     * swallowed to an honest status line, never an uncaught throw. Epoch-guarded so an export superseded
+     * by a new [openProject] never writes its status back into the fresh project.
+     */
+    fun exportProject() {
+        val exporter = projectExporter ?: return
+        val ready = session.value as? SessionState.Ready ?: return
+        val view = _ui.value.preferredView
+        val epoch = openEpoch
+        scope.launch {
+            _ui.update { it.copy(busy = true, status = "Exporting ${ready.projectName}…") }
+            val ok = runCatching {
+                // Decompile the project once; `toZip` lazily packages the SAME files only if the exporter
+                // (web/android) needs a single archive — a directory-writing desktop exporter never zips.
+                val files = client.exportProject(view)
+                if (epoch != openEpoch) return@runCatching false
+                exporter.export(
+                    ExportRequest(
+                        projectName = ready.projectName,
+                        files = files,
+                        zipName = exportZipName(ready.projectName),
+                        toZip = { zipExport(files) },
+                    ),
+                )
+            }.getOrDefault(false)
+            if (epoch != openEpoch) return@launch
+            _ui.update {
+                it.copy(busy = false, status = if (ok) "Exported ${ready.projectName}" else "Export cancelled")
+            }
+        }
     }
 
     /** Persist the current preferences through the injected store (best-effort; no-op without one). */
@@ -1051,6 +1095,16 @@ internal fun suggestedFileName(nodeId: String, view: CodeView): String = when {
     }
 }
 
+/**
+ * Suggested archive name for a whole-project export: `<project sans extension>-sources.zip` (e.g.
+ * `sample-app.apk` → `sample-app-sources.zip`). Pure and fault-tolerant (a blank name falls back to a
+ * generic one) so it is unit-tested directly and never throws.
+ */
+internal fun exportZipName(projectName: String): String {
+    val base = projectName.substringBeforeLast('.').ifBlank { projectName }.ifBlank { "project" }
+    return "$base-sources.zip"
+}
+
 /** File extension for a source [CodeView]: Java `.java`, Kotlin `.kt`, Smali `.smali`. */
 internal fun CodeView.fileExtension(): String = when (this) {
     CodeView.JAVA -> "java"
@@ -1084,9 +1138,10 @@ fun rememberWorkbenchState(
     fileOpener: FileOpener? = null,
     settingsStore: SettingsStore? = null,
     fileSaver: FileSaver? = null,
+    projectExporter: ProjectExporter? = null,
 ): WorkbenchState {
     val scope = rememberCoroutineScope()
-    return remember(client, fileOpener, settingsStore, fileSaver) {
-        WorkbenchState(client, scope, fileOpener, settingsStore, fileSaver)
+    return remember(client, fileOpener, settingsStore, fileSaver, projectExporter) {
+        WorkbenchState(client, scope, fileOpener, settingsStore, fileSaver, projectExporter)
     }
 }

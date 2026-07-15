@@ -25,6 +25,7 @@ fun main() = application {
     val client = remember { CoreApiDecompilerClient() }
     val fileOpener = remember { DesktopFileOpener() }
     val fileSaver = remember { DesktopFileSaver() }
+    val projectExporter = remember { DesktopProjectExporter() }
     val settingsStore = remember { DesktopSettingsStore() }
     val dropController = remember { FileDropController() }
     Window(
@@ -41,6 +42,7 @@ fun main() = application {
                 dropController = dropController,
                 settingsStore = settingsStore,
                 fileSaver = fileSaver,
+                projectExporter = projectExporter,
             )
         }
     }

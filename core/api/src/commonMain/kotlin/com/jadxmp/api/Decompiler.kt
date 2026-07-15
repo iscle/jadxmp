@@ -21,6 +21,8 @@ import com.jadxmp.pipeline.model.ModelBuilder
 import com.jadxmp.pipeline.pass.CancellationCheck
 import com.jadxmp.pipeline.pass.PassContext
 import com.jadxmp.pipeline.pass.PassRunner
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.yield
 
 /**
  * The public facade (ARCHITECTURE §2) and the only engine type UI/tools depend on. Wires the landed
@@ -244,6 +246,70 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         val classes = scheduler.map(topLevel) { cls, check -> decompileNow(model, cls, args.outputFormat, check) }
         return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount })
     }
+
+    /**
+     * Export the **whole loaded project** as a flat list of [ExportedFile] (`path → bytes`), ready for a
+     * platform to write as a directory tree or a downloaded ZIP (via [SourceArchive.zip]) — jadx-gui's
+     * "Save all"/"Export" (P0#7). Each top-level class is rendered to one `<package-as-dirs>/<Simple>.<ext>`
+     * file in [format] (Java by default), reusing the cached per-class [decompileClass] path so a class the
+     * UI already opened is not re-analyzed. When [includeResources] and the input carried resources, the
+     * decoded `AndroidManifest.xml` and each `res/…xml` are emitted under `resources/`.
+     *
+     * Uses the **cached, sequential** path deliberately — not [decompileAllParallel] — so it is safe to
+     * call repeatedly on a live instance and safe to cancel: cancelling at a [yield] boundary leaves every
+     * class either fully cached or untouched (a single `decompileClass` is atomic), never the half-lowered
+     * IR that discards the parallel path's instance. It `suspend`s and [yield]s between units so a long
+     * export stays cooperative on the single wasm UI thread.
+     *
+     * **Fault isolation (rule 4):** the engine already renders a bad *method* to an in-body error marker
+     * rather than throwing, so a class normally exports even when partly broken; on the rare hard failure
+     * of a whole class this still emits a placeholder source file with the error as a comment, so no class
+     * ever silently vanishes from the export. Binary assets (PNGs, raw files) are not retained by the
+     * resource decoder and are therefore not included — a documented follow-on, not a silent drop.
+     */
+    suspend fun exportSources(
+        format: OutputFormat = args.outputFormat,
+        includeResources: Boolean = true,
+    ): List<ExportedFile> {
+        if (root == null) return emptyList()
+        val ext = format.sourceExtension()
+        val files = ArrayList<ExportedFile>()
+        for (binaryName in classNames) {
+            yield()
+            files += try {
+                val decompiled = decompileClass(binaryName, format)
+                if (decompiled != null) {
+                    ExportedFile(sourcePath(decompiled.fullName, ext), decompiled.code.encodeToByteArray())
+                } else {
+                    ExportedFile(sourcePath(binaryName, ext), placeholderSource(binaryName, "no output"))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ExportedFile(sourcePath(binaryName, ext), placeholderSource(binaryName, e.message ?: e.toString()))
+            }
+        }
+        if (includeResources) appendResourceFiles(files)
+        return files
+    }
+
+    /** Append the decoded manifest + `res/…xml` of the loaded container under `resources/`, if any. */
+    private suspend fun appendResourceFiles(files: MutableList<ExportedFile>) {
+        val res = resourcesInternal ?: return
+        res.decodeManifest()?.let { files += ExportedFile("resources/AndroidManifest.xml", it.encodeToByteArray()) }
+        for (path in res.xmlResourcePaths) {
+            yield()
+            res.decodeXml(path)?.let { files += ExportedFile("resources/$path", it.encodeToByteArray()) }
+        }
+    }
+
+    /** Relative output path for an emitted **source** name (`com.example.Foo` → `com/example/Foo.java`). */
+    private fun sourcePath(sourceName: String, ext: String): String = sourceName.replace('.', '/') + "." + ext
+
+    /** A minimal but honest placeholder file for a class that could not be rendered at all (rule 4). */
+    private fun placeholderSource(binaryName: String, reason: String): ByteArray =
+        // `//` is a line comment in both Java and Kotlin, so the placeholder is valid in either format.
+        "// JADXMP: could not export '$binaryName': $reason\n".encodeToByteArray()
 
     // ---- internals ----------------------------------------------------------
 

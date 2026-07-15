@@ -54,4 +54,16 @@ class StubDecompilerClient : DecompilerClient {
         delay(10)
         return StubData.memberLocation(memberNodeId)
     }
+
+    /**
+     * Export the sample project by rendering each class node's Java text to a `<package>/<Simple>.java`
+     * file — enough for the Export action to produce a real (sample) archive on shells backed by the stub
+     * (android, previews). Fault-isolated: a node that won't render is skipped, never a crash.
+     */
+    override suspend fun exportProject(view: CodeView?): List<ExportFile> =
+        classNodes().mapNotNull { node ->
+            val fqn = node.id.value.removePrefix("cls:")
+            val text = runCatching { code(node.id, CodeView.JAVA).plainText() }.getOrNull() ?: return@mapNotNull null
+            ExportFile(fqn.replace('.', '/') + ".java", text.encodeToByteArray())
+        }
 }

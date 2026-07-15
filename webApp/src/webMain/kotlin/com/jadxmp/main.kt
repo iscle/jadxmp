@@ -5,6 +5,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeViewport
 import com.jadxmp.ui.client.CoreApiDecompilerClient
 import com.jadxmp.ui.client.FileDropController
+import com.jadxmp.ui.client.ZipDownloadExporter
 import com.jadxmp.ui.workbench.JadxWorkbenchApp
 
 /**
@@ -33,6 +34,9 @@ fun main() {
         val client = remember { CoreApiDecompilerClient() }
         val fileOpener = remember { BrowserFileOpener() }
         val fileSaver = remember { BrowserFileSaver() }
+        // The browser can only hand back one file, so "Export" packages the project into a ZIP and
+        // downloads it through the same Wave-2 FileSaver the "Save file" action uses.
+        val projectExporter = remember { ZipDownloadExporter(fileSaver) }
         val settingsStore = remember { BrowserSettingsStore() }
         JadxWorkbenchApp(
             client = client,
@@ -40,6 +44,7 @@ fun main() {
             dropController = dropController,
             settingsStore = settingsStore,
             fileSaver = fileSaver,
+            projectExporter = projectExporter,
         )
     }
 }

@@ -301,6 +301,20 @@ class CoreApiDecompilerClient(
         }
     }
 
+    override suspend fun exportProject(view: CodeView?): List<ExportFile> {
+        // Java unless the user is viewing Kotlin; Smali is not a whole-project export format, so it too
+        // exports Java (matching jadx-gui's "save all sources" defaulting to the decompiled language).
+        val format = if (view == CodeView.KOTLIN) OutputFormat.KOTLIN else OutputFormat.JAVA
+        // Held under the same monitor as decompileClass (the cached path exportSources drives is not
+        // thread-safe); the export runs on Dispatchers.Default off the UI thread, a harmless same-thread
+        // dispatch on wasm. Fault-isolated end-to-end in the engine — one bad class never sinks the export.
+        return withContext(Dispatchers.Default) {
+            lock.withLock {
+                decompiler.exportSources(format).map { ExportFile(it.path, it.bytes) }
+            }
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     /** Member rows for [owner] (top-level ancestor [topLevel]), enumerated from the model under [lock]. */

@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
+import com.jadxmp.ui.client.ZipDownloadExporter
 import com.jadxmp.ui.workbench.JadxWorkbenchApp
 
 /**
@@ -25,10 +26,13 @@ class MainActivity : ComponentActivity() {
 
         val settingsStore = AndroidSettingsStore(this)
         val fileSaver = AndroidFileSaver(this)
+        // Export packages the project into a ZIP and writes it to Downloads via the same FileSaver.
+        val projectExporter = ZipDownloadExporter(fileSaver)
         setContent {
             JadxWorkbenchApp(
                 settingsStore = settingsStore,
                 fileSaver = fileSaver,
+                projectExporter = projectExporter,
             )
         }
     }

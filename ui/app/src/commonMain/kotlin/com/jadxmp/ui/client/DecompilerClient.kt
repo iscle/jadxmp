@@ -54,4 +54,15 @@ interface DecompilerClient {
      * The default is a no-op (null): a client that does not surface members need not implement it.
      */
     suspend fun memberLocation(memberNodeId: NodeId): MemberLocation? = null
+
+    /**
+     * Export the whole loaded project as [ExportFile]s (`path → bytes`) for the given source [view]
+     * (defaulting to Java), for the "Export decompiled sources" action (P0#7). Every class becomes one
+     * `<package>/<Simple>.<ext>` file; resources (manifest + decoded `res/…xml`) are included under
+     * `resources/`. `suspend` and cancelable — it decompiles the whole program.
+     *
+     * The default returns an empty list: a client with no engine backing it (a preview stub) simply
+     * offers nothing to export.
+     */
+    suspend fun exportProject(view: CodeView? = null): List<ExportFile> = emptyList()
 }

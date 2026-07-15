@@ -47,6 +47,16 @@ class KeybindingsTest {
     }
 
     @Test
+    fun exportSourcesIsPrimaryShiftE() {
+        // Ctrl/Cmd+Shift+E exports the whole project; a bare "e" and a plain Ctrl/Cmd+E are ordinary,
+        // and Save (Ctrl/Cmd+S) is untouched by the new binding.
+        assertEquals(ShortcutAction.ExportSources, resolve(Key.E, primary = true, shift = true))
+        assertNull(resolve(Key.E))
+        assertNull(resolve(Key.E, primary = true))
+        assertEquals(ShortcutAction.SaveFile, resolve(Key.S, primary = true))
+    }
+
+    @Test
     fun unmodifiedLettersDoNotTriggerShortcuts() {
         // A bare "o"/"f"/"w" is ordinary typing — never a shortcut.
         assertNull(resolve(Key.O))
