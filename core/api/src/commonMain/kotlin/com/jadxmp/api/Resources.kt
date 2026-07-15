@@ -1,5 +1,6 @@
 package com.jadxmp.api
 
+import com.jadxmp.input.dex.BundleInput
 import com.jadxmp.io.ZipReader
 import com.jadxmp.resources.ArscDecoder
 import com.jadxmp.resources.BinaryXmlDecoder
@@ -193,7 +194,11 @@ public class ApkResources internal constructor(
          */
         fun decode(bytes: ByteArray): ApkResources? {
             if (!ZipReader.isZip(bytes)) return null
-            val extracted = ZipReader.extract(bytes) { name -> isResourceEntry(name) }
+            // A bundle (APKM/XAPK/APKS) carries no top-level resources — they live in the base APK. Point
+            // resource decoding at the base APK's bytes so `AndroidManifest.xml` + `resources.arsc` load
+            // exactly as they do for a plain APK; a plain APK is not a bundle so this is a no-op for it.
+            val resourceBytes = BundleInput.baseApkBytes(name = "", bytes = bytes) ?: bytes
+            val extracted = ZipReader.extract(resourceBytes) { name -> isResourceEntry(name) }
             if (extracted.isEmpty()) return null
             val map = LinkedHashMap<String, ByteArray>(extracted.size)
             for (entry in extracted) map[entry.name] = entry.bytes
