@@ -5,6 +5,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import com.jadxmp.ui.client.CodeDocument
+import com.jadxmp.ui.client.CodeToken
 import com.jadxmp.ui.client.CodeView
 import com.jadxmp.ui.client.DEFAULT_CODE_FONT_SIZE_SP
 import com.jadxmp.ui.client.DecompilerClient
@@ -25,6 +26,9 @@ import com.jadxmp.ui.client.ThemeMode
 import com.jadxmp.ui.client.TreeKind
 import com.jadxmp.ui.client.TreeNode
 import com.jadxmp.ui.client.UiSettings
+import com.jadxmp.ui.client.UsageQuery
+import com.jadxmp.ui.client.UsageResults
+import com.jadxmp.ui.client.UsageSiteRow
 import com.jadxmp.ui.client.resolveDark
 import com.jadxmp.ui.client.zipExport
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +73,20 @@ private val MANIFEST_PACKAGE_REGEX = Regex("""<manifest\b[^>]*?package\s*=\s*"([
 /** Locates the `<application android:name="…">` class name in decoded manifest text (best-effort). */
 private val APPLICATION_CLASS_REGEX = Regex(
     """<application\b[^>]*?android:name\s*=\s*"([^"]+)"""",
+)
+
+/**
+ * State of the "Find usages" panel (mirrors the search-results states). [token] is what the query was
+ * invoked on (shown while loading / if it can't resolve); [running] is true while the — possibly slow —
+ * first query builds the engine index; [results] lands once resolved. [results] stays null while running
+ * AND if the clicked token did not resolve to a symbol; a resolved symbol nothing references lands as a
+ * non-null [results] with an empty [UsageResults.sites]. Both null and empty render an honest state (rule 4).
+ */
+@Immutable
+data class UsagesUiState(
+    val token: String,
+    val running: Boolean,
+    val results: UsageResults? = null,
 )
 
 /** The full observable UI state of the workbench. Derived render lists are computed in composables. */
@@ -119,6 +137,8 @@ data class WorkbenchUiState(
     val revealNonce: Int = 0,
     /** The node the tree pane should scroll into view on the current [revealNonce]; null = nothing to reveal. */
     val revealTarget: NodeId? = null,
+    /** "Find usages" panel state (loading / results / unresolved). Null when the panel is closed. */
+    val usages: UsagesUiState? = null,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -209,6 +229,13 @@ class WorkbenchState(
 
     /** Generation guard for the member scan, symmetric to [codeSearchGeneration]. */
     private var memberSearchGeneration = 0
+
+    /**
+     * Generation guard for [findUsages], bumped on every new query and on [closeUsages], so a superseded
+     * query's late result (an uncancelable first-run full decompile that resolves after the user moved on)
+     * can never overwrite a newer panel state. Access is on [scope]'s single dispatcher — no atomics.
+     */
+    private var usagesGeneration = 0
 
     /**
      * Best-effort seed for the Find bar / "Search selection", set from the last code token the user
@@ -894,6 +921,59 @@ class WorkbenchState(
         stopCodeSearch()
         stopMemberSearch()
         _ui.update { it.copy(searchResults = null, codeSearch = null, memberSearch = null) }
+    }
+
+    // ── Find usages (code-area right-click) ───────────────────────────────────
+
+    /**
+     * "Find usages" of the symbol under a code-area right-click. Opens the panel with a loading state at
+     * once, then resolves the clicked [token] to its engine symbol and lists every referring site through
+     * [DecompilerClient.findUsages] on [scope] — the caller's thread is never blocked. The FIRST query for a
+     * format decompiles the whole app to build the inverse index (later ones are fast), so the loading
+     * state is essential. Epoch- and generation-guarded: a query superseded by a new project or a newer
+     * find-usages is dropped. Fault-isolated (rule 4): a query that throws or resolves to nothing lands as
+     * an honest empty state, never a crash.
+     *
+     * **Documented wasm limitation (not fixed here):** the browser build is single-threaded, so the engine's
+     * first full-decompile still blocks the one UI thread while it runs — the loading state is set, but the
+     * frame can't repaint until the query returns. That is an engine constraint (no worker thread), not
+     * worsened by this path; a large app is best pre-warmed via a full decompile before querying.
+     */
+    fun findUsages(classNode: NodeId, view: CodeView, line: Int, token: CodeToken) {
+        val text = token.text.trim()
+        if (text.isEmpty()) return
+        val generation = ++usagesGeneration
+        val epoch = openEpoch
+        _ui.update { it.copy(usages = UsagesUiState(token = text, running = true, results = null)) }
+        scope.launch {
+            val results = runCatching {
+                client.findUsages(UsageQuery(classNode, view, line, token.text, token.kind))
+            }.getOrNull()
+            // Drop a result whose query was superseded (newer find-usages / project) before it resolved.
+            if (generation != usagesGeneration || epoch != openEpoch) return@launch
+            _ui.update { it.copy(usages = UsagesUiState(token = text, running = false, results = results)) }
+        }
+    }
+
+    /** Close the Find-usages panel and invalidate any in-flight query's late result (generation bump). */
+    fun closeUsages() {
+        usagesGeneration++
+        _ui.update { it.copy(usages = null) }
+    }
+
+    /**
+     * Open a find-usages result: navigate to its referring class and center the referenced line, reusing the
+     * go-to-definition scroll (pin the caret + bump [WorkbenchUiState.codeNavNonce]) exactly like
+     * [openCodeMatch], so it re-scrolls even into an already-open tab. The panel stays open for click-through.
+     */
+    fun openUsageSite(site: UsageSiteRow) {
+        openDocument(site.classNode, site.classLabel, kind = NodeKind.CLASS)
+        _ui.update {
+            it.copy(
+                tabs = it.tabs.updateCaret(it.tabs.activeIndex, site.line),
+                codeNavNonce = it.codeNavNonce + 1,
+            )
+        }
     }
 
     // ── In-editor Find bar (Ctrl+F) ───────────────────────────────────────────

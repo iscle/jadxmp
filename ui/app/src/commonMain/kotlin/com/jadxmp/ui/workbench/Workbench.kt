@@ -161,6 +161,7 @@ fun Workbench(
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
+                ui.usages != null -> { state.closeUsages(); true }
                 ui.goToLine != null -> { state.closeGoToLine(); true }
                 ui.find != null -> { state.closeFind(); true }
                 showSearch -> { showSearch = false; state.clearSearch(); true }
@@ -276,6 +277,21 @@ fun Workbench(
                             onOpenMember = { state.openMember(it.nodeId) },
                             onClose = { showSearch = false; state.clearSearch() },
                             initialQuery = searchSeed,
+                        )
+                    }
+                }
+
+                // Find-usages results, shown as a top-right overlay like the search panel. It doesn't grab
+                // focus (no text field), so global shortcuts — including Esc to close it — keep working.
+                ui.usages?.let { usages ->
+                    Box(
+                        Modifier.fillMaxSize().padding(JadxTheme.spacing.lg),
+                        contentAlignment = Alignment.TopEnd,
+                    ) {
+                        UsagesPanel(
+                            state = usages,
+                            onOpenSite = state::openUsageSite,
+                            onClose = state::closeUsages,
                         )
                     }
                 }
@@ -478,6 +494,9 @@ private fun EditorArea(
                     activeFindMatch = ui.find?.activeMatch,
                     onSelectionSeed = state::noteSelectionSeed,
                     onSearchSelection = onSearchSelection,
+                    // "Find usages" — resolve the clicked token against the OPEN class + view, then query
+                    // the engine (the workbench adds the class/view the viewer's callback doesn't carry).
+                    onFindUsages = { line, token -> state.findUsages(doc.nodeId, doc.view, line, token) },
                     // "Save file" context-menu action — only offered when a saver is wired.
                     onSaveFile = if (state.hasSaver) state::saveActiveDocument else null,
                     // Editor polish (P1#11 word-wrap, P1#12 zoom).

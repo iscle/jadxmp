@@ -130,6 +130,13 @@ fun CodeViewer(
     onSelectionSeed: (String) -> Unit = {},
     /** "Search selection" — hand the clicked token's text to the global search panel. */
     onSearchSelection: (String) -> Unit = {},
+    /**
+     * "Find usages" — query the engine for every reference to the clicked token's resolved symbol. Receives
+     * the clicked line + token; the workbench builds the engine query (adding the open class + view). Null
+     * hides the item; when present it is enabled only for a token that resolves to a class/method/field
+     * reference (the same predicate as "Copy reference"), so a package/local/keyword offers nothing.
+     */
+    onFindUsages: ((line: Int, token: CodeToken) -> Unit)? = null,
     /** "Save file" — write this document's rendered text to disk. Null hides the menu item (no saver). */
     onSaveFile: (() -> Unit)? = null,
     /** Word-wrap toggle (P1#11): when true, lines wrap instead of panning under a horizontal scroll. */
@@ -345,6 +352,11 @@ fun CodeViewer(
                         clipboard.setText(AnnotatedString(document.plainText()))
                     },
                 ) + listOfNotNull(
+                    // "Find usages" — reuses the same click-to-def resolution as "Copy reference" (enabled
+                    // only for a navigable class/method/field token); the engine query itself runs async.
+                    onFindUsages?.let { find ->
+                        ContextMenuItem("Find usages", enabled = reference != null) { find(m.line, m.token) }
+                    },
                     // "Save file" (Ctrl/Cmd+S) — appended only when a FileSaver is wired.
                     onSaveFile?.let { save -> ContextMenuItem("Save file") { save() } },
                 ) + listOf(

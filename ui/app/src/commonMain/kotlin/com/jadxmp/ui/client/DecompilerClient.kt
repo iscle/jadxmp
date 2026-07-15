@@ -1,5 +1,6 @@
 package com.jadxmp.ui.client
 
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -74,4 +75,68 @@ interface DecompilerClient {
      * offers nothing to export.
      */
     suspend fun exportProject(view: CodeView? = null): List<ExportFile> = emptyList()
+
+    /**
+     * "Find usages" of the symbol at a code-area position — jadx-gui's Find Usages, driven from the code
+     * viewer's right-click. [query] carries where the user invoked it (the open class node + shown view +
+     * clicked line/token); the client resolves that position to the engine's exact reference key (the same
+     * `CodeNodeRef` space go-to-definition uses) and inverts the whole-program reference metadata into the
+     * list of referring sites (see `com.jadxmp.api.Decompiler.findUsages`).
+     *
+     * `suspend` and cancelable because the **first** query for a format decompiles the entire app to build
+     * (and cache) the inverse index; later queries are fast lookups. Returns `null` when the token does not
+     * resolve to an indexable symbol (a package/local/keyword, or an unresolved position) — never a throw
+     * (rule 4). A resolved symbol that nothing references returns a [UsageResults] with an empty [UsageResults.sites].
+     *
+     * The default is `null`: a client with no engine backing offers no usages.
+     */
+    suspend fun findUsages(query: UsageQuery): UsageResults? = null
 }
+
+/**
+ * Where the user invoked "Find usages" in the code area — enough for the client to resolve the clicked
+ * symbol precisely from the open class's metadata. Deliberately UI-typed (no engine `CodeNodeRef`), so the
+ * seam stays engine-free like the rest of [DecompilerClient]; the impl does the ref resolution internally.
+ *
+ * @property classNode the open class (`cls:`) node whose decompiled source was right-clicked.
+ * @property view the shown source view — the engine indexes positions per format, so the query must match it.
+ * @property line the 1-based clicked line within that document.
+ * @property token the clicked identifier token's text (the symbol name at the caret).
+ * @property tokenKind the token's [TokenKind], a hint that disambiguates a name used as both, say, a field
+ *   and a method on the same line.
+ */
+@Immutable
+data class UsageQuery(
+    val classNode: NodeId,
+    val view: CodeView,
+    val line: Int,
+    val token: String,
+    val tokenKind: TokenKind,
+)
+
+/**
+ * A resolved find-usages query, projected for [com.jadxmp.ui.workbench.UsagesPanel]: the readable [symbol]
+ * label + its [kind] for the panel header, and every referring [sites] row. An empty [sites] means the
+ * symbol resolved but nothing references it ("No usages found") — distinct from a `null` [UsageResults],
+ * which means the clicked token did not resolve to a symbol at all.
+ */
+@Immutable
+data class UsageResults(
+    val symbol: String,
+    val kind: NodeKind,
+    val sites: List<UsageSiteRow>,
+)
+
+/**
+ * One referring site, projected from the engine's `UsageSite` for the panel: the class tab to open
+ * ([classNode]) with its short [classLabel], the enclosing member signature ([memberLabel], `null` at class
+ * scope — an `extends`/field-type use), and the 1-based [line] to center on jump.
+ */
+@Immutable
+data class UsageSiteRow(
+    val classNode: NodeId,
+    val classLabel: String,
+    val memberLabel: String?,
+    val line: Int,
+    val kind: NodeKind,
+)

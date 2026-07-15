@@ -7,6 +7,13 @@ import com.jadxmp.api.MemberInfo
 import com.jadxmp.api.MemberKind
 import com.jadxmp.api.OutputFormat
 import com.jadxmp.codegen.ClassNodeRef
+import com.jadxmp.codegen.CodeMetadata
+import com.jadxmp.codegen.CodeNodeRef
+import com.jadxmp.codegen.DefinitionAnnotation
+import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.MethodNodeRef
+import com.jadxmp.codegen.RefKind
+import com.jadxmp.codegen.ReferenceAnnotation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -348,6 +355,57 @@ class CoreApiDecompilerClient(
         }
     }
 
+    /**
+     * Resolve the clicked token to its exact engine [CodeNodeRef], then invert the whole-program reference
+     * metadata into referring sites (see [Decompiler.findUsages]). Two engine steps, both under the single
+     * [lock] on [Dispatchers.Default] (off the UI thread on JVM; a harmless same-thread dispatch on wasm):
+     *
+     *  1. **Resolve** — decompile the OPEN class (cached [Decompiler.decompileClass]) and read the
+     *     Reference/Definition annotation at the clicked (line, token) straight from its [CodeMetadata]
+     *     ([referenceOnLine]). That ref IS the index key — the same `CodeNodeRef` the codegen recorded —
+     *     so no lossy string reconstruction is involved; a member keeps its precise overload identity.
+     *  2. **Query** — [Decompiler.findUsages] with that ref and the view's format. The FIRST such call for
+     *     a format decompiles the whole app to build+cache the inverse index; later ones are lookups.
+     *
+     * Fault-isolated (rule 4): a token that resolves to nothing (or to a non-indexed kind), a class that
+     * won't decompile, or any thrown fault yields `null` — never a crash. A resolved symbol nothing
+     * references yields an empty [UsageResults.sites]. The site's `fromClass` is the BINARY name the tree
+     * navigates with, so each row reopens via the same `cls:` id space.
+     */
+    override suspend fun findUsages(query: UsageQuery): UsageResults? {
+        val fqn = classFqnOf(query.classNode) ?: return null
+        val format = outputFormatFor(query.view)
+        return withContext(Dispatchers.Default) {
+            lock.withLock {
+                try {
+                    val origin = decompiler.decompileClass(fqn, format) ?: return@withLock null
+                    val meta = origin.metadata.code ?: return@withLock null
+                    val target = referenceOnLine(origin.code, meta, query.line, query.token, query.tokenKind)
+                        ?: return@withLock null
+                    val sites = decompiler.findUsages(target, format)
+                    UsageResults(
+                        symbol = usageSymbolLabel(target),
+                        kind = nodeKindOf(target.refKind),
+                        sites = sites.map { site ->
+                            UsageSiteRow(
+                                classNode = NodeId("cls:${site.fromClass}"),
+                                classLabel = site.fromClass.substringAfterLast('.'),
+                                memberLabel = enclosingMemberLabel(site.fromMember),
+                                line = site.line,
+                                kind = nodeKindOf(site.kind),
+                            )
+                        },
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Any resolve/query fault degrades to "no result", never a crash (rule 4).
+                    null
+                }
+            }
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     /** Member rows for [owner] (top-level ancestor [topLevel]), enumerated from the model under [lock]. */
@@ -594,4 +652,104 @@ class CoreApiDecompilerClient(
          */
         fun canonicalName(name: String): String = name.replace('$', '.')
     }
+}
+
+// ── Find-usages resolution + labels (pure, unit-tested) ──────────────────────────
+
+/** The ref kinds [Decompiler.findUsages] indexes; the click-to-def resolution only offers these as targets. */
+private val INDEXED_REF_KINDS = setOf(RefKind.CLASS, RefKind.METHOD, RefKind.FIELD)
+
+/**
+ * The engine [CodeNodeRef] referenced (or defined) by [token] on 1-based [line] of [code], read from
+ * [metadata] — the exact key [Decompiler.findUsages] inverts on. Scans the annotations that fall on that
+ * line and returns the first Reference/Definition whose emitted text matches [token] (as a whole
+ * identifier) and whose kind is find-usages-indexable, preferring one that also matches [kindHint] so a
+ * name used as both a field and a method on one line resolves to the clicked one.
+ *
+ * Reading the ref out of the metadata (rather than rebuilding it from the token's `cls:` NodeId, which only
+ * carries the OWNER class) is what keeps a method/field query precise — a specific overload, not its class.
+ * Pure + fault-tolerant (rule 4): returns null when nothing on the line matches. `internal` for direct testing.
+ */
+internal fun referenceOnLine(
+    code: String,
+    metadata: CodeMetadata,
+    line: Int,
+    token: String,
+    kindHint: TokenKind?,
+): CodeNodeRef? {
+    if (token.isEmpty()) return null
+    val start = lineStartOffset(code, line)
+    if (start < 0) return null
+    val end = lineStartOffset(code, line + 1).let { if (it < 0) code.length else it }
+    var fallback: CodeNodeRef? = null
+    // asMap() iterates in ascending offset order, so we can stop once we pass the line's end.
+    for ((offset, ann) in metadata.asMap()) {
+        if (offset < start) continue
+        if (offset >= end) break
+        val ref = (ann as? ReferenceAnnotation)?.ref ?: (ann as? DefinitionAnnotation)?.ref ?: continue
+        if (ref.refKind !in INDEXED_REF_KINDS) continue
+        if (!code.regionMatches(offset, token, 0, token.length)) continue
+        // Reject a longer identifier that merely starts with `token` (e.g. `foo` vs `fooBar`).
+        val after = offset + token.length
+        if (after < code.length && isIdentifierChar(code[after])) continue
+        if (kindHint == null || matchesTokenKind(ref.refKind, kindHint)) return ref
+        if (fallback == null) fallback = ref
+    }
+    return fallback
+}
+
+/** Character offset where 1-based [line] begins in [code], or -1 when the line is out of range. */
+private fun lineStartOffset(code: String, line: Int): Int {
+    if (line < 1) return -1
+    if (line == 1) return 0
+    var seen = 1
+    for (i in code.indices) {
+        if (code[i] == '\n') {
+            seen++
+            if (seen == line) return i + 1
+        }
+    }
+    return -1
+}
+
+private fun isIdentifierChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_' || c == '$'
+
+/** Whether an engine [refKind] agrees with the clicked token's [TokenKind] (the resolution's tie-breaker). */
+private fun matchesTokenKind(refKind: RefKind, kind: TokenKind): Boolean = when (kind) {
+    TokenKind.TYPE -> refKind == RefKind.CLASS
+    TokenKind.METHOD -> refKind == RefKind.METHOD
+    TokenKind.FIELD -> refKind == RefKind.FIELD
+    else -> true
+}
+
+/** UI badge kind for an engine [RefKind] (only the indexed kinds reach here; others fall back to CLASS). */
+internal fun nodeKindOf(refKind: RefKind): NodeKind = when (refKind) {
+    RefKind.METHOD -> NodeKind.METHOD
+    RefKind.FIELD -> NodeKind.FIELD
+    else -> NodeKind.CLASS
+}
+
+/** The panel-header label for a resolved query symbol: `Simple` / `name(Args)` / `field`. */
+internal fun usageSymbolLabel(ref: CodeNodeRef): String = when (ref) {
+    is ClassNodeRef -> ref.fullName.substringAfterLast('.').substringAfterLast('$')
+    is MethodNodeRef -> "${ref.name}(${ref.argTypeDescriptors.joinToString(", ") { simpleTypeName(it) }})"
+    is FieldNodeRef -> ref.name
+    else -> ref.toString()
+}
+
+/** Row label for a referring site's enclosing member (a method body), or null at class scope. */
+internal fun enclosingMemberLabel(ref: CodeNodeRef?): String? =
+    (ref as? MethodNodeRef)?.let { "${it.name}(${it.argTypeDescriptors.joinToString(", ") { d -> simpleTypeName(d) }})" }
+
+/**
+ * Shorten one rendered `IrType.toString()` argument (`int`, `java.lang.String`, `java.lang.String[]`,
+ * `Map<java.lang.String, int>`) to its simple form for a label — package-stripped head, array/generic
+ * suffix kept. Best-effort (a label, not a key): the generic arguments are left as-is.
+ */
+internal fun simpleTypeName(raw: String): String {
+    val arraySuffix = raw.takeLastWhile { it == '[' || it == ']' }
+    val core = raw.dropLast(arraySuffix.length)
+    val head = core.substringBefore('<')
+    val generics = core.substring(head.length)
+    return head.substringAfterLast('.').substringAfterLast('$') + generics + arraySuffix
 }

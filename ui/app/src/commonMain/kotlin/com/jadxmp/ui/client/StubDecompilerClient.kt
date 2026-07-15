@@ -72,4 +72,35 @@ class StubDecompilerClient : DecompilerClient {
             val text = runCatching { code(node.id, CodeView.JAVA).plainText() }.getOrNull() ?: return@mapNotNull null
             ExportFile(fqn.replace('.', '/') + ".java", text.encodeToByteArray())
         }
+
+    /**
+     * A small deterministic demo so the Find-usages panel is exercised in the stub shell (android/previews):
+     * report the clicked token as used once, back at its own site. A real backend inverts the whole-program
+     * reference metadata (see [CoreApiDecompilerClient]); the stub has no index, so this stands in for it. A
+     * blank token resolves to nothing (`null`), matching the real "couldn't resolve" path.
+     */
+    override suspend fun findUsages(query: UsageQuery): UsageResults? {
+        delay(30)
+        val token = query.token.trim()
+        if (token.isEmpty()) return null
+        val kind = when (query.tokenKind) {
+            TokenKind.METHOD -> NodeKind.METHOD
+            TokenKind.FIELD -> NodeKind.FIELD
+            else -> NodeKind.CLASS
+        }
+        val classLabel = query.classNode.value.removePrefix("cls:").substringAfterLast('.')
+        return UsageResults(
+            symbol = token,
+            kind = kind,
+            sites = listOf(
+                UsageSiteRow(
+                    classNode = query.classNode,
+                    classLabel = classLabel,
+                    memberLabel = null,
+                    line = query.line,
+                    kind = kind,
+                ),
+            ),
+        )
+    }
 }
