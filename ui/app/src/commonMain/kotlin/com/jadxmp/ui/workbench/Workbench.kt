@@ -76,7 +76,7 @@ import com.jadxmp.ui.theme.MonoFontFamily
  * The focus-owning overlays whose open/close SET drives root focus reclaim (see [Workbench]). Each grabs
  * focus for its own text field on mount; the usages panel is deliberately absent (it has no field).
  */
-private enum class OverlayFocus { FIND, GO_TO_LINE, SEARCH, RENAME }
+private enum class OverlayFocus { FIND, GO_TO_LINE, SEARCH, RENAME, COMMENT }
 
 /**
  * Top-level application composable. Owns the [WorkbenchState] and the light/dark selection, and hosts
@@ -168,8 +168,9 @@ fun Workbench(
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
-                // The rename dialog is modal-topmost: Esc cancels it before any other overlay/back.
+                // The rename/comment dialogs are modal-topmost: Esc cancels them before any other overlay/back.
                 ui.rename != null -> { state.closeRenameDialog(); true }
+                ui.comment != null -> { state.closeCommentDialog(); true }
                 ui.usages != null -> { state.closeUsages(); true }
                 ui.goToLine != null -> { state.closeGoToLine(); true }
                 ui.find != null -> { state.closeFind(); true }
@@ -203,6 +204,8 @@ fun Workbench(
         if (showSearch) add(OverlayFocus.SEARCH)
         // The rename dialog grabs focus for its name field, so its close must trigger root focus reclaim too.
         if (ui.rename != null) add(OverlayFocus.RENAME)
+        // The comment dialog likewise grabs focus for its note field, so its close reclaims root focus too.
+        if (ui.comment != null) add(OverlayFocus.COMMENT)
     }
     var previousOverlays by remember { mutableStateOf(emptySet<OverlayFocus>()) }
     LaunchedEffect(openOverlays) {
@@ -363,6 +366,19 @@ fun Workbench(
                         onInput = state::setRenameInput,
                         onSubmit = state::submitRename,
                         onCancel = state::closeRenameDialog,
+                    )
+                }
+
+                // Comment dialog — a centered modal over its own scrim, like Rename. Save/Remove set or clear
+                // the note (blank Save also removes), then the active document reloads so it shows/disappears;
+                // Cancel/Esc/scrim dismiss (see WorkbenchState.submitComment / removeComment).
+                ui.comment?.let { comment ->
+                    CommentDialog(
+                        state = comment,
+                        onInput = state::setCommentInput,
+                        onSubmit = state::submitComment,
+                        onRemove = state::removeComment,
+                        onCancel = state::closeCommentDialog,
                     )
                 }
             }
@@ -570,6 +586,10 @@ private fun EditorArea(
                     // "Rename…" — open the dialog for the clicked token; the workbench adds the open class +
                     // view (resolved to the exact symbol at submit, like find-usages).
                     onRename = { line, token -> state.openRenameDialog(doc.nodeId, doc.view, line, token) },
+                    // "Add/Edit comment…" — open the comment dialog for the clicked token (same resolution as
+                    // Rename); the commented-symbol set drives the Add-vs-Edit label.
+                    onComment = { line, token -> state.openCommentDialog(doc.nodeId, doc.view, line, token) },
+                    commentedReferences = ui.commentedRefs,
                     // "Save file" context-menu action — only offered when a saver is wired.
                     onSaveFile = if (state.hasSaver) state::saveActiveDocument else null,
                     // Editor polish (P1#11 word-wrap, P1#12 zoom).

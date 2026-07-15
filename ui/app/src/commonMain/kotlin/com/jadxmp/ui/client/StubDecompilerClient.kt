@@ -127,4 +127,26 @@ class StubDecompilerClient : DecompilerClient {
     override suspend fun clearRenames() {
         delay(10)
     }
+
+    /**
+     * Session-local demo comments, keyed by the clicked token text, so the Comment dialog + set/remove/prefill
+     * flow is exercised end-to-end in the stub shell (android/previews). The static [StubData] source does not
+     * actually re-render with the note; a real comment renders through [CoreApiDecompilerClient]. A blank text
+     * removes, mirroring the engine.
+     */
+    private val comments = mutableMapOf<String, String>()
+
+    override suspend fun setComment(target: CommentQuery, text: String): CommentOutcome {
+        delay(20)
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) comments.remove(target.token) else comments[target.token] = trimmed
+        return CommentOutcome.Applied(removed = trimmed.isEmpty())
+    }
+
+    override suspend fun commentFor(target: CommentQuery): String? {
+        delay(10)
+        return comments[target.token]
+    }
+
+    override suspend fun commentedReferences(): Set<String> = comments.keys.toSet()
 }

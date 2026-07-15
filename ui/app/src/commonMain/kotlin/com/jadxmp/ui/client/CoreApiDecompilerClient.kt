@@ -491,6 +491,76 @@ class CoreApiDecompilerClient(
         }
     }
 
+    /**
+     * Resolve the clicked token to its exact engine [CodeNodeRef] — the SAME click-to-definition step
+     * [rename]/[findUsages] use ([referenceOnLine] over a cached [Decompiler.decompileClass] render) — then
+     * apply [Decompiler.setComment] (a blank [text] removes), all under the single [lock] on
+     * [Dispatchers.Default]. On success the engine has already invalidated ITS render + usage caches; we
+     * additionally drop THIS client's [documentCache] so a re-fetch renders with/without the note. Unlike
+     * [rename] there is no tree relabel — a comment is inline in the code, not a symbol name — so [model]
+     * is untouched.
+     *
+     * Fault-isolated (rule 4): a token that resolves to nothing (or a non-commentable kind), a class that
+     * won't decompile, or any thrown fault yields [CommentOutcome.Unavailable] — never a crash. A comment is
+     * free text the engine sanitizes, so a resolved symbol always succeeds ([CommentOutcome.Applied]).
+     */
+    override suspend fun setComment(target: CommentQuery, text: String): CommentOutcome {
+        val fqn = classFqnOf(target.classNode) ?: return CommentOutcome.Unavailable
+        val format = outputFormatFor(target.view)
+        return withContext(Dispatchers.Default) {
+            lock.withLock {
+                try {
+                    val origin = decompiler.decompileClass(fqn, format) ?: return@withLock CommentOutcome.Unavailable
+                    val meta = origin.metadata.code ?: return@withLock CommentOutcome.Unavailable
+                    val ref = referenceOnLine(origin.code, meta, target.line, target.token, target.tokenKind)
+                        ?: return@withLock CommentOutcome.Unavailable
+                    decompiler.setComment(ref, text)
+                    // The engine invalidated its caches on a real change; drop ours so a re-fetch is fresh.
+                    documentCache.clear()
+                    CommentOutcome.Applied(removed = text.isBlank())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    CommentOutcome.Unavailable
+                }
+            }
+        }
+    }
+
+    /**
+     * Read the user comment on the symbol at [target] for the dialog's prefill: resolve the clicked token to
+     * its [CodeNodeRef] (the same step [setComment] uses) and look it up in [Decompiler.comments]. Under the
+     * single [lock] on [Dispatchers.Default]; fault-isolated to `null` (rule 4), never a throw.
+     */
+    override suspend fun commentFor(target: CommentQuery): String? {
+        val fqn = classFqnOf(target.classNode) ?: return null
+        val format = outputFormatFor(target.view)
+        return withContext(Dispatchers.Default) {
+            lock.withLock {
+                try {
+                    val origin = decompiler.decompileClass(fqn, format) ?: return@withLock null
+                    val meta = origin.metadata.code ?: return@withLock null
+                    val ref = referenceOnLine(origin.code, meta, target.line, target.token, target.tokenKind)
+                        ?: return@withLock null
+                    decompiler.comments[ref]
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        }
+    }
+
+    /**
+     * The commented symbols projected to [referenceFqn]-shaped strings (see [commentReferenceKey]) so the
+     * code area can label its context item "Edit comment…" vs "Add comment…" with a synchronous membership
+     * test. Under the single [lock]; a cheap read of [Decompiler.comments].
+     */
+    override suspend fun commentedReferences(): Set<String> = withContext(Dispatchers.Default) {
+        lock.withLock { decompiler.comments.keys.mapTo(HashSet()) { commentReferenceKey(it) } }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     /**
@@ -849,6 +919,20 @@ internal fun usageSymbolLabel(ref: CodeNodeRef): String = when (ref) {
     is ClassNodeRef -> ref.fullName.substringAfterLast('.').substringAfterLast('$')
     is MethodNodeRef -> "${ref.name}(${ref.argTypeDescriptors.joinToString(", ") { simpleTypeName(it) }})"
     is FieldNodeRef -> ref.name
+    else -> ref.toString()
+}
+
+/**
+ * Project a commented [CodeNodeRef] to the SAME fully-qualified string [com.jadxmp.ui.workbench.referenceFqn]
+ * builds for a code token — a class by fqn; a method/field as `owner.member` — so the code area can match the
+ * clicked token against the commented-symbol set for its "Add comment…" vs "Edit comment…" label. Best-effort
+ * for that label only (a method's overload arity is dropped, matching `referenceFqn`); the dialog itself
+ * resolves the precise ref via [DecompilerClient.commentFor]. Pure; `internal` for direct testing.
+ */
+internal fun commentReferenceKey(ref: CodeNodeRef): String = when (ref) {
+    is ClassNodeRef -> ref.fullName
+    is MethodNodeRef -> "${ref.ownerClass}.${ref.name}"
+    is FieldNodeRef -> "${ref.ownerClass}.${ref.name}"
     else -> ref.toString()
 }
 

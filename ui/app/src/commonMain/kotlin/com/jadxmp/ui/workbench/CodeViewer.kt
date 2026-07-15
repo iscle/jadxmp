@@ -146,6 +146,21 @@ fun CodeViewer(
      * constructor / nested class / enum member with a reason shown in the dialog — fault isolation).
      */
     onRename: ((line: Int, token: CodeToken) -> Unit)? = null,
+    /**
+     * "Add comment…" / "Edit comment…" — open the comment dialog for the clicked token's resolved symbol.
+     * Receives the clicked line + token; the workbench builds the engine query (adding the open class + view)
+     * and resolves it through the same click-to-definition path as "Rename". Null hides the item; when present
+     * it is enabled only for a token that resolves to a class/method/field reference (the same predicate as
+     * "Copy reference"), so a package/local/keyword offers nothing. The label reads "Edit comment…" when a
+     * comment already exists on that symbol (see [commentedReferences]), else "Add comment…".
+     */
+    onComment: ((line: Int, token: CodeToken) -> Unit)? = null,
+    /**
+     * Fully-qualified reference strings (the [referenceFqn] shape) of the symbols that currently carry a user
+     * comment, so the comment context item can show "Edit comment…" vs "Add comment…" from a synchronous
+     * membership test on the clicked token's reference. Empty when nothing is commented.
+     */
+    commentedReferences: Set<String> = emptySet(),
     /** "Save file" — write this document's rendered text to disk. Null hides the menu item (no saver). */
     onSaveFile: (() -> Unit)? = null,
     /** Word-wrap toggle (P1#11): when true, lines wrap instead of panning under a horizontal scroll. */
@@ -370,6 +385,15 @@ fun CodeViewer(
                     // class/method/field token); opens a dialog, the rename runs async through the engine.
                     onRename?.let { rename ->
                         ContextMenuItem("Rename…", enabled = reference != null) { rename(m.line, m.token) }
+                    },
+                    // "Add comment…" / "Edit comment…" — same click-to-def resolution as "Rename" (enabled only
+                    // for a navigable token). The Add-vs-Edit label is a synchronous membership test of the
+                    // token's reference against the commented-symbol set; the dialog runs async through the engine.
+                    onComment?.let { comment ->
+                        val hasComment = reference != null && reference in commentedReferences
+                        ContextMenuItem("${commentActionLabel(hasComment)}…", enabled = reference != null) {
+                            comment(m.line, m.token)
+                        }
                     },
                     // "Save file" (Ctrl/Cmd+S) — appended only when a FileSaver is wired.
                     onSaveFile?.let { save -> ContextMenuItem("Save file") { save() } },

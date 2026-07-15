@@ -7,6 +7,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import com.jadxmp.ui.client.CodeDocument
 import com.jadxmp.ui.client.CodeToken
 import com.jadxmp.ui.client.CodeView
+import com.jadxmp.ui.client.CommentOutcome
+import com.jadxmp.ui.client.CommentQuery
 import com.jadxmp.ui.client.DEFAULT_CODE_FONT_SIZE_SP
 import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.ExportRequest
@@ -147,6 +149,14 @@ data class WorkbenchUiState(
     val usages: UsagesUiState? = null,
     /** Rename dialog state (target + typed input + inline rejection reason). Null when the dialog is closed. */
     val rename: RenameDialogUiState? = null,
+    /** Comment dialog state (target + prefilled/typed note + the existing comment). Null when the dialog is closed. */
+    val comment: CommentDialogUiState? = null,
+    /**
+     * Fully-qualified reference strings ([referenceFqn] shape) of the symbols that currently carry a user
+     * comment, so the code area labels its context item "Edit comment…" vs "Add comment…" synchronously.
+     * Empty when nothing is commented; refreshed after each comment edit.
+     */
+    val commentedRefs: Set<String> = emptySet(),
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -257,6 +267,14 @@ class WorkbenchState(
      * over a newer dialog/close. Symmetric to [usagesGeneration]; access is on [scope]'s single dispatcher.
      */
     private var renameGeneration = 0
+
+    /**
+     * Generation guard for the Comment flow, bumped on every open/submit/remove and on [closeCommentDialog],
+     * so a superseded comment action's late result (its affected class re-decompiles on the client, or the
+     * async prefill of a dialog the user already dismissed) can never write back over a newer dialog/close.
+     * Symmetric to [renameGeneration]; access is on [scope]'s single dispatcher — no atomics.
+     */
+    private var commentGeneration = 0
 
     /**
      * Best-effort seed for the Find bar / "Search selection", set from the last code token the user
@@ -1128,6 +1146,112 @@ class WorkbenchState(
         }
         // Reload the visible document so the new name renders now (not on next focus). ensureDocument
         // re-syncs Find and adopts the (possibly renamed) tab title too.
+        val active = _ui.value.tabs.active
+        if (active != null) ensureDocument(active.nodeId, active.view)
+    }
+
+    // ── Comment (code-area right-click) ───────────────────────────────────────
+
+    /**
+     * Open the Comment dialog on the symbol under a code-area right-click. Unlike [openRenameDialog] (which
+     * prefills synchronously from the clicked token), the note is prefilled from the ENGINE's current comment
+     * on that symbol — so this resolves the clicked position through [DecompilerClient.commentFor] on [scope]
+     * first (cheap: the open class is already cached), then shows the dialog seeded with the existing note (or
+     * empty). Epoch- and generation-guarded: a prefill superseded by a new project or a newer comment action is
+     * dropped. A blank token opens nothing.
+     */
+    fun openCommentDialog(classNode: NodeId, view: CodeView, line: Int, token: CodeToken) {
+        val name = token.text.trim()
+        if (name.isEmpty()) return
+        val target = CommentQuery(classNode, view, line, token.text, token.kind)
+        val epoch = openEpoch
+        val generation = ++commentGeneration
+        scope.launch {
+            val existing = runCatching { client.commentFor(target) }.getOrNull()
+            // A newer project / comment action superseded this prefill before it resolved — drop it.
+            if (epoch != openEpoch || generation != commentGeneration) return@launch
+            _ui.update {
+                it.copy(
+                    comment = CommentDialogUiState(
+                        target = target,
+                        symbolName = name,
+                        existingComment = existing,
+                        input = existing.orEmpty(),
+                    ),
+                )
+            }
+        }
+    }
+
+    /** Update the typed note as the user edits. No error to clear (a comment is never rejected). */
+    fun setCommentInput(text: String) {
+        if (_ui.value.comment == null) return
+        _ui.update { it.copy(comment = it.comment?.copy(input = text)) }
+    }
+
+    /** Close the Comment dialog and invalidate any in-flight comment action's late result (generation bump). */
+    fun closeCommentDialog() {
+        commentGeneration++
+        _ui.update { it.copy(comment = null) }
+    }
+
+    /** Commit the typed note (Save). Blank text removes the comment — the engine treats blank as a removal. */
+    fun submitComment() {
+        val dialog = _ui.value.comment ?: return
+        applyComment(dialog.input)
+    }
+
+    /** Remove the comment (the dialog's Remove affordance): a set with blank text, which the engine clears. */
+    fun removeComment() = applyComment("")
+
+    /**
+     * Apply [text] to the dialog's target through [DecompilerClient.setComment] on [scope] (the caller's
+     * thread is never blocked; a change re-decompiles the affected class). A comment is free text the engine
+     * sanitizes, so there is no rejection: on [CommentOutcome.Applied] the dialog closes and the active
+     * document reloads so the note appears/disappears ([refreshAfterComment]); on [CommentOutcome.Unavailable]
+     * (the token didn't resolve — rare, the menu item is gated like rename) the dialog just closes, nothing
+     * changed. Epoch- and generation-guarded: an action superseded by a new project or a newer dialog action is
+     * dropped.
+     */
+    private fun applyComment(text: String) {
+        val dialog = _ui.value.comment ?: return
+        if (dialog.busy) return
+        val epoch = openEpoch
+        val generation = ++commentGeneration
+        _ui.update { it.copy(comment = it.comment?.copy(busy = true)) }
+        scope.launch {
+            val outcome = runCatching { client.setComment(dialog.target, text) }
+                .getOrElse { CommentOutcome.Unavailable }
+            // A superseding project drops the result entirely (nothing here belongs to it).
+            if (epoch != openEpoch) return@launch
+            // Close THIS dialog only if it is still the one showing, so a newer dialog is never clobbered.
+            if (generation == commentGeneration) _ui.update { it.copy(comment = null) }
+            if (outcome is CommentOutcome.Applied) refreshAfterComment(epoch, outcome.removed)
+        }
+    }
+
+    /**
+     * Refresh the UI after a comment was set/removed so the note shows or disappears. The engine (and the
+     * client's own caches) were already invalidated; here we rebuild only what a comment can change: the
+     * rendered documents (dropped, then the active one reloaded) and the commented-symbol set (drives the
+     * code-area Add/Edit label). A comment is INLINE in the code, not a tree label, so — unlike
+     * [refreshAfterRename] — the tree roots/children are deliberately left untouched (no relabeling), keeping
+     * expansion, tabs and selection exactly as they were. Epoch-guarded so a refresh superseded by a new
+     * [openProject] is dropped. Runs inside [applyComment]'s coroutine.
+     */
+    private suspend fun refreshAfterComment(epoch: Int, removed: Boolean) {
+        if (epoch != openEpoch) return
+        val commented = runCatching { client.commentedReferences() }.getOrNull().orEmpty()
+        if (epoch != openEpoch) return
+        _ui.update {
+            it.copy(
+                // The engine cache is invalidated; drop the UI's rendered copies so a re-fetch is fresh.
+                documents = emptyMap(),
+                commentedRefs = commented,
+                status = if (removed) "Comment removed" else "Comment saved",
+            )
+        }
+        // Reload the visible document so the note renders/clears now (other tabs reload lazily on focus).
         val active = _ui.value.tabs.active
         if (active != null) ensureDocument(active.nodeId, active.view)
     }

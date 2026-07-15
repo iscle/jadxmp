@@ -120,6 +120,43 @@ interface DecompilerClient {
      * subsequent fetch reflects the revert. Backs a future "Clear renames" affordance.
      */
     suspend fun clearRenames() {}
+
+    /**
+     * Attach (or update) a **user comment** on the symbol at a code-area position — jadx-gui's "Add comment",
+     * driven from the code viewer's right-click. [target] carries where the user invoked it (the open class
+     * node + shown view + clicked line/token); the client resolves that position to the engine's exact
+     * reference key (the SAME `CodeNodeRef` space go-to-definition / rename use) and attaches [text] to that
+     * symbol's definition, rendered as `//` line(s) immediately before it on the next fetch (see
+     * `com.jadxmp.api.Decompiler.setComment`). A **blank** [text] REMOVES any existing comment — one call
+     * serves the dialog's Save and its Remove.
+     *
+     * Unlike [rename], a comment is **free text and never rejected**: the engine sanitizes it so it can never
+     * break the source, so no legal-identifier / collision check applies. This therefore returns only
+     * [CommentOutcome.Applied] (it took effect; the render caches are invalidated so a re-fetch shows/hides the
+     * note) or [CommentOutcome.Unavailable] when the token does not resolve to a commentable symbol or no
+     * engine backs this client (rule 4: never a throw). `suspend` and cancelable because a change re-decompiles
+     * the affected class on the next fetch. The default is [CommentOutcome.Unavailable]; the production client
+     * mutates the engine, the stub returns a benign outcome.
+     */
+    suspend fun setComment(target: CommentQuery, text: String): CommentOutcome = CommentOutcome.Unavailable
+
+    /**
+     * The user comment currently attached to the symbol at [target] (for **prefilling** the comment dialog),
+     * or `null` when the token resolves to no commented symbol. Resolves the clicked position to its exact
+     * `CodeNodeRef` — the same click-to-definition path [setComment]/[rename] use — and reads the engine's
+     * comment store. Cheap by contract (the open class is already decompiled/cached); fault-isolated to `null`,
+     * never a throw. The default is `null`: a client with no engine backing surfaces no comment.
+     */
+    suspend fun commentFor(target: CommentQuery): String? = null
+
+    /**
+     * The symbols that currently carry a user comment, each projected to the SAME fully-qualified reference
+     * string [com.jadxmp.ui.workbench.referenceFqn] builds for a code token (a class fqn, or `owner.member`),
+     * so the code area can label its context item "Edit comment…" vs "Add comment…" with a cheap synchronous
+     * membership test. Empty when nothing is commented; refreshed after every comment edit. The default is
+     * empty — a client with no engine backing has no comments.
+     */
+    suspend fun commentedReferences(): Set<String> = emptySet()
 }
 
 /**
@@ -192,6 +229,27 @@ data class RenameQuery(
 )
 
 /**
+ * Where the user invoked "Add comment" / "Edit comment" in the code area — the same clicked-position shape as
+ * [RenameQuery]/[UsageQuery], since a comment resolves its target through the exact click-to-definition
+ * mechanism find-usages and rename use. Deliberately UI-typed (no engine `CodeNodeRef`) so the
+ * [DecompilerClient] seam stays engine-free; the impl does the ref resolution internally.
+ *
+ * @property classNode the open class (`cls:`) node whose decompiled source was right-clicked.
+ * @property view the shown source view — the engine annotates positions per format, so the query must match it.
+ * @property line the 1-based clicked line within that document.
+ * @property token the clicked identifier token's text (the symbol name at the caret).
+ * @property tokenKind the token's [TokenKind], disambiguating a name used as both, say, a field and a method.
+ */
+@Immutable
+data class CommentQuery(
+    val classNode: NodeId,
+    val view: CodeView,
+    val line: Int,
+    val token: String,
+    val tokenKind: TokenKind,
+)
+
+/**
  * The outcome of a [DecompilerClient.rename] — the UI-facing projection of the engine's `RenameResult`
  * (kept engine-type-free like the rest of the seam; the production client maps one to the other). A rename
  * either takes effect ([Applied], carrying the [Applied.name] now emitted everywhere) or is **rejected
@@ -207,4 +265,20 @@ sealed interface RenameOutcome {
 
     /** The rename was rejected and nothing changed; [reason] is a ready-to-show explanation. */
     data class Rejected(val reason: String) : RenameOutcome
+}
+
+/**
+ * The outcome of a [DecompilerClient.setComment] — the UI-facing signal the workbench refreshes on. Because a
+ * comment is free text the engine sanitizes, it is **never rejected** (there is no [RenameOutcome.Rejected]
+ * analog): either it took effect ([Applied], with [Applied.removed] true when a blank text cleared the note) or
+ * the clicked token did not resolve to a commentable symbol / no engine backs this client ([Unavailable]), in
+ * which case nothing changed. Both are terminal — the dialog closes either way; only [Applied] triggers a refresh.
+ */
+@Immutable
+sealed interface CommentOutcome {
+    /** The comment was set, updated, or removed; the render caches were invalidated so a re-fetch reflects it. */
+    data class Applied(val removed: Boolean) : CommentOutcome
+
+    /** The token did not resolve to a commentable symbol (or no engine backs this client); nothing changed. */
+    data object Unavailable : CommentOutcome
 }
