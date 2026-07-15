@@ -210,6 +210,84 @@ class FixMultiEntryLoopsTest {
         assertNoLeakedBranch(method)
     }
 
+    /**
+     * **Shape 3 — fallback header back-edge split (the TestMultiEntryLoop2 orientation).** A two-entry
+     * cycle {H, L, M} where the *second* entry is the straight-line back-edge header `M` reached from an
+     * outside block `G` via a DFS *tree* edge — NOT the header-successor cross edge shape 1 keys on, and
+     * with no cross edge into the loop-end, so shape 2 also declines. jadxmp's DFS discovers `M` before the
+     * dominating exit-test header `H`, so the multi-entry back edge is `L -> M` (header `M`, straight-line
+     * `M -> H`). The fallback duplicates `M` onto the back edge (`L -> copy(M) -> H`), leaving `G -> M -> H`
+     * intact, making the loop single-entry (header `H`) and reducible. Mirrors `corpus/.../TestMultiEntryLoop2`.
+     *
+     * CFG: B0 `if r0==0 goto G(4) else F(2)`; F(2,3) -> H(6); G(4,5) -> M(8); H(6) `if r0==0 goto exit(10)
+     * else L(7)`; L(7) latch `if r0==0 goto H(6) else M(8)`; M(8,9) straight -> H(6). Cycle {H,L,M} entered
+     * at H (from F) and M (from G).
+     */
+    @Test
+    fun headerBackEdgeSplitReducesTreeEntryTwoEntryLoop() {
+        val reader = {
+            FakeCodeReader(
+                1,
+                listOf(
+                    Insn(Opcode.CONST, 0, intArrayOf(0), literal = 0),
+                    Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4), // B0: taken->G(4), fall->F(2)
+                    invoke(2), Insn(Opcode.GOTO, 3, target = 6), // F -> H(6)
+                    invoke(4), Insn(Opcode.GOTO, 5, target = 8), // G -> M(8)
+                    Insn(Opcode.IF_EQZ, 6, intArrayOf(0), target = 10), // H: taken->exit(10), fall->L(7)
+                    Insn(Opcode.IF_EQZ, 7, intArrayOf(0), target = 6), // L latch: taken(succ0)->H(6), fall->M(8)
+                    invoke(8), Insn(Opcode.GOTO, 9, target = 6), // M (straight) -> H(6)
+                    Insn(Opcode.RETURN_VOID, 10), // exit
+                ),
+            )
+        }
+        val method = TestPipeline.buildMethod(reader(), methodName = "m")
+        TestPipeline.dominators(method)
+
+        assertTrue(isReducible(method), "the tree-entry multi-entry loop must be reducible after node-splitting")
+        assertEquals(
+            baselineBlocks(reader) + 1,
+            method.blocks.size,
+            "exactly one straight-line header block is duplicated (bounded node-splitting)",
+        )
+
+        // Rule-4 polarity: the latch L is a two-way `if`; its taken arm (succ[0]) targets H and is left
+        // untouched, its fall-through arm (succ[1], the back edge to M) is the one rerouted to copy(M).
+        // The slot order MUST be preserved — a swap would invert the loop-continue/exit test.
+        val latch = blockWithOffset(method, 7)
+        assertEquals(2, latch.successors.size, "latch stays two-way")
+        assertTrue(latch.successors[0].instructions.any { it.offset == 6 }, "taken arm (succ[0]) still targets H(6)")
+        assertTrue(
+            latch.successors[1].instructions.any { it.offset == 8 },
+            "fall-through arm (succ[1]) routes into the duplicated M (offset 8)",
+        )
+    }
+
+    @Test
+    fun headerBackEdgeSplitTwoEntryLoopStructuresFully() {
+        val method = TestPipeline.buildMethod(
+            FakeCodeReader(
+                1,
+                listOf(
+                    Insn(Opcode.CONST, 0, intArrayOf(0), literal = 0),
+                    Insn(Opcode.IF_EQZ, 1, intArrayOf(0), target = 4),
+                    invoke(2), Insn(Opcode.GOTO, 3, target = 6),
+                    invoke(4), Insn(Opcode.GOTO, 5, target = 8),
+                    Insn(Opcode.IF_EQZ, 6, intArrayOf(0), target = 10),
+                    Insn(Opcode.IF_EQZ, 7, intArrayOf(0), target = 6),
+                    invoke(8), Insn(Opcode.GOTO, 9, target = 6),
+                    Insn(Opcode.RETURN_VOID, 10),
+                ),
+            ),
+            methodName = "m",
+        )
+        TestPipeline.structured(method)
+
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "the split two-entry loop must structure")
+        assertFalse(method.contains(AttrFlag.HAS_ERROR), "a faithfully structured method carries no error")
+        assertNotNull(findLoop(method.region), "a real LoopRegion must be produced")
+        assertNoLeakedBranch(method)
+    }
+
     // ---- helpers ------------------------------------------------------------
 
     private fun blockWithOffset(method: IrMethod, offset: Int) =
