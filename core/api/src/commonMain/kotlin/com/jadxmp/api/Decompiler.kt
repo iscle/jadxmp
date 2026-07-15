@@ -3,6 +3,7 @@ package com.jadxmp.api
 import com.jadxmp.api.internal.CodegenBridge
 import com.jadxmp.api.internal.RenderabilityGuard
 import com.jadxmp.codegen.CodeInfo
+import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.java.JavaCodeGenerator
 import com.jadxmp.codegen.kotlin.KotlinCodeGenerator
 import com.jadxmp.ir.attr.AttrFlag
@@ -60,6 +61,11 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     // (the UI's format toggle relies on this). Lowering is format-independent and runs at most once per
     // class (guarded by LOWERED); only the pure leaf codegen re-runs per format.
     private val cache = LinkedHashMap<ClassCacheKey, DecompiledClass>()
+    // Lazily-built find-usages inverse index, keyed by output format: the referencing offsets/lines a
+    // [UsageSite] reports are format-specific (Java vs Kotlin render differently), so — like [cache] —
+    // each format gets its own index. Built on the first [findUsages] for a format and reused; cleared by
+    // [load]. Never rebuilt implicitly, so repeated queries are O(hits) map lookups.
+    private val usageIndexCache = LinkedHashMap<OutputFormat, UsageIndex>()
     private val runner: PassRunner = buildRunner()
     private val loadDiagnostics = ArrayList<String>()
     private var resourcesInternal: ApkResources? = null
@@ -87,6 +93,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     fun load(name: String, bytes: ByteArray): Int {
         loadDiagnostics.clear()
         cache.clear()
+        usageIndexCache.clear()
         resourcesInternal = null
         inputClasses = emptyMap()
         val loader = try {
@@ -170,6 +177,43 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Every site that **references** the symbol [target] — jadx-gui's "Find Usages". [target] is a
+     * [CodeNodeRef], the one symbol identity the whole engine already speaks: pass a [MemberInfo.key] for a
+     * method/field (straight from the navigation tree), or `com.jadxmp.codegen.ClassNodeRef(binaryName)`
+     * for a class (a [classNames] entry). No parallel query scheme is introduced — this is the exact key
+     * the codegen attaches to each reference, so the lookup is a direct inversion.
+     *
+     * **What it is:** the inverse of click-to-definition. The backend already annotates every emitted
+     * reference with its target (`ReferenceAnnotation`); [findUsages] inverts (site → target) into
+     * (target → [UsageSite]s) across all classes. Excludes the symbol's own declaration and local-variable
+     * occurrences, so the result is uses only.
+     *
+     * **Cost / correctness trade-off (honest):** a class's references are only known once it is decompiled,
+     * so a *complete* answer requires decompiling **every** class. The first [findUsages] for a given
+     * [format] therefore forces a full decompile of the app (O(all classes)) to build the inverse index,
+     * then caches it — every subsequent query, for any symbol, is an O(hits) map lookup. This is the
+     * correct-but-eager choice (rule 2: never a partial/wrong answer); the one-time cost is the price of
+     * completeness. It runs the **cached, sequential** [decompileClass] path, so it also warms that cache
+     * (classes the UI later opens are already done) and is safe to call repeatedly — unlike
+     * [decompileAllParallel], it never leaves a half-lowered instance. Memory is O(total references in the
+     * app); the index is dropped on [load]. On the single-threaded wasm/browser UI a first call over a
+     * large app blocks for the full decompile — a caller that must stay responsive should drive it off the
+     * critical path (or pre-warm via [decompileAll]).
+     *
+     * **Fault isolation (rule 4):** a class that throws while decompiling is skipped, the rest are still
+     * indexed; an unknown/unreferenced [target], or nothing loaded, returns an empty list — never a throw.
+     * Results are deterministically ordered (by referring class name, then source position).
+     *
+     * [format] selects which rendering's positions to report (default the instance's [DecompilerArgs.outputFormat]);
+     * each format is indexed independently, mirroring [decompileClass].
+     */
+    fun findUsages(target: CodeNodeRef, format: OutputFormat = args.outputFormat): List<UsageSite> {
+        if (root == null) return emptyList()
+        val index = usageIndexCache.getOrPut(format) { buildUsageIndexNow(format) }
+        return index.query(target)
     }
 
     /**
@@ -312,6 +356,30 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         "// JADXMP: could not export '$binaryName': $reason\n".encodeToByteArray()
 
     // ---- internals ----------------------------------------------------------
+
+    /**
+     * Build the inverse (target → uses) index for [format] by decompiling every top-level class through the
+     * cached [decompileClass] path and inverting each class's reference metadata (see [buildUsageIndex]).
+     *
+     * Fault-isolated per class (rule 4): a class whose decompile throws — or that yields no code metadata —
+     * is skipped, never sinking the whole index. Iteration follows [classNames] order; the pure builder
+     * then sorts each target's sites, so the result is order-independent and deterministic.
+     */
+    private fun buildUsageIndexNow(format: OutputFormat): UsageIndex {
+        val sources = ArrayList<ClassUsageSource>()
+        for (binaryName in classNames) {
+            val decompiled = try {
+                decompileClass(binaryName, format)
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            val metadata = decompiled.metadata.code ?: continue
+            // fromClass is the BINARY name (the decompileClass/classNames key a UI navigates with), not the
+            // emitted source name — the code/metadata are this class's output unit.
+            sources.add(ClassUsageSource(binaryName, decompiled.code, metadata))
+        }
+        return buildUsageIndex(sources)
+    }
 
     /**
      * Index the loaded input classes by their binary (dotted) name, matching the key space of
