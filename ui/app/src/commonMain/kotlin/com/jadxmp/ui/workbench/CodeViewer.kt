@@ -106,6 +106,8 @@ fun CodeViewer(
     onSelectionSeed: (String) -> Unit = {},
     /** "Search selection" — hand the clicked token's text to the global search panel. */
     onSearchSelection: (String) -> Unit = {},
+    /** "Save file" — write this document's rendered text to disk. Null hides the menu item (no saver). */
+    onSaveFile: (() -> Unit)? = null,
 ) {
     val syntax = JadxTheme.colors.syntax
     val scheme = MaterialTheme.colorScheme
@@ -230,6 +232,9 @@ fun CodeViewer(
                     ContextMenuItem("Copy all") {
                         clipboard.setText(AnnotatedString(document.plainText()))
                     },
+                ) + listOfNotNull(
+                    // "Save file" (Ctrl/Cmd+S) — appended only when a FileSaver is wired.
+                    onSaveFile?.let { save -> ContextMenuItem("Save file") { save() } },
                 ),
             )
         }

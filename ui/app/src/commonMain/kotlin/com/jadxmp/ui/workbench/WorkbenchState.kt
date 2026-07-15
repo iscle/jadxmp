@@ -8,6 +8,7 @@ import com.jadxmp.ui.client.CodeDocument
 import com.jadxmp.ui.client.CodeView
 import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.FileOpener
+import com.jadxmp.ui.client.FileSaver
 import com.jadxmp.ui.client.MemberTree
 import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
@@ -15,8 +16,12 @@ import com.jadxmp.ui.client.OpenRequest
 import com.jadxmp.ui.client.SearchQuery
 import com.jadxmp.ui.client.SearchResults
 import com.jadxmp.ui.client.SessionState
+import com.jadxmp.ui.client.SettingsStore
+import com.jadxmp.ui.client.ThemeMode
 import com.jadxmp.ui.client.TreeKind
 import com.jadxmp.ui.client.TreeNode
+import com.jadxmp.ui.client.UiSettings
+import com.jadxmp.ui.client.resolveDark
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -71,8 +76,10 @@ data class WorkbenchUiState(
      * unchanged). A one-shot navigation token — its value is meaningless, only its changes matter.
      */
     val codeNavNonce: Int = 0,
-    /** Preferred source view for newly opened class tabs (Settings → Decompiler default). */
+    /** Preferred source view for newly opened class tabs (Settings → Decompiler default). Persisted. */
     val preferredView: CodeView = CodeView.JAVA,
+    /** Light/dark/system selection, seeded from and persisted through the injected SettingsStore. */
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /** In-editor Find bar state for the active document. Null = the Find bar is hidden. */
     val find: FindUiState? = null,
 ) {
@@ -97,10 +104,28 @@ class WorkbenchState(
     private val client: DecompilerClient,
     private val scope: CoroutineScope,
     private val fileOpener: FileOpener? = null,
+    private val settingsStore: SettingsStore? = null,
+    private val fileSaver: FileSaver? = null,
 ) {
-    private val _ui = MutableStateFlow(WorkbenchUiState())
+    /**
+     * Persisted preferences, loaded once synchronously on construction so the very first frame already
+     * reflects the stored theme / flatten / preferred view (see [SettingsStore]). Absent store =
+     * defaults. Only theme/flatten/view are seeded; all other state starts fresh.
+     */
+    private val loadedSettings: UiSettings = settingsStore?.load() ?: UiSettings()
+
+    private val _ui = MutableStateFlow(
+        WorkbenchUiState(
+            themeMode = loadedSettings.themeMode,
+            preferredView = loadedSettings.preferredView,
+            tree = TreeUiState(flattenPackages = loadedSettings.flattenPackages),
+        ),
+    )
     val ui: StateFlow<WorkbenchUiState> = _ui.asStateFlow()
     val session: StateFlow<SessionState> = client.session
+
+    /** True when a [FileSaver] is wired, so the workbench can show/hide the "Save file" affordances. */
+    val hasSaver: Boolean get() = fileSaver != null
 
     /**
      * Generation counter bumped on every [openProject]. Async results from a superseded project
@@ -182,10 +207,16 @@ class WorkbenchState(
             val resRoots = client.rootNodes(TreeKind.RESOURCES)
             // Superseded by a newer open while we were loading — discard, don't clobber the new project.
             if (epoch != openEpoch) return@launch
-            // A fresh state so a newly opened file never shows the previous project's tabs/documents.
+            // A fresh state so a newly opened file never shows the previous project's tabs/documents,
+            // but carry the persisted preferences (theme / preferred view / flatten) across the reset —
+            // they are user settings, not per-project state. Tree expansion/filter/selection do reset.
+            val prev = _ui.value
             _ui.value = WorkbenchUiState(
                 status = "Ready",
                 roots = mapOf(TreeKind.CLASSES to classRoots, TreeKind.RESOURCES to resRoots),
+                themeMode = prev.themeMode,
+                preferredView = prev.preferredView,
+                tree = TreeUiState(flattenPackages = prev.tree.flattenPackages),
             )
         }
     }
@@ -208,11 +239,56 @@ class WorkbenchState(
 
     fun setFlatten(value: Boolean) {
         _ui.update { it.copy(tree = it.tree.setFlatten(value)) }
+        persistSettings()
     }
 
-    /** Set the preferred default source view for newly opened class tabs (Settings). */
+    /** Set the preferred default source view for newly opened class tabs (Settings). Persisted. */
     fun setPreferredView(view: CodeView) {
         _ui.update { it.copy(preferredView = view) }
+        persistSettings()
+    }
+
+    /** Set the theme mode explicitly (Settings) and persist it. */
+    fun setThemeMode(mode: ThemeMode) {
+        _ui.update { it.copy(themeMode = mode) }
+        persistSettings()
+    }
+
+    /**
+     * Flip the theme from the toolbar / settings toggle. [systemDark] resolves the *current* effective
+     * theme when the stored mode is [ThemeMode.SYSTEM], so the first toggle pins the opposite of what is
+     * actually on screen (never a no-op). The chosen explicit LIGHT/DARK is persisted.
+     */
+    fun toggleTheme(systemDark: Boolean) {
+        val currentlyDark = _ui.value.themeMode.resolveDark(systemDark)
+        setThemeMode(if (currentlyDark) ThemeMode.LIGHT else ThemeMode.DARK)
+    }
+
+    /**
+     * "Save file" (P0#7): write the ACTIVE document's rendered text to a user-chosen destination via the
+     * injected [FileSaver], suggesting `<SimpleName>.<ext>` for a class or the resource's own file name.
+     * A no-op when no saver is wired or no document is loaded (the affordances are disabled then). The
+     * save runs on [scope] and is fault-isolated — a failed/cancelled save is swallowed (rule 4).
+     */
+    fun saveActiveDocument() {
+        val saver = fileSaver ?: return
+        val doc = _ui.value.activeDocument ?: return
+        val name = suggestedFileName(doc.nodeId.value, doc.view)
+        val bytes = doc.plainText().encodeToByteArray()
+        scope.launch { runCatching { saver.save(name, bytes) } }
+    }
+
+    /** Persist the current preferences through the injected store (best-effort; no-op without one). */
+    private fun persistSettings() {
+        val store = settingsStore ?: return
+        val s = _ui.value
+        store.save(
+            UiSettings(
+                themeMode = s.themeMode,
+                flattenPackages = s.tree.flattenPackages,
+                preferredView = s.preferredView,
+            ),
+        )
     }
 
     /**
@@ -821,9 +897,42 @@ class WorkbenchState(
     }
 }
 
+/**
+ * Suggested save name for the active document: `<SimpleName>.<ext>` for a class (extension from the
+ * shown [view]) or the resource's own file name for a resource node. Pure and fault-tolerant (blank
+ * segments fall back to a generic name) so it is unit-tested directly and never throws. [nodeId] is the
+ * raw [NodeId.value]; class ids are `cls:<fqn>`, resource ids `res:<path>`.
+ */
+internal fun suggestedFileName(nodeId: String, view: CodeView): String = when {
+    nodeId.startsWith("res:") ->
+        nodeId.removePrefix("res:").substringAfterLast('/').ifBlank { "resource.txt" }
+    nodeId.startsWith("cls:") -> {
+        val simple = nodeId.removePrefix("cls:").substringAfterLast('.').ifBlank { "Class" }
+        "$simple.${view.fileExtension()}"
+    }
+    else -> {
+        val base = nodeId.substringAfterLast(':').substringAfterLast('/').ifBlank { "file" }
+        "$base.${view.fileExtension()}"
+    }
+}
+
+/** File extension for a source [CodeView]: Java `.java`, Kotlin `.kt`, Smali `.smali`. */
+internal fun CodeView.fileExtension(): String = when (this) {
+    CodeView.JAVA -> "java"
+    CodeView.KOTLIN -> "kt"
+    CodeView.SMALI -> "smali"
+}
+
 /** Create a [WorkbenchState] scoped to the composition. */
 @Composable
-fun rememberWorkbenchState(client: DecompilerClient, fileOpener: FileOpener? = null): WorkbenchState {
+fun rememberWorkbenchState(
+    client: DecompilerClient,
+    fileOpener: FileOpener? = null,
+    settingsStore: SettingsStore? = null,
+    fileSaver: FileSaver? = null,
+): WorkbenchState {
     val scope = rememberCoroutineScope()
-    return remember(client, fileOpener) { WorkbenchState(client, scope, fileOpener) }
+    return remember(client, fileOpener, settingsStore, fileSaver) {
+        WorkbenchState(client, scope, fileOpener, settingsStore, fileSaver)
+    }
 }

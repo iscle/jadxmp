@@ -32,6 +32,14 @@ fun main() {
     ComposeViewport {
         val client = remember { CoreApiDecompilerClient() }
         val fileOpener = remember { BrowserFileOpener() }
-        JadxWorkbenchApp(client = client, fileOpener = fileOpener, dropController = dropController)
+        val fileSaver = remember { BrowserFileSaver() }
+        val settingsStore = remember { BrowserSettingsStore() }
+        JadxWorkbenchApp(
+            client = client,
+            fileOpener = fileOpener,
+            dropController = dropController,
+            settingsStore = settingsStore,
+            fileSaver = fileSaver,
+        )
     }
 }

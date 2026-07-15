@@ -24,6 +24,8 @@ import com.jadxmp.ui.workbench.JadxWorkbenchApp
 fun main() = application {
     val client = remember { CoreApiDecompilerClient() }
     val fileOpener = remember { DesktopFileOpener() }
+    val fileSaver = remember { DesktopFileSaver() }
+    val settingsStore = remember { DesktopSettingsStore() }
     val dropController = remember { FileDropController() }
     Window(
         onCloseRequest = ::exitApplication,
@@ -33,7 +35,13 @@ fun main() = application {
         // Whole-window drop target: a file dropped anywhere opens; the start-page zone shows the
         // hover highlight the controller drives.
         Box(Modifier.fillMaxSize().desktopFileDropTarget(dropController)) {
-            JadxWorkbenchApp(client = client, fileOpener = fileOpener, dropController = dropController)
+            JadxWorkbenchApp(
+                client = client,
+                fileOpener = fileOpener,
+                dropController = dropController,
+                settingsStore = settingsStore,
+                fileSaver = fileSaver,
+            )
         }
     }
 }

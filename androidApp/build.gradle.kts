@@ -12,9 +12,13 @@ kotlin {
     }
 }
 dependencies {
-    implementation(projects.shared)
+    // The shared Compose workbench + the settings/save seams it exposes. androidApp now launches the
+    // real ui:app workbench (like desktopApp/webApp) rather than the template placeholder.
+    implementation(projects.ui.app)
 
     implementation(libs.androidx.activity.compose)
+    // Off-main-thread IO for AndroidFileSaver (Dispatchers.IO / withContext).
+    implementation(libs.kotlinx.coroutines.core)
 
     implementation(libs.compose.uiToolingPreview)
     debugImplementation(libs.compose.uiTooling)

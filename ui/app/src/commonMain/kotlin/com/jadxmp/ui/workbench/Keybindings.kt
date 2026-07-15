@@ -41,6 +41,9 @@ enum class ShortcutAction {
     /** Ctrl/Cmd+W — close the active editor tab. */
     CloseTab,
 
+    /** Ctrl/Cmd+S — save the active document's rendered text to a file. */
+    SaveFile,
+
     /** Alt+Left or Cmd/Ctrl+[ — navigate back in history. */
     GoBack,
 
@@ -81,6 +84,7 @@ val DefaultKeymap: Map<ShortcutAction, List<KeyStroke>> = mapOf(
         KeyStroke(Key.N, primary = true),
     ),
     ShortcutAction.CloseTab to listOf(KeyStroke(Key.W, primary = true)),
+    ShortcutAction.SaveFile to listOf(KeyStroke(Key.S, primary = true)),
     ShortcutAction.GoBack to listOf(
         KeyStroke(Key.DirectionLeft, alt = true),
         KeyStroke(Key.LeftBracket, primary = true),

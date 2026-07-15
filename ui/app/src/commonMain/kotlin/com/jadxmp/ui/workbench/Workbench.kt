@@ -39,9 +39,12 @@ import com.jadxmp.ui.client.CodeView
 import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.FileDropController
 import com.jadxmp.ui.client.FileOpener
+import com.jadxmp.ui.client.FileSaver
 import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.SessionState
+import com.jadxmp.ui.client.SettingsStore
 import com.jadxmp.ui.client.StubDecompilerClient
+import com.jadxmp.ui.client.resolveDark
 import com.jadxmp.ui.component.BrandMark
 import com.jadxmp.ui.component.EditorTabStrip
 import com.jadxmp.ui.component.EmptyState
@@ -64,40 +67,48 @@ import com.jadxmp.ui.theme.JadxTheme
 import com.jadxmp.ui.theme.MonoFontFamily
 
 /**
- * Top-level application composable. Owns the light/dark selection (dark-first, but seeded from the
- * system) and hosts the [Workbench] inside [JadxTheme]. This is the single entry point the platform
- * shells (desktopApp/webApp/androidApp) will call once they depend on ui:app.
+ * Top-level application composable. Owns the [WorkbenchState] and the light/dark selection, and hosts
+ * the [Workbench] inside [JadxTheme]. This is the single entry point the platform shells
+ * (desktopApp/webApp/androidApp) call. Injecting a [SettingsStore] makes theme / flatten / preferred
+ * view persist across restarts (P0#2); injecting a [FileSaver] enables the "Save file" action (P0#7).
+ *
+ * The theme is resolved from the *persisted* [com.jadxmp.ui.client.ThemeMode] (seeded synchronously by
+ * [WorkbenchState] on init) folded with the platform's [isSystemInDarkTheme], so the very first frame
+ * already honours a stored choice instead of always starting from the system default. State is created
+ * here — above [JadxTheme] — precisely so the stored theme can drive [JadxTheme] before the workbench
+ * body composes.
  */
 @Composable
 fun JadxWorkbenchApp(
     client: DecompilerClient = remember { StubDecompilerClient() },
     fileOpener: FileOpener? = null,
     dropController: FileDropController? = null,
+    settingsStore: SettingsStore? = null,
+    fileSaver: FileSaver? = null,
 ) {
     val systemDark = isSystemInDarkTheme()
-    var dark by remember { mutableStateOf(systemDark) }
+    val state = rememberWorkbenchState(client, fileOpener, settingsStore, fileSaver)
+    val ui by state.ui.collectAsState()
+    val dark = ui.themeMode.resolveDark(systemDark)
 
     JadxTheme(darkTheme = dark) {
         Workbench(
-            client = client,
-            fileOpener = fileOpener,
+            state = state,
             dropController = dropController,
             dark = dark,
-            onToggleTheme = { dark = !dark },
+            onToggleTheme = { state.toggleTheme(systemDark) },
         )
     }
 }
 
 @Composable
 fun Workbench(
-    client: DecompilerClient,
+    state: WorkbenchState,
     dark: Boolean,
     onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
-    fileOpener: FileOpener? = null,
     dropController: FileDropController? = null,
 ) {
-    val state = rememberWorkbenchState(client, fileOpener)
     val ui by state.ui.collectAsState()
     val session by state.session.collectAsState()
     var showSearch by remember { mutableStateOf(false) }
@@ -124,6 +135,11 @@ fun Workbench(
                 val i = ui.tabs.activeIndex
                 if (i >= 0) { state.closeTab(i); true } else false
             }
+            // Consume Ctrl/Cmd+S whenever a saver is wired (also stops the browser's "save page" dialog
+            // on web); save only when a document is actually loaded. Exact-modifier match keeps plain
+            // "s" typing and Ctrl+Shift+S untouched (see [resolveShortcut]).
+            ShortcutAction.SaveFile ->
+                if (state.hasSaver) { if (ui.activeDocument != null) state.saveActiveDocument(); true } else false
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
@@ -169,6 +185,8 @@ fun Workbench(
                 onBack = state::goBack,
                 onForward = state::goForward,
                 onOpen = state::requestOpen,
+                canSave = state.hasSaver && ui.activeDocument != null,
+                onSave = state::saveActiveDocument,
                 hasManifest = ui.manifestNode != null,
                 onOpenManifest = state::openManifest,
                 onJumpMainActivity = state::jumpToMainActivity,
@@ -274,6 +292,8 @@ private fun WorkbenchToolbar(
     onBack: () -> Unit,
     onForward: () -> Unit,
     onOpen: () -> Unit,
+    canSave: Boolean,
+    onSave: () -> Unit,
     hasManifest: Boolean,
     onOpenManifest: () -> Unit,
     onJumpMainActivity: () -> Unit,
@@ -299,6 +319,8 @@ private fun WorkbenchToolbar(
         Text(projectLabel, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, fontFamily = MonoFontFamily)
         VDivider()
         ToolbarTextButton("Open", onClick = onOpen)
+        // Save the active document's rendered text (P0#7). Disabled with no document open / no saver.
+        ToolbarTextButton("Save", onClick = onSave, enabled = canSave)
         VDivider()
         ToolbarButton(onClick = onBack, enabled = canBack, square = true) { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
         ToolbarButton(onClick = onForward, enabled = canForward, square = true) { tint -> DirectionCaret(pointsLeft = false, tint = tint) }
@@ -398,6 +420,8 @@ private fun EditorArea(
                     activeFindMatch = ui.find?.activeMatch,
                     onSelectionSeed = state::noteSelectionSeed,
                     onSearchSelection = onSearchSelection,
+                    // "Save file" context-menu action — only offered when a saver is wired.
+                    onSaveFile = if (state.hasSaver) state::saveActiveDocument else null,
                 )
             } else {
                 EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())
