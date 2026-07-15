@@ -1429,22 +1429,36 @@ internal class RegionMaker(
      * Whether leading instruction [insn] of a fold-candidate [block] is the operand's own if-feeding
      * computation — safely inlinable into the compound condition (so nothing is dropped and the operand
      * still evaluates only when the short-circuit reaches it). Requires an emittable leading def to be:
-     *  - **non-throwing** ([mayThrow] false, through wrapped operands) — a throwing op hoisted into the
-     *    short-circuit could raise on a path where the operand should have been skipped;
      *  - **single-use** and **non-coalesced** — a private temporary, not a real multiply-read local;
      *  - **read only within [block]** — its sole read feeds this condition (not a later region / sibling
-     *    arm), so inlining keeps it local and drops no cross-block value.
+     *    arm), so inlining keeps it local and drops no cross-block value;
+     *  - **exception-timing-preserving if it may throw** — see below.
      * A non-emittable leading instruction (`nop`/`goto`; a stray monitor/move-exception is caught by the
      * dedicated honesty nets) is not a statement and never blocks the fold — matching the prior behaviour.
+     *
+     * ### Throwing leading defs (array-get, field-get, call, integer div/rem)
+     * A def that [mayThrow] is inlinable ONLY when [block] has a SINGLE clean predecessor — the condition
+     * head being folded. That single-predecessor fact (also required independently by [isChainableCondition],
+     * so this is belt-and-suspenders) is the exact throw-timing proof: the block, and therefore this def,
+     * executes iff the head takes the arm that reaches it; short-circuit `&&`/`||` evaluates the operand —
+     * with this def inlined as a sub-expression — iff that SAME arm-condition holds. So the def raises on
+     * exactly the paths, and at exactly the program point, it did in the CFG: nothing earlier, nothing later,
+     * nothing on a path the original skipped. (Head operands already fully evaluate, and throw, before the
+     * `||`/`&&` reaches the right operand; De Morgan negation by [makeIf] preserves operand order, so an
+     * inverted arm keeps the same short-circuit.) With ≥2 predecessors [block] is a merge reached on several
+     * paths, where inlining a throwing def into one operand COULD raise where the original skipped it — refuse.
      */
     private fun isInlinableLeadingDef(insn: Instruction, block: BasicBlock): Boolean {
         if (!isEmittable(insn)) return true
-        if (mayThrow(insn)) return false
         val value = insn.result?.ssaValue ?: return false
         if (value.useCount != 1) return false
         val lv = value.localVar
         if (lv != null && lv.ssaValues.size > 1) return false
-        return block.instructions.any { readsSsaValue(it, value) }
+        if (block.instructions.none { readsSsaValue(it, value) }) return false
+        // Throw-timing gate (see KDoc): a throwing def only folds when reached from one predecessor, so the
+        // short-circuit reproduces its exact evaluation condition. Non-throwing defs skip this (always safe).
+        if (mayThrow(insn) && cleanPreds(block).size != 1) return false
+        return true
     }
 
     private fun branchCondition(block: BasicBlock): Condition {
