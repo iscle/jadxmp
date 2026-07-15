@@ -86,28 +86,71 @@ class ThrowsInference(
         val thrown = LinkedHashSet<IrType>()
         val callees = ArrayList<MethodRef>()
 
+        val caught = ArrayList<IrType>()
+        var hasCatchAll = false
+        // Offsets of catch-ALL (`finally` / type-less) handler entries. The `move-exception` at such an
+        // offset defines the compiler-synthesized exception temporary of a `finally`, which the finally
+        // block re-throws (`throw v`). That re-throw is NOT a real checked throw — it merely re-raises
+        // whatever was already in flight, so declaring `throws Throwable` from it is spurious (it breaks
+        // @Override of a method that declares no throws). We therefore drop only that synthesized rethrow;
+        // a genuine checked type thrown *directly* by the try body is still picked up by the normal
+        // `throw`/invoke scan below (jadxmp's linear analysis does not re-derive a checked type that only
+        // ever reaches the exit via the finally rethrow — a pre-existing, safe under-declaration). A
+        // *typed* `catch (Throwable t)` handler is not catch-all, so its `throw t` still propagates.
+        // See MethodThrowsVisitor: finally-rethrow adds no throws clause.
+        val catchAllOffsets = HashSet<Int>()
+        for (t in code.tries) for (h in t.handlers) {
+            if (h.type == null) {
+                hasCatchAll = true
+                catchAllOffsets.add(h.handlerOffset)
+            } else {
+                caught.add(h.type)
+            }
+        }
+
+        // Registers currently holding a Throwable that originated from a catch-all `move-exception`.
+        val catchAllExcRegs = HashSet<Int>()
         for (di in code.instructions) {
             val insn = di.insn
             if (insn is InvokeInstruction) callees.add(insn.methodRef)
             if (insn.opcode == IrOpcode.THROW && insn.argCount > 0) {
                 val reg = (insn.getArg(0) as? RegisterOperand)?.regNum
-                val t = reg?.let { regType[it] }
-                if (t is IrType.Object) thrown.add(t)
+                if (reg == null || reg !in catchAllExcRegs) {
+                    val t = reg?.let { regType[it] }
+                    if (t is IrType.Object) thrown.add(t)
+                }
             }
             // Track the object type a result register holds (for `throw vX`).
             val result = insn.result
             if (result != null) {
                 val produced = producedObjectType(insn, regType)
                 if (produced != null) regType[result.regNum] = produced else regType.remove(result.regNum)
+                if (definesCatchAllException(insn, di.offset, catchAllOffsets, catchAllExcRegs)) {
+                    catchAllExcRegs.add(result.regNum)
+                } else {
+                    catchAllExcRegs.remove(result.regNum)
+                }
             }
         }
 
-        val caught = ArrayList<IrType>()
-        var hasCatchAll = false
-        for (t in code.tries) for (h in t.handlers) {
-            if (h.type == null) hasCatchAll = true else caught.add(h.type)
-        }
         return MethodExceptions(thrown, callees, caught, hasCatchAll)
+    }
+
+    /**
+     * True when [insn] defines its result register with the catch-all exception temporary: either the
+     * `move-exception` at a catch-all handler entry ([catchAllOffsets]) or a plain `move` copying an
+     * already-flagged register. Used to skip a `finally` re-throw from the declared throws.
+     */
+    private fun definesCatchAllException(
+        insn: Instruction,
+        offset: Int,
+        catchAllOffsets: Set<Int>,
+        catchAllExcRegs: Set<Int>,
+    ): Boolean = when {
+        insn.opcode == IrOpcode.MOVE_EXCEPTION -> offset in catchAllOffsets
+        insn.opcode == IrOpcode.MOVE && insn.argCount > 0 ->
+            (insn.getArg(0) as? RegisterOperand)?.regNum?.let { it in catchAllExcRegs } == true
+        else -> false
     }
 
     /** The object type a defining instruction puts into its result register, or null (clears it). */
