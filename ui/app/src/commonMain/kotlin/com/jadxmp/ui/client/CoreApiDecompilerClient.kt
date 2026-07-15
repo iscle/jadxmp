@@ -205,58 +205,73 @@ class CoreApiDecompilerClient(
         val fqn = classFqnOf(node)
         return withContext(Dispatchers.Default) {
             lock.withLock {
-                documentCache[key]?.let { return@withLock it }
-                if (ResourceSurface.isResourceNode(node)) {
-                    // Resource text (manifest/xml/table) decodes cheaply and synchronously on the client.
-                    // A missing provider (non-APK) or a null decode both degrade to an honest placeholder.
-                    val provider = resourceProvider
-                    val doc = if (provider != null) {
-                        ResourceSurface.document(provider, node, view)
-                    } else {
-                        ResourceSurface.unavailable(node, view)
+                // Fault isolation (rule 4): code() is the workbench's lone decompile entry, called from a
+                // plain scope.launch — so if it THREW, that uncaught exception would cancel the whole
+                // workbench coroutine scope (every in-flight/future tree load, doc load, search) and freeze
+                // the UI on web. decompileClass / smali / colorize can each fault, so the entire render is
+                // guarded: any fault degrades to an honest error document and code() never throws. The
+                // sibling engine paths (findUsages / rename / memberLocation) guard themselves the same way.
+                try {
+                    documentCache[key]?.let { return@withLock it }
+                    if (ResourceSurface.isResourceNode(node)) {
+                        // Resource text (manifest/xml/table) decodes cheaply and synchronously on the client.
+                        // A missing provider (non-APK) or a null decode both degrade to an honest placeholder.
+                        val provider = resourceProvider
+                        val doc = if (provider != null) {
+                            ResourceSurface.document(provider, node, view)
+                        } else {
+                            ResourceSurface.unavailable(node, view)
+                        }
+                        documentCache[key] = doc
+                        return@withLock doc
                     }
+                    if (fqn == null) {
+                        return@withLock errorDocument(node, view, "// unsupported node: ${node.value}")
+                    }
+                    // The bytecode view: disassemble the class straight from the input model (no pipeline). It
+                    // shares the (node, view) cache with Java/Kotlin, so toggling to Smali is cached too. Fault
+                    // isolation (rule 4): a null/undecodable smali degrades to an honest placeholder, never a
+                    // crash. Coloring is minimal + syntactic (no engine metadata for smali), see SmaliColorizer.
+                    if (view == CodeView.SMALI) {
+                        // Smali is per DEX class, so a member/nested node must resolve to its OWN declaring dex
+                        // class — not the top-level unit that Java/Kotlin fold it into. classFqnOf() returns the
+                        // top-level fqn (right for the source backends); smaliClassFqnOf() returns the inner
+                        // class for a nested-class node and the declaring class for a plain member.
+                        val smaliFqn = smaliClassFqnOf(node) ?: fqn
+                        val smali = decompiler.smali(smaliFqn)
+                            ?: return@withLock errorDocument(node, view, "# smali unavailable: $smaliFqn")
+                        val doc = CodeDocument(node, smaliFqn.substringAfterLast('.'), view, SmaliColorizer.colorize(smali))
+                        documentCache[key] = doc
+                        return@withLock doc
+                    }
+                    // The per-call format override routes the SAME lowered class to the Java or Kotlin backend
+                    // without reloading. The (node, view) cache key means a class rendered as both Java and
+                    // Kotlin keeps both docs — switching the toggle is instant after first render, and neither
+                    // clobbers the other. Kotlin's honesty markers (`// JADXMP ERROR`) survive as comment text
+                    // and are shown as-is (fault isolation: a partial/error Kotlin render is shown honestly,
+                    // never silently replaced by Java).
+                    val decompiled = decompiler.decompileClass(fqn, outputFormatFor(view))
+                        ?: return@withLock errorDocument(node, view, "// class not found: $fqn")
+                    // Coloring: the Java lexer classifies token shapes for BOTH formats. Kotlin is close enough
+                    // to Java lexically (keywords/strings/comments/numbers) that this is acceptable-but-imperfect
+                    // (e.g. `fun`/`val` are not Kotlin keywords to the Java lexer); a dedicated KotlinLexer is a
+                    // tracked follow-up. Engine CodeMetadata still overrides identifier tokens with precise
+                    // TYPE/METHOD/FIELD kinds + jump targets regardless of format.
+                    // resolveClass reads model.classIndex; we hold the lock, so the read is safe.
+                    val lines = JavaColorizer.colorize(decompiled.code, decompiled.metadata.code) { name ->
+                        model.classIndex[canonicalName(name)]?.let { NodeId("cls:$it") }
+                    }
+                    val doc = CodeDocument(node, decompiled.simpleName, view, lines)
                     documentCache[key] = doc
-                    return@withLock doc
+                    doc
+                } catch (e: CancellationException) {
+                    // Cooperative cancellation must propagate untouched — a cancelled render is not a fault.
+                    throw e
+                } catch (e: Exception) {
+                    // Any engine/colorize fault degrades to an honest error document (never a throw, never a
+                    // stuck tab). Deliberately NOT cached, so a later re-fetch can still succeed if transient.
+                    errorDocument(node, view, "// decompile failed: ${e.message ?: e.toString()}")
                 }
-                if (fqn == null) {
-                    return@withLock errorDocument(node, view, "// unsupported node: ${node.value}")
-                }
-                // The bytecode view: disassemble the class straight from the input model (no pipeline). It
-                // shares the (node, view) cache with Java/Kotlin, so toggling to Smali is cached too. Fault
-                // isolation (rule 4): a null/undecodable smali degrades to an honest placeholder, never a
-                // crash. Coloring is minimal + syntactic (no engine metadata for smali), see SmaliColorizer.
-                if (view == CodeView.SMALI) {
-                    // Smali is per DEX class, so a member/nested node must resolve to its OWN declaring dex
-                    // class — not the top-level unit that Java/Kotlin fold it into. classFqnOf() returns the
-                    // top-level fqn (right for the source backends); smaliClassFqnOf() returns the inner
-                    // class for a nested-class node and the declaring class for a plain member.
-                    val smaliFqn = smaliClassFqnOf(node) ?: fqn
-                    val smali = decompiler.smali(smaliFqn)
-                        ?: return@withLock errorDocument(node, view, "# smali unavailable: $smaliFqn")
-                    val doc = CodeDocument(node, smaliFqn.substringAfterLast('.'), view, SmaliColorizer.colorize(smali))
-                    documentCache[key] = doc
-                    return@withLock doc
-                }
-                // The per-call format override routes the SAME lowered class to the Java or Kotlin backend
-                // without reloading. The (node, view) cache key means a class rendered as both Java and
-                // Kotlin keeps both docs — switching the toggle is instant after first render, and neither
-                // clobbers the other. Kotlin's honesty markers (`// JADXMP ERROR`) survive as comment text
-                // and are shown as-is (fault isolation: a partial/error Kotlin render is shown honestly,
-                // never silently replaced by Java).
-                val decompiled = decompiler.decompileClass(fqn, outputFormatFor(view))
-                    ?: return@withLock errorDocument(node, view, "// class not found: $fqn")
-                // Coloring: the Java lexer classifies token shapes for BOTH formats. Kotlin is close enough
-                // to Java lexically (keywords/strings/comments/numbers) that this is acceptable-but-imperfect
-                // (e.g. `fun`/`val` are not Kotlin keywords to the Java lexer); a dedicated KotlinLexer is a
-                // tracked follow-up. Engine CodeMetadata still overrides identifier tokens with precise
-                // TYPE/METHOD/FIELD kinds + jump targets regardless of format.
-                // resolveClass reads model.classIndex; we hold the lock, so the read is safe.
-                val lines = JavaColorizer.colorize(decompiled.code, decompiled.metadata.code) { name ->
-                    model.classIndex[canonicalName(name)]?.let { NodeId("cls:$it") }
-                }
-                val doc = CodeDocument(node, decompiled.simpleName, view, lines)
-                documentCache[key] = doc
-                doc
             }
         }
     }

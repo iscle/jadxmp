@@ -33,8 +33,12 @@ import com.jadxmp.ui.client.UsageResults
 import com.jadxmp.ui.client.UsageSiteRow
 import com.jadxmp.ui.client.resolveDark
 import com.jadxmp.ui.client.zipExport
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -760,9 +764,16 @@ class WorkbenchState(
     fun runSearch(query: SearchQuery) {
         stopCodeSearch()
         stopMemberSearch()
+        // Epoch-guard the write like every other async result (runCodeSearch/runMemberSearch/ensureDocument):
+        // if an openProject supersedes this search while client.search() is in flight, its (now stale) results
+        // must not land in the fresh project's state. Today client.search() is the only suspension point and
+        // there's no await between the model snapshot and the write, so the gap is masked — but capturing the
+        // epoch keeps the "only the current project's results are shown" invariant robust if that changes.
+        val epoch = openEpoch
         scope.launch {
             _ui.update { it.copy(busy = true, codeSearch = null, memberSearch = null) }
             val results = client.search(query)
+            if (epoch != openEpoch) return@launch
             _ui.update { it.copy(busy = false, searchResults = results, status = "${results.matches.size} matches") }
         }
     }
@@ -1359,9 +1370,21 @@ class WorkbenchState(
         val epoch = openEpoch
         scope.launch {
             _ui.update { it.copy(busy = true) }
-            val doc = client.code(nodeId, view)
+            // Fault isolation (rule 4): the production client.code() is guarded and returns an error document
+            // rather than throwing, but nothing at THIS seam guarantees that for a future/alternative client.
+            // runCatching keeps any throw from escaping this launch and cancelling the whole workbench scope
+            // (the scope-level SupervisorJob is the second line of defence). Cancellation is not a fault, so
+            // rethrow it to keep structured cancellation working; a real fault yields a null doc handled below.
+            val doc = runCatching { client.code(nodeId, view) }
+                .onFailure { if (it is CancellationException) throw it }
+                .getOrNull()
             // A newer project opened while we decompiled — this document belongs to the old one.
             if (epoch != openEpoch) return@launch
+            if (doc == null) {
+                // The load failed; clear the spinner and show an honest status instead of a stuck "busy" tab.
+                _ui.update { it.copy(busy = false, status = "Could not open ${deriveLabel(nodeId)}") }
+                return@launch
+            }
             _ui.update { state ->
                 // Adopt the engine-provided title for the tab if it is more accurate.
                 val tabs = state.tabs.tabs.map { t ->
@@ -1547,11 +1570,43 @@ fun rememberWorkbenchState(
     fileSaver: FileSaver? = null,
     projectExporter: ProjectExporter? = null,
 ): WorkbenchState {
-    val scope = rememberCoroutineScope()
+    // rememberCoroutineScope() gives a scope that is cancelled when the workbench leaves the composition
+    // (no leak). We harden THAT context into the scope WorkbenchState launches on (see [workbenchBackstopScope]):
+    // same single UI dispatcher, plus a SupervisorJob + CoroutineExceptionHandler so one throwing launch can
+    // never cancel the whole workbench scope and freeze the UI on web (rule 4). remember() keyed on the stable
+    // composition scope builds the hardened scope exactly once; parenting keeps leave-composition cancellation.
+    val compositionScope = rememberCoroutineScope()
+    val scope = remember(compositionScope) { workbenchBackstopScope(compositionScope.coroutineContext) }
     return remember(client, fileOpener, settingsStore, fileSaver, projectExporter) {
         WorkbenchState(client, scope, fileOpener, settingsStore, fileSaver, projectExporter)
     }
 }
+
+/**
+ * Harden a composition [parent] context into the workbench's launch scope. Keeps [parent]'s single UI
+ * dispatcher (WorkbenchState assumes ONE dispatcher — that is why it uses no atomics for its epoch /
+ * generation guards), but adds two backstops so the workbench survives a misbehaving launch (rule 4 —
+ * fault isolation):
+ *  - a [SupervisorJob], so a failing child launch cannot cancel its siblings (or the scope itself); and
+ *  - a [CoroutineExceptionHandler], so an uncaught exception escaping ANY launch is absorbed instead of
+ *    tearing the whole scope down — which on the single-threaded web target would freeze the UI (every
+ *    future tree load / doc load / search dies with the scope's Job).
+ *
+ * The SupervisorJob is parented to [parent]'s [Job], so leaving the composition still cancels this scope
+ * (no leak) exactly as a bare `rememberCoroutineScope()` would. Non-`@Composable` so it is unit-testable.
+ */
+internal fun workbenchBackstopScope(parent: CoroutineContext): CoroutineScope =
+    CoroutineScope(parent + SupervisorJob(parent[Job]) + workbenchExceptionHandler)
+
+/**
+ * The workbench's last-resort [CoroutineExceptionHandler]: an uncaught exception that escapes a workbench
+ * launch is swallowed here rather than allowed to cancel the workbench scope. Every launch is already
+ * fault-isolated (decompiles return error documents; async writes are epoch-guarded and try/catch'd), so
+ * this only ever fires for a *future* unguarded throw — and a dropped async result is far less harmful
+ * than a workbench whose scope was cancelled and froze (rule 4). Cancellation never reaches a handler, so
+ * there is nothing to re-raise; the swap-in of a real logger is a tracked follow-up.
+ */
+private val workbenchExceptionHandler = CoroutineExceptionHandler { _, _ -> }
 
 /** Cap on nodes visited by [WorkbenchState.expandSubtree] so "expand subtree" on a giant package can't freeze the single wasm dispatcher (rule 1). */
 private const val MAX_SUBTREE_EXPAND: Int = 2000
