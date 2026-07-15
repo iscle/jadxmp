@@ -1,5 +1,6 @@
 package com.jadxmp.pipeline.structure
 
+import com.jadxmp.input.IndexType
 import com.jadxmp.input.Opcode
 import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.IrOpcode
@@ -15,6 +16,7 @@ import com.jadxmp.ir.region.TryCatchRegion
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.pipeline.PipelineAttrs
 import com.jadxmp.pipeline.support.FakeCodeReader
+import com.jadxmp.pipeline.support.FakeMethodRef
 import com.jadxmp.pipeline.support.Insn
 import com.jadxmp.pipeline.support.TestPipeline
 import kotlin.test.Test
@@ -29,6 +31,11 @@ import kotlin.test.assertTrue
  * cross-block variable it assigns is already declared-dominating (guaranteed by coalescingIsSound).
  */
 class RegionMakerDuplicationTest {
+
+    // A void side-effect call used as a REAL leading statement in the middle condition, so the shared-tail
+    // shape is NOT a foldable short-circuit `a || b` (which would place the tail once) — keeping these
+    // fixtures on the duplication path they are meant to exercise.
+    private val fx = FakeMethodRef("Lc/C;", "fx", "V", emptyList())
 
     /** Every basic block occurrence in the region tree (a duplicated block appears more than once). */
     private fun blockOccurrences(container: IrContainer?, out: MutableList<BasicBlock>) {
@@ -50,19 +57,22 @@ class RegionMakerDuplicationTest {
 
     @Test
     fun sharedReturnBlockIsDuplicatedAcrossArms() {
-        // if (a == 0) return 1; else if (b == 0) return 0; else return 1;
+        // if (a == 0) return 1; else { fx(); if (b == 0) return 0; else return 1; }
         // The `return 1` block is reached from the a==0 arm AND the (a!=0 && b!=0) goto — a shared tail
-        // that must be duplicated, not treated as a merge.
+        // that must be duplicated, not treated as a merge. The middle block runs a real side effect (fx())
+        // before its `if`, so it is NOT a foldable `a || b` short circuit (which would place the tail once):
+        // this stays on the duplication path the test exercises.
         val reader = FakeCodeReader(
             4, // v0 = return local; v2 = a (p0); v3 = b (p1)
             listOf(
-                Insn(Opcode.IF_EQZ, 0, intArrayOf(2), target = 3), // if (a == 0) -> return-1 block
-                Insn(Opcode.IF_EQZ, 1, intArrayOf(3), target = 5), // else if (b == 0) -> return-0 block
-                Insn(Opcode.GOTO, 2, target = 3), // else -> return-1 block (shared)
-                Insn(Opcode.CONST, 3, intArrayOf(0), literal = 1),
-                Insn(Opcode.RETURN, 4, intArrayOf(0)), // return 1
-                Insn(Opcode.CONST, 5, intArrayOf(0), literal = 0),
-                Insn(Opcode.RETURN, 6, intArrayOf(0)), // return 0
+                Insn(Opcode.IF_EQZ, 0, intArrayOf(2), target = 4), // if (a == 0) -> return-1 block
+                Insn(Opcode.INVOKE_STATIC, 1, indexType = IndexType.METHOD_REF, methodRef = fx), // real leading stmt
+                Insn(Opcode.IF_EQZ, 2, intArrayOf(3), target = 6), // else if (b == 0) -> return-0 block
+                Insn(Opcode.GOTO, 3, target = 4), // else -> return-1 block (shared)
+                Insn(Opcode.CONST, 4, intArrayOf(0), literal = 1),
+                Insn(Opcode.RETURN, 5, intArrayOf(0)), // return 1
+                Insn(Opcode.CONST, 6, intArrayOf(0), literal = 0),
+                Insn(Opcode.RETURN, 7, intArrayOf(0)), // return 0
             ),
         )
         val method = TestPipeline.buildMethod(reader, returnType = IrType.INT, argTypes = listOf(IrType.INT, IrType.INT))
@@ -87,18 +97,22 @@ class RegionMakerDuplicationTest {
         // BLOCK_LOCAL_TEMP. The anti-miscompile invariant is therefore: a duplicated block may carry an
         // intra-block temp, but every such temp MUST be marked BLOCK_LOCAL_TEMP (an unmarked duplicated temp
         // would declare v0 in one copy and leave a bare undeclared `v0 = p0*p1` in the other — rule-4 loss).
+        // The middle block runs a real side effect (fx()) before its `if`, so it is NOT a foldable `a || b`
+        // short circuit (which would place the tail once) — keeping the block-local-temp tail on the
+        // duplication path this test exercises.
         val reader = FakeCodeReader(
             6, // v0, v1 locals; v4 = p0, v5 = p1
             listOf(
-                Insn(Opcode.IF_EQZ, 0, intArrayOf(4), target = 3), // if (p0 == 0) -> tail
-                Insn(Opcode.IF_NEZ, 1, intArrayOf(5), target = 7), // else if (p1 != 0) -> other
-                Insn(Opcode.GOTO, 2, target = 3), // else -> tail (shared)
-                Insn(Opcode.MUL_INT, 3, intArrayOf(0, 4, 5)), // tail: v0 = p0 * p1
-                Insn(Opcode.ADD_INT_LIT, 4, intArrayOf(1, 0), literal = 1), // v1 = v0 + 1
-                Insn(Opcode.RETURN, 5, intArrayOf(1)), // return v1
-                Insn(Opcode.NOP, 6),
-                Insn(Opcode.CONST, 7, intArrayOf(1), literal = 0), // other: v1 = 0
-                Insn(Opcode.RETURN, 8, intArrayOf(1)), // return v1
+                Insn(Opcode.IF_EQZ, 0, intArrayOf(4), target = 4), // if (p0 == 0) -> tail
+                Insn(Opcode.INVOKE_STATIC, 1, indexType = IndexType.METHOD_REF, methodRef = fx), // real leading stmt
+                Insn(Opcode.IF_NEZ, 2, intArrayOf(5), target = 8), // else if (p1 != 0) -> other
+                Insn(Opcode.GOTO, 3, target = 4), // else -> tail (shared)
+                Insn(Opcode.MUL_INT, 4, intArrayOf(0, 4, 5)), // tail: v0 = p0 * p1
+                Insn(Opcode.ADD_INT_LIT, 5, intArrayOf(1, 0), literal = 1), // v1 = v0 + 1
+                Insn(Opcode.RETURN, 6, intArrayOf(1)), // return v1
+                Insn(Opcode.NOP, 7),
+                Insn(Opcode.CONST, 8, intArrayOf(1), literal = 0), // other: v1 = 0
+                Insn(Opcode.RETURN, 9, intArrayOf(1)), // return v1
             ),
         )
         val method = TestPipeline.buildMethod(reader, returnType = IrType.INT, argTypes = listOf(IrType.INT, IrType.INT))

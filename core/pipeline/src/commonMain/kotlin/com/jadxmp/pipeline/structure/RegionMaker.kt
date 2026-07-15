@@ -1252,20 +1252,37 @@ internal class RegionMaker(
 
         while (true) {
             cancellation.ensureActive()
-            val andCont = trueTarget.takeIf { isChainableCondition(it, headHandlers) && cleanSucc(it)[1] === falseTarget }
-            if (andCont != null) {
-                consumeContinuation(andCont)
-                condition = Condition.And(flatten(condition, branchCondition(andCont), and = true))
-                trueTarget = cleanSucc(andCont)[0]
-                last = andCont
+            // AND: the branch-taken side (trueTarget) is another condition that shares our FALSE exit — the
+            // shared block both branches reach when the compound is false. `matchArmToShared` resolves each
+            // of the continuation's arms through empty forwarding gotos and requires EXACTLY ONE to reach
+            // the shared block; the operand is oriented (negated iff the continuation reaches the shared
+            // block on its `true` arm) so `A && operand` reaches the OTHER arm iff both hold.
+            val andBlock = trueTarget
+            val andMatch = if (isChainableCondition(andBlock, headHandlers)) matchArmToShared(andBlock, falseTarget) else null
+            if (andMatch != null) {
+                consumeContinuation(andBlock)
+                placeEmptyPath(andMatch.skipped)
+                val raw = branchCondition(andBlock)
+                val operand = if (andMatch.armToSharedIndex == 1) raw else negate(raw)
+                condition = Condition.And(flatten(condition, operand, and = true))
+                trueTarget = andMatch.otherTarget
+                last = andBlock
                 continue
             }
-            val orCont = falseTarget.takeIf { isChainableCondition(it, headHandlers) && cleanSucc(it)[0] === trueTarget }
-            if (orCont != null) {
-                consumeContinuation(orCont)
-                condition = Condition.Or(flatten(condition, branchCondition(orCont), and = false))
-                falseTarget = cleanSucc(orCont)[1]
-                last = orCont
+            // OR: the fall-through side (falseTarget) is another condition that shares our TRUE exit. The
+            // operand is the condition under which the continuation reaches that shared true target (negated
+            // iff it reaches it on its `false`/fall-through arm — the inverted-goto shape), so `A || operand`
+            // reaches the shared target iff either holds and the OTHER arm becomes the new false target.
+            val orBlock = falseTarget
+            val orMatch = if (isChainableCondition(orBlock, headHandlers)) matchArmToShared(orBlock, trueTarget) else null
+            if (orMatch != null) {
+                consumeContinuation(orBlock)
+                placeEmptyPath(orMatch.skipped)
+                val raw = branchCondition(orBlock)
+                val operand = if (orMatch.armToSharedIndex == 0) raw else negate(raw)
+                condition = Condition.Or(flatten(condition, operand, and = false))
+                falseTarget = orMatch.otherTarget
+                last = orBlock
                 continue
             }
             break
@@ -1274,11 +1291,108 @@ internal class RegionMaker(
     }
 
     private fun consumeContinuation(cont: BasicBlock) {
+        // Inline the continuation's leading defs (its operand's own if-feeding computation) INTO the compound
+        // condition so the fold drops no code and the short-circuit is preserved: the def then evaluates iff
+        // the operand is reached (java `&&`/`||` short-circuit), matching the CFG, instead of being emitted
+        // unconditionally before the compound `if`. [isChainableCondition] proved every leading def is a
+        // non-throwing, single-use, non-coalesced value read only within this block, so each inline is sound.
+        inlineLeadingDefsIntoCondition(cont)
         markConditionConsumed(cont)
         placeLeaf(cont)
         val succ = cleanSucc(cont)
         recordEdge(cont, succ[0])
         recordEdge(cont, succ[1])
+    }
+
+    /** The result of matching a chainable continuation whose one arm reaches a shared exit block. */
+    private class ArmMatch(
+        /** Which of the continuation's clean successors [0/1] reaches the shared block (after empty gotos). */
+        val armToSharedIndex: Int,
+        /** The continuation's OTHER raw clean successor — the new true/false target of the compound. */
+        val otherTarget: BasicBlock,
+        /** Empty forwarding goto blocks skipped on the path to the shared block (placed by [placeEmptyPath]). */
+        val skipped: List<BasicBlock>,
+    )
+
+    /**
+     * If chainable condition [c] branches to [shared] on EXACTLY ONE of its two arms — directly or through a
+     * chain of empty forwarding `goto` blocks ([resolveEmptyForward]) — return which arm reaches it, the
+     * other arm's block, and the skipped empty blocks; else null. "Exactly one" rejects a degenerate branch
+     * whose both arms reach [shared] (a dead condition), which must not be folded as `a || b`.
+     */
+    private fun matchArmToShared(c: BasicBlock, shared: BasicBlock): ArmMatch? {
+        val succ = cleanSucc(c)
+        // Direct first (exactly the pre-existing shape, plus its inverted mirror): an arm IS the shared
+        // block, with no empty path. Checked before [resolveEmptyForward] so an empty shared target is never
+        // resolved *past* (which would mis-pick the operand/other-target).
+        val d0 = succ[0] === shared
+        val d1 = succ[1] === shared
+        if (d0 && d1) return null // degenerate: both arms are the shared block
+        if (d0 != d1) return if (d0) ArmMatch(0, succ[1], emptyList()) else ArmMatch(1, succ[0], emptyList())
+        // Neither arm is directly the shared block — try resolving each through empty forwarding gotos.
+        val r0 = resolveEmptyForward(succ[0])
+        val r1 = resolveEmptyForward(succ[1])
+        val m0 = r0.first === shared
+        val m1 = r1.first === shared
+        if (m0 == m1) return null // neither, or both (degenerate) — not a clean single-arm share
+        return if (m0) ArmMatch(0, succ[1], r0.second) else ArmMatch(1, succ[0], r1.second)
+    }
+
+    /**
+     * Follow a chain of **empty forwarding blocks** (no emittable instruction — a bare `goto`/`nop`) from
+     * [start], returning the first real block reached and the empty blocks skipped. Each skipped block must
+     * have exactly one clean successor and one clean predecessor (so it is reached only via this path and
+     * placing it here is unambiguous), carry no `try` membership (its exception edges would otherwise be
+     * dropped), be no loop header, and be unplaced. Lets the fold see a shared continuation reached via a
+     * `goto` (the inverted-arm shape) while [placeEmptyPath] keeps the skipped blocks' edges represented.
+     */
+    private fun resolveEmptyForward(start: BasicBlock): Pair<BasicBlock, List<BasicBlock>> {
+        var cur = start
+        var skipped: MutableList<BasicBlock>? = null
+        var guard = 0
+        while (guard++ < 16) {
+            if (cur === exit || cur in loopHeaders) break
+            if (cur.instructions.any { isEmittable(it) }) break
+            if (protectingHandlers(cur).isNotEmpty()) break
+            val s = cleanSucc(cur)
+            if (s.size != 1 || cleanPreds(cur).size != 1) break
+            if (cur in placed) break
+            (skipped ?: ArrayList<BasicBlock>().also { skipped = it }).add(cur)
+            cur = s[0]
+        }
+        return cur to (skipped ?: emptyList())
+    }
+
+    /** Place each empty forwarding block skipped by a fold and represent its out-edges (it renders nothing). */
+    private fun placeEmptyPath(blocks: List<BasicBlock>) {
+        for (b in blocks) {
+            placeLeaf(b)
+            for (s in b.successors) recordEdge(b, s)
+        }
+    }
+
+    /**
+     * Inline every emittable leading def of [block] (all instructions before its terminal `if`) into its
+     * single, possibly-wrapped use, mirroring [ExpressionShaping]. Preconditions established by
+     * [isInlinableLeadingDef] (via [isChainableCondition]): each is non-throwing, single-use, non-coalesced,
+     * and read only within [block], so sinking it to its use is sound and lands it inside the `if` condition.
+     */
+    private fun inlineLeadingDefsIntoCondition(block: BasicBlock) {
+        var changed = true
+        while (changed) {
+            changed = false
+            for (def in block.instructions.dropLast(1)) {
+                if (!isEmittable(def)) continue
+                val value = def.result?.ssaValue ?: continue
+                val use = value.uses.singleOrNull() ?: continue
+                val useInsn = use.parent ?: continue
+                if (!useInsn.replaceArg(use, InstructionOperand(def))) continue
+                value.removeUse(use)
+                block.instructions.remove(def)
+                changed = true
+                break
+            }
+        }
     }
 
     private fun flatten(existing: Condition, next: Condition, and: Boolean): List<Condition> {
@@ -1304,8 +1418,33 @@ internal class RegionMaker(
             // Fold only within one try: the chained condition must share the head's protecting handlers,
             // so the fold never moves an operand's evaluation across a try boundary.
             protectingHandlers(block).toHashSet() == headHandlers &&
-            // A real statement before the `if` would be skipped by folding, so refuse to fold it.
-            block.instructions.dropLast(1).none { isEmittable(it) }
+            // Every statement before the `if` must be the operand's OWN if-feeding computation — inlinable
+            // into the compound condition so folding drops nothing and preserves the short-circuit. A real
+            // (escaping / multiply-used / coalesced / throwing) leading statement would be dropped or hoisted
+            // out of the short-circuit by folding, so refuse to fold it. See [inlineLeadingDefsIntoCondition].
+            block.instructions.dropLast(1).all { isInlinableLeadingDef(it, block) }
+    }
+
+    /**
+     * Whether leading instruction [insn] of a fold-candidate [block] is the operand's own if-feeding
+     * computation — safely inlinable into the compound condition (so nothing is dropped and the operand
+     * still evaluates only when the short-circuit reaches it). Requires an emittable leading def to be:
+     *  - **non-throwing** ([mayThrow] false, through wrapped operands) — a throwing op hoisted into the
+     *    short-circuit could raise on a path where the operand should have been skipped;
+     *  - **single-use** and **non-coalesced** — a private temporary, not a real multiply-read local;
+     *  - **read only within [block]** — its sole read feeds this condition (not a later region / sibling
+     *    arm), so inlining keeps it local and drops no cross-block value.
+     * A non-emittable leading instruction (`nop`/`goto`; a stray monitor/move-exception is caught by the
+     * dedicated honesty nets) is not a statement and never blocks the fold — matching the prior behaviour.
+     */
+    private fun isInlinableLeadingDef(insn: Instruction, block: BasicBlock): Boolean {
+        if (!isEmittable(insn)) return true
+        if (mayThrow(insn)) return false
+        val value = insn.result?.ssaValue ?: return false
+        if (value.useCount != 1) return false
+        val lv = value.localVar
+        if (lv != null && lv.ssaValues.size > 1) return false
+        return block.instructions.any { readsSsaValue(it, value) }
     }
 
     private fun branchCondition(block: BasicBlock): Condition {
