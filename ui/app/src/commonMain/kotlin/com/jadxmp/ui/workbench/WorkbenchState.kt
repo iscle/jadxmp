@@ -274,6 +274,10 @@ class WorkbenchState(
         selectionSeed = ""
         scope.launch {
             _ui.update { it.copy(busy = true, status = "Opening ${request.name}…") }
+            // Give the single browser thread a frame to paint the "Opening…" state before the
+            // container parse inside client.open() — synchronous on wasm — blocks the thread. Without
+            // this the busy state never renders and opening a real APK looks like a dead-frozen page.
+            yield()
             client.open(request)
             val classRoots = client.rootNodes(TreeKind.CLASSES)
             val resRoots = client.rootNodes(TreeKind.RESOURCES)

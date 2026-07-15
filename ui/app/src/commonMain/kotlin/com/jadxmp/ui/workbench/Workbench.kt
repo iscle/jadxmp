@@ -33,6 +33,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
 import com.jadxmp.ui.client.CodeView
@@ -336,6 +337,18 @@ fun Workbench(
     }
 }
 
+/**
+ * Middle-ellipsize a file name so a long name stays compact in the toolbar: "head…tail", preserving
+ * the start and the extension. Short names pass through unchanged; the label's widthIn is the pixel
+ * safety net, and this keeps the elision in the middle rather than clipping the end off the name.
+ */
+private fun middleEllipsize(text: String, maxChars: Int = 34): String {
+    if (text.length <= maxChars) return text
+    val keep = maxChars - 1
+    val head = (keep + 1) / 2
+    return text.take(head) + "…" + text.takeLast(keep / 2)
+}
+
 @Composable
 private fun WorkbenchToolbar(
     projectLabel: String,
@@ -370,8 +383,15 @@ private fun WorkbenchToolbar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(JadxTheme.spacing.sm),
     ) {
-        BrandMark(size = JadxTheme.spacing.iconButtonSize)
-        Text(projectLabel, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, fontFamily = MonoFontFamily)
+        Text(
+            middleEllipsize(projectLabel),
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+            fontFamily = MonoFontFamily,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 240.dp),
+        )
         VDivider()
         ToolbarTextButton("Open", onClick = onOpen)
         // Save the active document's rendered text (P0#7). Disabled with no document open / no saver.
