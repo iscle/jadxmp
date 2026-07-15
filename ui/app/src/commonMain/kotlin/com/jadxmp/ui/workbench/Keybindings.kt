@@ -55,6 +55,15 @@ enum class ShortcutAction {
 
     /** Esc — close the Find bar / search panel if open, else go back. */
     Escape,
+
+    /** Ctrl/Cmd+Plus (or `=`) / Ctrl/Cmd+wheel-up — enlarge the code font (P1#12). */
+    ZoomIn,
+
+    /** Ctrl/Cmd+Minus / Ctrl/Cmd+wheel-down — shrink the code font (P1#12). */
+    ZoomOut,
+
+    /** Ctrl/Cmd+0 — reset the code font to its default size (P1#12). */
+    ZoomReset,
 }
 
 /**
@@ -99,6 +108,21 @@ val DefaultKeymap: Map<ShortcutAction, List<KeyStroke>> = mapOf(
         KeyStroke(Key.RightBracket, primary = true),
     ),
     ShortcutAction.Escape to listOf(KeyStroke(Key.Escape)),
+    // Zoom the code font. "+" is Shift+"=" on most layouts, so accept the shifted `Equals` too, plus the
+    // numpad add/subtract keys. Exact-modifier matching keeps a bare "=" / "-" / "0" as ordinary typing.
+    ShortcutAction.ZoomIn to listOf(
+        KeyStroke(Key.Equals, primary = true),
+        KeyStroke(Key.Equals, primary = true, shift = true),
+        KeyStroke(Key.NumPadAdd, primary = true),
+    ),
+    ShortcutAction.ZoomOut to listOf(
+        KeyStroke(Key.Minus, primary = true),
+        KeyStroke(Key.NumPadSubtract, primary = true),
+    ),
+    ShortcutAction.ZoomReset to listOf(
+        KeyStroke(Key.Zero, primary = true),
+        KeyStroke(Key.NumPad0, primary = true),
+    ),
 )
 
 /**

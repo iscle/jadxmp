@@ -4,6 +4,7 @@ import com.jadxmp.ui.client.CodeDocument
 import com.jadxmp.ui.client.CodeLine
 import com.jadxmp.ui.client.CodeToken
 import com.jadxmp.ui.client.CodeView
+import com.jadxmp.ui.client.DEFAULT_CODE_FONT_SIZE_SP
 import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.FileSaver
 import com.jadxmp.ui.client.NodeId
@@ -137,5 +138,38 @@ class WorkbenchSettingsTest {
         withSaver.saveActiveDocument() // saver present but no document open
         advanceUntilIdle()
         assertFalse(called, "nothing to save with no active document")
+    }
+
+    @Test
+    fun fontSizeClampsIntoTheLegibleRange() {
+        assertEquals(DEFAULT_CODE_FONT_SIZE_SP, clampCodeFontSize(DEFAULT_CODE_FONT_SIZE_SP))
+        assertEquals(MIN_CODE_FONT_SIZE_SP, clampCodeFontSize(2f), "below the floor clamps up")
+        assertEquals(MAX_CODE_FONT_SIZE_SP, clampCodeFontSize(99f), "above the ceiling clamps down")
+        assertEquals(MIN_CODE_FONT_SIZE_SP, clampCodeFontSize(MIN_CODE_FONT_SIZE_SP))
+        assertEquals(MAX_CODE_FONT_SIZE_SP, clampCodeFontSize(MAX_CODE_FONT_SIZE_SP))
+    }
+
+    @Test
+    fun editorViewPreferencesSeedFromTheStore() = runTest {
+        val store = RecordingStore(UiSettings(wordWrap = true, codeFontSize = 20f))
+        val state = WorkbenchState(EmptyClient(), scope(testScheduler), settingsStore = store)
+        assertTrue(state.ui.value.wordWrap)
+        assertEquals(20f, state.ui.value.codeFontSize)
+    }
+
+    @Test
+    fun zoomAndWordWrapPersistAndClamp() = runTest {
+        val store = RecordingStore()
+        val state = WorkbenchState(EmptyClient(), scope(testScheduler), settingsStore = store)
+
+        state.toggleWordWrap()
+        assertTrue(store.latest().wordWrap, "word-wrap persists")
+
+        state.setCodeFontSize(999f) // way past the ceiling
+        assertEquals(MAX_CODE_FONT_SIZE_SP, state.ui.value.codeFontSize, "clamped in state")
+        assertEquals(MAX_CODE_FONT_SIZE_SP, store.latest().codeFontSize, "clamped value persisted")
+
+        state.resetCodeZoom()
+        assertEquals(DEFAULT_CODE_FONT_SIZE_SP, state.ui.value.codeFontSize, "reset returns to default")
     }
 }

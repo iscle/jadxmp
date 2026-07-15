@@ -2,6 +2,9 @@ package com.jadxmp.ui.client
 
 import androidx.compose.runtime.Immutable
 
+/** Default code-editor font size (sp), shared by [UiSettings] and the workbench zoom clamp. */
+const val DEFAULT_CODE_FONT_SIZE_SP: Float = 13f
+
 /**
  * How the workbench chooses light vs. dark. [SYSTEM] defers to the platform (`isSystemInDarkTheme()`),
  * so a fresh install follows the OS; toggling the theme pins an explicit [LIGHT]/[DARK] that persists.
@@ -27,6 +30,10 @@ data class UiSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val flattenPackages: Boolean = false,
     val preferredView: CodeView = CodeView.JAVA,
+    /** Code-editor word-wrap toggle (P1#11). Off = long lines pan horizontally. */
+    val wordWrap: Boolean = false,
+    /** Code-editor font size in sp (P1#12 zoom). Kept flat so it round-trips through the codec. */
+    val codeFontSize: Float = DEFAULT_CODE_FONT_SIZE_SP,
 ) {
     /** Serialize to the compact string a [SettingsStore] persists. */
     fun serialize(): String = SettingsCodec.serialize(this)
@@ -50,6 +57,8 @@ internal object SettingsCodec {
     private const val KEY_THEME = "themeMode"
     private const val KEY_FLATTEN = "flattenPackages"
     private const val KEY_VIEW = "preferredView"
+    private const val KEY_WORD_WRAP = "wordWrap"
+    private const val KEY_FONT_SIZE = "codeFontSize"
 
     // Matches "key":"value" pairs. Keys are identifiers; values contain no quotes (enum names / booleans).
     private val PAIR = Regex("\"([A-Za-z0-9_]+)\"\\s*:\\s*\"([^\"]*)\"")
@@ -61,6 +70,10 @@ internal object SettingsCodec {
         appendField(KEY_FLATTEN, settings.flattenPackages.toString())
         append(',')
         appendField(KEY_VIEW, settings.preferredView.name)
+        append(',')
+        appendField(KEY_WORD_WRAP, settings.wordWrap.toString())
+        append(',')
+        appendField(KEY_FONT_SIZE, settings.codeFontSize.toString())
         append('}')
     }
 
@@ -71,6 +84,8 @@ internal object SettingsCodec {
             themeMode = fields[KEY_THEME].toThemeMode(),
             flattenPackages = fields[KEY_FLATTEN]?.toBooleanStrictOrNull() ?: false,
             preferredView = fields[KEY_VIEW].toCodeView(),
+            wordWrap = fields[KEY_WORD_WRAP]?.toBooleanStrictOrNull() ?: false,
+            codeFontSize = fields[KEY_FONT_SIZE]?.toFloatOrNull() ?: DEFAULT_CODE_FONT_SIZE_SP,
         )
     }
 

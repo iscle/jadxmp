@@ -6,6 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import com.jadxmp.ui.client.CodeDocument
 import com.jadxmp.ui.client.CodeView
+import com.jadxmp.ui.client.DEFAULT_CODE_FONT_SIZE_SP
 import com.jadxmp.ui.client.DecompilerClient
 import com.jadxmp.ui.client.FileOpener
 import com.jadxmp.ui.client.FileSaver
@@ -41,6 +42,14 @@ private const val PROGRESS_PUSH_STRIDE = 12
 
 /** Debounce before a code scan launches, so per-keystroke typing doesn't queue whole-program scans. */
 private const val CODE_SEARCH_DEBOUNCE_MS = 250L
+
+/** Code-font zoom bounds (P1#12): small enough to skim, large enough to read; one step per keystroke. */
+const val MIN_CODE_FONT_SIZE_SP: Float = 8f
+const val MAX_CODE_FONT_SIZE_SP: Float = 32f
+private const val CODE_FONT_ZOOM_STEP_SP: Float = 1f
+
+/** Clamp a requested code-font size into the legible range. Pure — unit-tested directly. */
+internal fun clampCodeFontSize(sizeSp: Float): Float = sizeSp.coerceIn(MIN_CODE_FONT_SIZE_SP, MAX_CODE_FONT_SIZE_SP)
 
 /** Well-known Resources-tree id of the decoded manifest (mirrors ResourceSurface's MANIFEST_ID). */
 private const val MANIFEST_NODE_ID = "res:AndroidManifest.xml"
@@ -87,6 +96,10 @@ data class WorkbenchUiState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /** In-editor Find bar state for the active document. Null = the Find bar is hidden. */
     val find: FindUiState? = null,
+    /** Code-editor word-wrap toggle (P1#11). Persisted. */
+    val wordWrap: Boolean = false,
+    /** Code-editor font size in sp (P1#12 zoom); clamped to [MIN_CODE_FONT_SIZE_SP]..[MAX_CODE_FONT_SIZE_SP]. Persisted. */
+    val codeFontSize: Float = DEFAULT_CODE_FONT_SIZE_SP,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -124,6 +137,8 @@ class WorkbenchState(
             themeMode = loadedSettings.themeMode,
             preferredView = loadedSettings.preferredView,
             tree = TreeUiState(flattenPackages = loadedSettings.flattenPackages),
+            wordWrap = loadedSettings.wordWrap,
+            codeFontSize = clampCodeFontSize(loadedSettings.codeFontSize),
         ),
     )
     val ui: StateFlow<WorkbenchUiState> = _ui.asStateFlow()
@@ -222,6 +237,8 @@ class WorkbenchState(
                 themeMode = prev.themeMode,
                 preferredView = prev.preferredView,
                 tree = TreeUiState(flattenPackages = prev.tree.flattenPackages),
+                wordWrap = prev.wordWrap,
+                codeFontSize = prev.codeFontSize,
             )
             maybeAutoOpenSingleClass(epoch)
         }
@@ -305,8 +322,39 @@ class WorkbenchState(
                 themeMode = s.themeMode,
                 flattenPackages = s.tree.flattenPackages,
                 preferredView = s.preferredView,
+                wordWrap = s.wordWrap,
+                codeFontSize = s.codeFontSize,
             ),
         )
+    }
+
+    // ── Code-editor view preferences (P1#11 word-wrap, P1#12 zoom) ───────────────
+
+    /** Toggle word-wrap in the code editor (context-menu action) and persist it. */
+    fun toggleWordWrap() = setWordWrap(!_ui.value.wordWrap)
+
+    /** Set word-wrap explicitly and persist it (no-op if unchanged, so it never churns the store). */
+    fun setWordWrap(on: Boolean) {
+        if (on == _ui.value.wordWrap) return
+        _ui.update { it.copy(wordWrap = on) }
+        persistSettings()
+    }
+
+    /** Enlarge the code font one step (Ctrl/Cmd+Plus, Ctrl/Cmd+wheel-up). Clamped + persisted. */
+    fun zoomInCode() = setCodeFontSize(_ui.value.codeFontSize + CODE_FONT_ZOOM_STEP_SP)
+
+    /** Shrink the code font one step (Ctrl/Cmd+Minus, Ctrl/Cmd+wheel-down). Clamped + persisted. */
+    fun zoomOutCode() = setCodeFontSize(_ui.value.codeFontSize - CODE_FONT_ZOOM_STEP_SP)
+
+    /** Reset the code font to its default size (Ctrl/Cmd+0). Persisted. */
+    fun resetCodeZoom() = setCodeFontSize(DEFAULT_CODE_FONT_SIZE_SP)
+
+    /** Set the code-font size, clamped to the legible range; persists only on a real change. */
+    fun setCodeFontSize(sizeSp: Float) {
+        val clamped = clampCodeFontSize(sizeSp)
+        if (clamped == _ui.value.codeFontSize) return
+        _ui.update { it.copy(codeFontSize = clamped) }
+        persistSettings()
     }
 
     /**

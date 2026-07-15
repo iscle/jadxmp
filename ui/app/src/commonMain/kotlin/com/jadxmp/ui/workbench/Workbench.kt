@@ -153,6 +153,10 @@ fun Workbench(
                 ui.history.canGoBack -> { state.goBack(); true }
                 else -> false
             }
+            // Code-font zoom (P1#12). Only claimed with an editor open, so Ctrl+=/-/0 stay free otherwise.
+            ShortcutAction.ZoomIn -> if (ui.tabs.active != null) { state.zoomInCode(); true } else false
+            ShortcutAction.ZoomOut -> if (ui.tabs.active != null) { state.zoomOutCode(); true } else false
+            ShortcutAction.ZoomReset -> if (ui.tabs.active != null) { state.resetCodeZoom(); true } else false
             null -> false
         }
 
@@ -437,6 +441,12 @@ private fun EditorArea(
                     onSearchSelection = onSearchSelection,
                     // "Save file" context-menu action — only offered when a saver is wired.
                     onSaveFile = if (state.hasSaver) state::saveActiveDocument else null,
+                    // Editor polish (P1#11 word-wrap, P1#12 zoom).
+                    wordWrap = ui.wordWrap,
+                    onToggleWordWrap = state::toggleWordWrap,
+                    codeFontSize = ui.codeFontSize,
+                    onZoomIn = state::zoomInCode,
+                    onZoomOut = state::zoomOutCode,
                 )
             } else {
                 EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())

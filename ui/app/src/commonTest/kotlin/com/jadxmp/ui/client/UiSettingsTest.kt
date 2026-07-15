@@ -26,9 +26,26 @@ class UiSettingsTest {
     fun serializesToAFlatAllStringJsonObject() {
         val settings = UiSettings(ThemeMode.DARK, flattenPackages = true, preferredView = CodeView.KOTLIN)
         assertEquals(
-            """{"themeMode":"DARK","flattenPackages":"true","preferredView":"KOTLIN"}""",
+            """{"themeMode":"DARK","flattenPackages":"true","preferredView":"KOTLIN","wordWrap":"false","codeFontSize":"13.0"}""",
             settings.serialize(),
         )
+    }
+
+    @Test
+    fun roundTripsWordWrapAndFontSize() {
+        val settings = UiSettings(wordWrap = true, codeFontSize = 18.5f)
+        val parsed = UiSettings.parse(settings.serialize())
+        assertEquals(true, parsed.wordWrap)
+        assertEquals(18.5f, parsed.codeFontSize)
+        assertEquals(settings, parsed)
+    }
+
+    @Test
+    fun missingWordWrapAndFontSizeFallBackToDefaults() {
+        // An old settings string (pre-editor-polish) has neither key — both degrade to defaults, not a throw.
+        val parsed = UiSettings.parse("""{"themeMode":"DARK"}""")
+        assertEquals(false, parsed.wordWrap)
+        assertEquals(DEFAULT_CODE_FONT_SIZE_SP, parsed.codeFontSize)
     }
 
     @Test
