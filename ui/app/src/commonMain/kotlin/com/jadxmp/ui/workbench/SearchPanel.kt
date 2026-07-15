@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,6 +29,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,12 +87,15 @@ fun SearchPanel(
     onOpenMember: (MemberMatch) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Prefill the query (e.g. the code area's "Search selection"); blank for a plain toolbar open. */
+    initialQuery: String = "",
 ) {
     val scheme = MaterialTheme.colorScheme
-    var text by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf(initialQuery) }
     var regex by remember { mutableStateOf(false) }
     var ignoreCase by remember { mutableStateOf(true) }
     var scope by remember { mutableStateOf(PanelScope.CLASS_NAMES) }
+    val queryFocus = remember { FocusRequester() }
 
     fun run() {
         when (scope) {
@@ -105,6 +111,12 @@ fun SearchPanel(
     fun selectScope(next: PanelScope) {
         if (next == scope || !next.enabled) return
         scope = next
+        if (text.isNotBlank()) run()
+    }
+
+    // On open: focus the query field, and if it arrived pre-seeded ("Search selection") run immediately.
+    LaunchedEffect(Unit) {
+        runCatching { queryFocus.requestFocus() }
         if (text.isNotBlank()) run()
     }
 
@@ -127,6 +139,7 @@ fun SearchPanel(
         SearchField(
             value = text,
             onValueChange = { text = it; run() },
+            modifier = Modifier.focusRequester(queryFocus),
             placeholder = when (scope) {
                 PanelScope.CODE -> "Search decompiled code…"
                 PanelScope.METHODS -> "Search method names…"

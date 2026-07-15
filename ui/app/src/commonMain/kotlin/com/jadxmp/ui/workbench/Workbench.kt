@@ -3,6 +3,7 @@ package com.jadxmp.ui.workbench
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -98,6 +102,47 @@ fun Workbench(
     val session by state.session.collectAsState()
     var showSearch by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    // Seed for the global search field, injected by the code-area "Search selection" action; cleared
+    // whenever the panel is opened from the toolbar so a toolbar-open always starts blank.
+    var searchSeed by remember { mutableStateOf("") }
+
+    fun openSearch(seed: String) {
+        searchSeed = seed
+        showSearch = true
+    }
+
+    // Global keyboard-shortcut dispatch (jadx-gui parity P0#1). A root preview handler sees every key
+    // before the focused child, so these fire regardless of where focus sits; unmapped keys fall through
+    // (so typing in a field is untouched). Ctrl and Cmd are both accepted (see [resolveShortcut]).
+    fun onKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean =
+        when (resolveShortcut(event)) {
+            ShortcutAction.OpenFile -> { state.requestOpen(); true }
+            ShortcutAction.FindInFile ->
+                if (ui.tabs.active != null) { state.toggleFind(); true } else false
+            ShortcutAction.GlobalSearch -> { openSearch(""); true }
+            ShortcutAction.CloseTab -> {
+                val i = ui.tabs.activeIndex
+                if (i >= 0) { state.closeTab(i); true } else false
+            }
+            ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
+            ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
+            ShortcutAction.Escape -> when {
+                ui.find != null -> { state.closeFind(); true }
+                showSearch -> { showSearch = false; state.clearSearch(); true }
+                ui.history.canGoBack -> { state.goBack(); true }
+                else -> false
+            }
+            null -> false
+        }
+
+    // Hold focus at the root whenever no overlay owns it — at startup, and again after the Find bar or
+    // search panel (which grab focus for their fields) close, so global shortcuts keep working without a
+    // click. Keyed on the "no overlay open" state so it only fires on those transitions, not every click.
+    val rootFocus = remember { FocusRequester() }
+    val noOverlayFocus = ui.find == null && !showSearch
+    LaunchedEffect(noOverlayFocus) {
+        if (noOverlayFocus) runCatching { rootFocus.requestFocus() }
+    }
 
     // Route a shell-delivered file drop through the same open path a picked file takes. Installed at
     // composition, long before any user drag, so no drop can be missed. A null controller (stub/
@@ -108,7 +153,14 @@ fun Workbench(
         dropController?.drops?.collect { state.openProject(it) }
     }
 
-    Surface(color = MaterialTheme.colorScheme.background, modifier = modifier.fillMaxSize()) {
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        modifier = modifier
+            .fillMaxSize()
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent(::onKey),
+    ) {
         Column(Modifier.fillMaxSize()) {
             WorkbenchToolbar(
                 projectLabel = (session as? SessionState.Ready)?.projectName ?: "no project",
@@ -121,7 +173,7 @@ fun Workbench(
                 onOpenManifest = state::openManifest,
                 onJumpMainActivity = state::jumpToMainActivity,
                 searchActive = showSearch,
-                onToggleSearch = { showSearch = !showSearch },
+                onToggleSearch = { if (showSearch) showSearch = false else openSearch("") },
                 settingsActive = showSettings,
                 onToggleSettings = { showSettings = !showSettings },
                 deobfuscated = session is SessionState.Ready,
@@ -152,7 +204,7 @@ fun Workbench(
                                 onEnsureChildrenLoaded = state::ensureChildrenLoaded,
                             )
                         },
-                        second = { EditorArea(state, ui) },
+                        second = { EditorArea(state, ui, onSearchSelection = ::openSearch) },
                     )
                 }
 
@@ -177,6 +229,7 @@ fun Workbench(
                             onOpenCode = state::openCodeMatch,
                             onOpenMember = { state.openMember(it.nodeId) },
                             onClose = { showSearch = false; state.clearSearch() },
+                            initialQuery = searchSeed,
                         )
                     }
                 }
@@ -300,7 +353,11 @@ private fun WorkbenchToolbar(
 }
 
 @Composable
-private fun EditorArea(state: WorkbenchState, ui: WorkbenchUiState) {
+private fun EditorArea(
+    state: WorkbenchState,
+    ui: WorkbenchUiState,
+    onSearchSelection: (String) -> Unit,
+) {
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         if (ui.tabs.isEmpty) {
             EmptyState(
@@ -338,9 +395,30 @@ private fun EditorArea(state: WorkbenchState, ui: WorkbenchUiState) {
                     onCaretLine = { state.updateCaret(it) },
                     initialCaretLine = active?.caret?.coerceAtLeast(1) ?: 1,
                     scrollNonce = ui.codeNavNonce,
+                    activeFindMatch = ui.find?.activeMatch,
+                    onSelectionSeed = state::noteSelectionSeed,
+                    onSearchSelection = onSearchSelection,
                 )
             } else {
                 EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())
+            }
+
+            // In-editor Find bar (Ctrl+F): a floating toolbar over the active document, top-right.
+            val find = ui.find
+            if (find != null) {
+                Box(
+                    Modifier.fillMaxWidth().padding(JadxTheme.spacing.sm),
+                    contentAlignment = Alignment.TopEnd,
+                ) {
+                    FindBar(
+                        state = find,
+                        onQueryChange = state::setFindQuery,
+                        onMatchCaseChange = state::setFindMatchCase,
+                        onNext = state::findNext,
+                        onPrev = state::findPrev,
+                        onClose = state::closeFind,
+                    )
+                }
             }
         }
     }

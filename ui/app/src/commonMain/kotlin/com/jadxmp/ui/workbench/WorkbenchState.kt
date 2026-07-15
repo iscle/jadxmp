@@ -73,6 +73,8 @@ data class WorkbenchUiState(
     val codeNavNonce: Int = 0,
     /** Preferred source view for newly opened class tabs (Settings → Decompiler default). */
     val preferredView: CodeView = CodeView.JAVA,
+    /** In-editor Find bar state for the active document. Null = the Find bar is hidden. */
+    val find: FindUiState? = null,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -139,6 +141,14 @@ class WorkbenchState(
     private var memberSearchGeneration = 0
 
     /**
+     * Best-effort seed for the Find bar / "Search selection", set from the last code token the user
+     * clicked or right-clicked. Compose's read-only [androidx.compose.foundation.text.selection.SelectionContainer]
+     * does not expose its drag-selection to app code, so this tracked token is the accessible proxy for
+     * "the current selection". Accessed only on [scope]'s single dispatcher.
+     */
+    private var selectionSeed: String = ""
+
+    /**
      * Handle an "Open" gesture. With a platform [fileOpener] wired (desktop/web/android), show its
      * picker and load the chosen file's bytes; cancelling is a no-op. Without one (stub/preview), fall
      * back to the in-memory sample project so the shell is still explorable.
@@ -162,6 +172,9 @@ class WorkbenchState(
         // dispatcher decompiling classes whose results the epoch guard would drop anyway.
         stopCodeSearch()
         stopMemberSearch()
+        // The old project's selection has no meaning in the new one; the fresh state below drops the
+        // Find bar, so clear its seed too.
+        selectionSeed = ""
         scope.launch {
             _ui.update { it.copy(busy = true, status = "Opening ${request.name}…") }
             client.open(request)
@@ -583,6 +596,100 @@ class WorkbenchState(
         _ui.update { it.copy(searchResults = null, codeSearch = null, memberSearch = null) }
     }
 
+    // ── In-editor Find bar (Ctrl+F) ───────────────────────────────────────────
+
+    /**
+     * Record the "current selection" seed from a clicked/right-clicked code token (see [selectionSeed]).
+     * Ignores blank or multi-line text so the seed is always a single, meaningful term.
+     */
+    fun noteSelectionSeed(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isNotEmpty() && '\n' !in trimmed) selectionSeed = trimmed
+    }
+
+    /** Ctrl/Cmd+F: open the Find bar (empty query seeds from the last clicked token) or close it. */
+    fun toggleFind() {
+        if (_ui.value.find != null) closeFind() else openFind()
+    }
+
+    /** Show the Find bar, seeding an empty query from the last clicked token, and jump to the first hit. */
+    fun openFind() {
+        val existing = _ui.value.find
+        val seed = existing?.query?.takeIf { it.isNotEmpty() } ?: selectionSeed
+        _ui.update { it.copy(find = (existing ?: FindUiState()).copy(query = seed)) }
+        recomputeFind(resetIndexToCaret = true)
+        scrollToActiveFind()
+    }
+
+    /** Hide the Find bar (drops the painted match highlight). */
+    fun closeFind() {
+        _ui.update { it.copy(find = null) }
+    }
+
+    fun setFindQuery(text: String) {
+        if (_ui.value.find == null) return
+        _ui.update { it.copy(find = it.find?.copy(query = text)) }
+        recomputeFind(resetIndexToCaret = true)
+        scrollToActiveFind()
+    }
+
+    fun setFindMatchCase(on: Boolean) {
+        if (_ui.value.find == null) return
+        _ui.update { it.copy(find = it.find?.copy(matchCase = on)) }
+        recomputeFind(resetIndexToCaret = false)
+        scrollToActiveFind()
+    }
+
+    /** Advance to the next match (wraps around); scrolls the viewer to it. */
+    fun findNext() = stepFind(+1)
+
+    /** Go to the previous match (wraps around); scrolls the viewer to it. */
+    fun findPrev() = stepFind(-1)
+
+    private fun stepFind(delta: Int) {
+        val f = _ui.value.find ?: return
+        if (f.matches.isEmpty()) return
+        val next = (f.activeIndex + delta).mod(f.matches.size)
+        _ui.update { it.copy(find = it.find?.copy(activeIndex = next)) }
+        scrollToActiveFind()
+    }
+
+    /**
+     * Recompute Find matches over the current active document. [resetIndexToCaret] re-anchors the active
+     * match to the first hit at/after the caret (used on a query/open change); otherwise the current index
+     * is clamped in place (used on a passive document/tab change). A no-op when the Find bar is hidden, so
+     * it costs nothing on ordinary navigation. Synchronous ([DocumentFind.find] is pure), single dispatcher.
+     */
+    private fun recomputeFind(resetIndexToCaret: Boolean) {
+        val f = _ui.value.find ?: return
+        val doc = _ui.value.activeDocument
+        val matches = if (doc != null && f.query.isNotEmpty()) DocumentFind.find(doc, f.query, f.matchCase) else emptyList()
+        val index = when {
+            matches.isEmpty() -> 0
+            resetIndexToCaret -> {
+                val caret = _ui.value.tabs.active?.caret?.takeIf { it >= 1 } ?: 1
+                matches.indexOfFirst { it.line >= caret }.let { if (it < 0) 0 else it }
+            }
+            else -> f.activeIndex.coerceIn(0, matches.lastIndex)
+        }
+        _ui.update { it.copy(find = it.find?.copy(matches = matches, activeIndex = index)) }
+    }
+
+    /**
+     * Scroll the viewer to the active match by reusing the go-to-definition mechanism: pin the active
+     * tab's caret to the match line and bump [WorkbenchUiState.codeNavNonce] so the viewer re-scrolls even
+     * when the tab is already open. A no-op when there is no active match.
+     */
+    private fun scrollToActiveFind() {
+        val match = _ui.value.find?.activeMatch ?: return
+        _ui.update {
+            it.copy(
+                tabs = it.tabs.updateCaret(it.tabs.activeIndex, match.line),
+                codeNavNonce = it.codeNavNonce + 1,
+            )
+        }
+    }
+
     /** Cancel any in-flight scan and invalidate its still-pending callbacks (see [codeSearchGeneration]). */
     private fun stopCodeSearch() {
         codeSearchJob?.cancel()
@@ -672,6 +779,9 @@ class WorkbenchState(
 
     private fun ensureDocument(nodeId: NodeId, view: CodeView) {
         val key = DocKey(nodeId, view)
+        // Re-sync the Find bar against whatever is active now: a cached doc recomputes immediately; a
+        // not-yet-loaded one clears to empty until the load below repopulates it. No-op when Find is off.
+        recomputeFind(resetIndexToCaret = false)
         if (key in _ui.value.documents) return
         val epoch = openEpoch
         scope.launch {
@@ -691,6 +801,8 @@ class WorkbenchState(
                     status = doc.title,
                 )
             }
+            // The active document may have just become available — recompute Find matches over it.
+            recomputeFind(resetIndexToCaret = false)
         }
     }
 
