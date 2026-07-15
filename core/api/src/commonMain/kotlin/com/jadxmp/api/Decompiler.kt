@@ -658,11 +658,12 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         // metadata contract are shared across formats. [format] is the per-call override, not necessarily
         // args.outputFormat — the same lowered class can be re-emitted in either format.
         val info: CodeInfo = when (format) {
-            // Java applies the deobfuscation/user alias map AND the user comment map (both EMPTY unless the
-            // user opted in ⇒ byte-identical when off). Kotlin renaming and comments are follow-ups, so it
-            // always renders with the raw names and no injected comments.
+            // Both backends apply the SAME deobfuscation/user alias map AND user comment map (both EMPTY
+            // unless the user opted in ⇒ byte-identical when off), keyed by the same CodeNodeRef identities
+            // so a rename/comment shows consistently in either view. The Kotlin file-path source name
+            // ([sourceFullName]) is still the binary name — aliasing it is a documented follow-up.
             OutputFormat.JAVA -> JavaCodeGenerator().generate(cls, aliasMap, commentMap)
-            OutputFormat.KOTLIN -> KotlinCodeGenerator().generate(cls)
+            OutputFormat.KOTLIN -> KotlinCodeGenerator().generate(cls, aliasMap, commentMap)
         }
         return DecompiledClass(
             // The result's fullName is the EMITTED SOURCE name (sanitized package + simple name), which is

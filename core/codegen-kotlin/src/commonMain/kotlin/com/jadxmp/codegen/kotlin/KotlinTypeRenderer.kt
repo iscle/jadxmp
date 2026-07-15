@@ -1,6 +1,9 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.AliasMap
+import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.ImportCollector
+import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.type.TypeKind
 import com.jadxmp.ir.type.WildcardBound
@@ -23,7 +26,15 @@ import com.jadxmp.ir.type.WildcardBound
  * Partial/unknown types can still be present pre-inference; they render to a deterministic concrete
  * representative so output is stable.
  */
-internal class KotlinTypeRenderer(private val imports: ImportCollector) {
+internal class KotlinTypeRenderer(
+    private val imports: ImportCollector,
+    // Deobfuscation/user rename overrides. [AliasMap.EMPTY] (the default) ⇒ the byte-identical
+    // no-deobfuscation path: [aliasedClassName] returns every name verbatim, untouched.
+    private val aliasMap: AliasMap = AliasMap.EMPTY,
+    // The loaded model, needed only to spell a renamed-class *reference* by the same source-of-truth its
+    // definition uses ([KotlinSourceName]). Null (and the empty map) ⇒ the byte-identical path.
+    private val root: IrRoot? = null,
+) {
 
     fun render(type: IrType): String = when (type) {
         is IrType.Primitive -> primitiveName(type.kind)
@@ -36,7 +47,7 @@ internal class KotlinTypeRenderer(private val imports: ImportCollector) {
 
     /** The class name (short or FQN) for [type], without generics; also registers the import. */
     fun classNameOf(type: IrType): String = when (type) {
-        is IrType.Object -> if (type.isRootObject) "Any" else KotlinIdentifiers.sanitizeQualified(imports.useClass(type.className))
+        is IrType.Object -> if (type.isRootObject) "Any" else KotlinIdentifiers.sanitizeQualified(imports.useClass(aliasedClassName(type.className)))
         is IrType.ArrayType -> render(type) // an array's "class" is the array type itself in Kotlin
         else -> render(type)
     }
@@ -52,7 +63,7 @@ internal class KotlinTypeRenderer(private val imports: ImportCollector) {
 
     private fun renderObject(type: IrType.Object): String {
         if (type.isRootObject) return "Any"
-        val name = KotlinIdentifiers.sanitizeQualified(imports.useClass(type.className))
+        val name = KotlinIdentifiers.sanitizeQualified(imports.useClass(aliasedClassName(type.className)))
         if (type.generics.isNotEmpty()) {
             return name + type.generics.joinToString(", ", "<", ">") { render(it) }
         }
@@ -67,6 +78,27 @@ internal class KotlinTypeRenderer(private val imports: ImportCollector) {
             return name + (1..requiredArgs).joinToString(", ", "<", ">") { "*" }
         }
         return name
+    }
+
+    /**
+     * Rewrite a binary class name to its deobfuscation/rename alias BEFORE it reaches [ImportCollector], so
+     * a renamed class reference gets the same import / short-vs-qualified treatment as any other name and —
+     * via [KotlinSourceName.sourceSimpleName] — spells the *identical* simple name the class's definition
+     * uses (never a half-rename). Only a class we actually renamed is rewritten; every kept/library class is
+     * returned verbatim, so the string handed to [ImportCollector] is unchanged and its decision is identical
+     * to the no-deobfuscation path. The empty-map fast path makes that guarantee free. Mirrors
+     * `JavaTypeRenderer.aliasedClassName`.
+     *
+     * A renamed class is always leaf top-level (the populator's restriction: no outer, no inner, no `$`), so
+     * `package + simple` reconstructs its full name exactly and nested-reference spelling is never touched.
+     */
+    private fun aliasedClassName(className: String): String {
+        if (aliasMap.isEmpty) return className
+        if (aliasMap.aliasOf(ClassNodeRef(className)) == null) return className
+        val cls = root?.findClass(className) ?: return className
+        val pkg = className.substringBeforeLast('.', "")
+        val simple = KotlinSourceName.sourceSimpleName(cls, aliasMap)
+        return if (pkg.isEmpty()) simple else "$pkg.$simple"
     }
 
     private fun renderWildcard(type: IrType.Wildcard): String = when (type.bound) {

@@ -1,13 +1,17 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.CodeInfo
+import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.CodeWriter
+import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
 import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.CodegenKeys
+import com.jadxmp.codegen.emitLineComment
 import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.attr.AttrNode
 import com.jadxmp.ir.attr.IrAttrs
@@ -20,6 +24,7 @@ import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrFieldConst
 import com.jadxmp.ir.node.IrMethod
+import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.region.SequenceRegion
 import com.jadxmp.ir.type.IrType
 
@@ -49,13 +54,25 @@ import com.jadxmp.ir.type.IrType
  */
 class KotlinCodeGenerator {
 
-    /** Render [cls] to Kotlin source and metadata. */
-    fun generate(cls: IrClass): CodeInfo {
+    /**
+     * Render [cls] to Kotlin source and metadata. [aliasMap] carries deobfuscation/user rename overrides
+     * (default [AliasMap.EMPTY] ⇒ no renaming); [commentMap] carries user comments to inject before a
+     * class/method/field definition (default [CommentMap.EMPTY] ⇒ no injection). With both at their empty
+     * defaults the output is byte-identical to the pre-feature backend — the load-bearing invariant that
+     * keeps the differential oracle unaffected. Both are read-only here, so the parallel per-class render
+     * path stays race-free. Mirrors `JavaCodeGenerator.generate`.
+     */
+    fun generate(
+        cls: IrClass,
+        aliasMap: AliasMap = AliasMap.EMPTY,
+        commentMap: CommentMap = CommentMap.EMPTY,
+    ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = ImportCollector(packageName)
 
-        // Pass 1: populate imports (output discarded).
-        ClassEmitter(CodeWriter(), imports).emitClass(cls, topLevel = true)
+        // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
+        // used so both passes make identical name/variable choices (the comment injection is a no-op here).
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -68,7 +85,7 @@ class KotlinCodeGenerator {
             for (imp in importList) code.add("import ").add(KotlinIdentifiers.sanitizeQualified(imp)).newLine()
             code.newLine()
         }
-        ClassEmitter(code, imports).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -79,11 +96,31 @@ class KotlinCodeGenerator {
     private class ClassEmitter(
         private val code: CodeWriter,
         private val imports: ImportCollector,
+        private val aliasMap: AliasMap = AliasMap.EMPTY,
+        private val root: IrRoot? = null,
+        private val commentMap: CommentMap = CommentMap.EMPTY,
     ) {
-        private val types = KotlinTypeRenderer(imports)
+        private val types = KotlinTypeRenderer(imports, aliasMap, root)
+
+        /**
+         * Inject the user's comment (if any) for [ref] as `//` line(s) at the current indent, immediately
+         * before the definition that follows. Byte-identical fast path: with no comments loaded
+         * ([CommentMap.EMPTY], the default) this emits nothing, so accurate output is unchanged. The comment
+         * carries NO annotation — it is pure decoration, so it never appears as a definition/reference and
+         * cannot perturb `nodeAt`/find-usages; it merely shifts the following definition annotation's offset,
+         * which is internally consistent per render. `//` line comments are identical in Java and Kotlin, so
+         * the SHARED [emitLineComment] (multi-line split + newline/NUL/`\u`-escape defusal — all
+         * language-agnostic) is reused verbatim; a weird comment can never break the source (rule 4).
+         */
+        private fun emitUserComment(ref: CodeNodeRef) {
+            if (commentMap.isEmpty) return
+            val text = commentMap.commentFor(ref) ?: return
+            code.emitLineComment(text)
+        }
 
         fun emitClass(cls: IrClass, topLevel: Boolean) {
             emitErrorComment(cls)
+            emitUserComment(ClassNodeRef(cls.fullName))
             val kind = classKind(cls)
             // A confirmed Kotlin `data class`: its canonical-constructor properties move into the header
             // and the compiler-only members (canonical ctor, componentN, copy/copy$default) are dropped.
@@ -223,7 +260,10 @@ class KotlinCodeGenerator {
             if (dataShape != null) code.add("data ")
             code.add(keywordFor(kind))
             code.attachDefinition(ClassNodeRef(cls.fullName))
-            code.add(KotlinIdentifiers.sanitize(cls.shortName))
+            // The metadata ref keeps the binary identity; the emitted text is the alias when the class was
+            // renamed (deobfuscation/user), spelled by the single source of truth every reference also uses
+            // ([KotlinSourceName]). Empty map ⇒ `sanitize(cls.shortName)`, byte-identical to before.
+            code.add(KotlinSourceName.sourceSimpleName(cls, aliasMap))
             if (dataShape != null) emitPrimaryConstructor(cls, dataShape)
             emitSupertypes(cls, kind)
         }
@@ -244,7 +284,9 @@ class KotlinCodeGenerator {
                 val isFinal = KotlinModifiers.has(field.accessFlags, KotlinModifiers.FINAL)
                 code.add(if (isFinal) "val " else "var ")
                 code.attachDefinition(FieldNodeRef(cls.fullName, field.name))
-                code.add(KotlinIdentifiers.sanitize(field.name))
+                // Alias at the data-class property definition too, so a renamed backing field stays coherent
+                // with its use sites. Empty map ⇒ `sanitize(field.name)`, byte-identical.
+                code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
                 code.add(": ")
                 emitTypeName(field.type)
             }
@@ -481,6 +523,9 @@ class KotlinCodeGenerator {
         private class StaticInitContext(val clinit: IrMethod?, val suppressed: MutableSet<Instruction>)
 
         private fun emitProperty(cls: IrClass, field: IrField, staticInit: StaticInitContext? = null) {
+            // User comment before the property definition (any form below), mirroring the Java backend's
+            // field comment. Empty map ⇒ nothing emitted, byte-identical.
+            emitUserComment(FieldNodeRef(cls.fullName, field.name))
             // A `static final` field whose value is a non-literal single unconditional `<clinit>` store is
             // rendered `val X = <the store's RHS>` (the store is suppressed in the init block). Kotlin
             // cannot reassign a `val` in `init {}`, so this is what makes such a field compile at all.
@@ -533,7 +578,9 @@ class KotlinCodeGenerator {
 
         private fun emitPropertyNameAndType(cls: IrClass, field: IrField) {
             code.attachDefinition(FieldNodeRef(cls.fullName, field.name))
-            code.add(KotlinIdentifiers.sanitize(field.name))
+            // Metadata ref keeps the binary name; text uses the alias when renamed (empty map ⇒
+            // `sanitize(field.name)`, byte-identical), matching every reference to this field.
+            code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
             code.add(": ").add(types.render(field.type))
         }
 
@@ -572,7 +619,7 @@ class KotlinCodeGenerator {
             if (field.accessFlags and staticFinal != staticFinal) return false
             if (field.constValue != null) return false // a compile-time literal is handled as `const val`
             val store = singleUnconditionalStore(clinit, cls.fullName, field.name) ?: return false
-            val writer = MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList())
+            val writer = MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap)
             val toSuppress = writer.planStaticFinalInline(store, staticInit.suppressed) ?: return false
             code.add(KotlinModifiers.visibility(field.accessFlags))
             code.add("val ")
@@ -636,6 +683,10 @@ class KotlinCodeGenerator {
             }
 
         private fun emitMethodBody(cls: IrClass, method: IrMethod, kind: ClassKind) {
+            // Emitted INSIDE the caller's guardMember (emitMethod → guardMember → here): a comment on a
+            // member is part of that member's guarded emission, so if the body fails the comment rolls back
+            // with it and the honest `// JADXMP ERROR` marker replaces the whole member. Empty map ⇒ nothing.
+            emitUserComment(methodRef(cls, method))
             emitErrorComment(method)
             val isConstructor = method.name == "<init>"
             val overrides = isOverride(cls, method, kind)
@@ -645,7 +696,9 @@ class KotlinCodeGenerator {
                 code.add(methodModality(cls, method, kind, overrides))
                 code.add("fun ")
                 code.attachDefinition(methodRef(cls, method))
-                code.add(KotlinIdentifiers.sanitize(method.name))
+                // Metadata ref keeps the binary identity; text uses the alias when renamed (empty map ⇒
+                // `sanitize(method.name)`, byte-identical), matching every call site.
+                code.add(KotlinMemberAliases.aliasOf(method, aliasMap))
             } else {
                 code.attachDefinition(methodRef(cls, method))
                 code.add("constructor")
@@ -677,7 +730,7 @@ class KotlinCodeGenerator {
             // honest body marker when the delegation can't be faithfully hoisted (rule 4), leaving the body
             // path unchanged. The SAME writer must render header then body so variable naming/ids stay in
             // sync between the two.
-            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames)
+            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames, aliasMap = aliasMap)
             if (isConstructor) writer.emitConstructorDelegationHeader()
             code.add(" ")
             emitBody(writer)
@@ -810,11 +863,14 @@ class KotlinCodeGenerator {
             }
 
         private fun emitInitBlockBody(cls: IrClass, method: IrMethod, suppressed: Set<Instruction>) {
+            // An init block renders a `<clinit>` / object `<init>`; comment it by that method's ref (inside
+            // the caller's guardMember). Empty map ⇒ nothing emitted, byte-identical.
+            emitUserComment(methodRef(cls, method))
             emitErrorComment(method)
             code.attachDefinition(methodRef(cls, method))
             code.add("init {").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, NameGenerator(), emptyList(), suppressed).writeBody()
+            MethodBodyWriter(code, imports, method, NameGenerator(), emptyList(), suppressed, aliasMap = aliasMap).writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()

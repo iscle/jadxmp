@@ -1,5 +1,6 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
@@ -83,8 +84,16 @@ internal class MethodBodyWriter(
     // synthesized by the compiler), or a `static final` field's single store that was hoisted into the
     // field's `val X = <expr>` initializer. See [KotlinCodeGenerator]. Empty for an ordinary body.
     private val suppressed: Set<Instruction> = emptySet(),
+    // Deobfuscation/user rename overrides consulted at every field/method/type *reference* emitted in this
+    // body. [AliasMap.EMPTY] (the default) ⇒ the byte-identical no-deobfuscation path: every reference is
+    // spelled by [KotlinIdentifiers.sanitize] of its raw name, with no model resolution (see the resolvers
+    // in [KotlinMemberAliases]/[KotlinTypeRenderer], which short-circuit on the empty map before any lookup).
+    private val aliasMap: AliasMap = AliasMap.EMPTY,
 ) {
-    private val types = KotlinTypeRenderer(imports)
+    private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
+
+    /** The loaded model, used to resolve a field/method reference to its (possibly renamed) alias. */
+    private val root get() = method.declaringClass.root
 
     // When set, a RegisterOperand renders as its (inlined) defining expression rather than a variable
     // name — used to render a hoisted `static final` initializer outside the `<clinit>` variable scope,
@@ -712,7 +721,10 @@ internal class MethodBodyWriter(
     private fun emitFieldName(field: FieldRef?) {
         if (field != null) {
             code.attachReference(FieldNodeRef(className(field.declaringType), field.name))
-            code.add(KotlinIdentifiers.sanitize(field.name))
+            // The metadata ref above keeps the binary name (jump-to-def identity); the emitted text resolves
+            // to the referenced field's alias so a deobfuscation/user rename shows at the use as at its
+            // definition. Empty map ⇒ exactly `sanitize(field.name)`, byte-identical to before.
+            code.add(KotlinMemberAliases.aliasForFieldRef(root, field, aliasMap))
         } else {
             // A field-opcode insn that is not a FieldInstruction carries no field name. The decoder always
             // builds the right subclass, so this is unreachable today — but fabricating a `field` identifier
@@ -1202,7 +1214,9 @@ internal class MethodBodyWriter(
         }
         code.add(".")
         code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
-        code.add(KotlinIdentifiers.sanitize(target.name))
+        // Reference display resolves to the called method's alias (matching its definition, including any
+        // deobfuscation/user override); empty map ⇒ exactly `sanitize(target.name)`, byte-identical.
+        code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1)
     }
 
@@ -1243,7 +1257,9 @@ internal class MethodBodyWriter(
             code.add(".")
         }
         code.attachReference(MethodNodeRef(className(boot.declaringType), boot.name, boot.paramTypes.map { it.toString() }))
-        code.add(KotlinIdentifiers.sanitize(boot.name))
+        // Same alias resolution as an ordinary call — a renamed bootstrap method reads its new name (empty
+        // map ⇒ `sanitize(boot.name)`, byte-identical). Mirrors the Java backend's `methodCallName(boot)`.
+        code.add(KotlinMemberAliases.aliasForMethodRef(root, boot, aliasMap))
         code.add("(")
         emitClassName(METHOD_HANDLES_TYPE)
         code.add(".lookup(), ")
