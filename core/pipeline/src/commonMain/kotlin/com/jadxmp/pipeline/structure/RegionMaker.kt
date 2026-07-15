@@ -1399,8 +1399,15 @@ internal class RegionMaker(
      * or absent normal exits, or a try-scoped value that escapes and would need declaration hoisting.
      */
     private fun makeTry(head: BasicBlock, loopCtx: LoopCtx?): BuiltTry {
-        val handlerSet = protectingHandlers(head).toHashSet()
-        if (handlerSet.isEmpty()) throw Bail("protected head without a handler")
+        val allHandlers = protectingHandlers(head).toHashSet()
+        if (allHandlers.isEmpty()) throw Bail("protected head without a handler")
+        // Phase B nesting: some protecting handlers may already be open (emitted by an enclosing try — e.g. a
+        // `finally` catch-all covering this catch body). Build a try over ONLY the still-unopened handlers; the
+        // open ones' exception edges are recorded by that enclosing try. With nothing open (the common case)
+        // this is exactly the full handler set, so every existing path is byte-for-byte unchanged.
+        val openHere: Set<BasicBlock> = openHandlers[head] ?: emptySet()
+        val handlerSet = if (openHere.isEmpty()) allHandlers else allHandlers.filterTo(HashSet()) { it !in openHere }
+        if (handlerSet.isEmpty()) throw Bail("protected head with all handlers already open")
 
         // javac's inlined-cleanup try/finally — including the SPLIT-RANGE form, where the finally body spans
         // several try-ranges joined by non-throwing between-code (all sharing one catch-all) with a cleanup
@@ -1423,7 +1430,12 @@ internal class RegionMaker(
         // genuine multi-range branchy shape the finally-factoring paths above decline; returns null otherwise.
         reconstructFaithfulRethrowTry(head, handlerSet, loopCtx)?.let { return it }
 
-        val protectedBlocks = collectProtectedRegion(head, handlerSet)
+        // The two-handler faithful `catch (E) {…} finally-as-catch (Throwable) {…}` where the catch-all is a
+        // BRANCHY/nested cleanup the dedup finally-factoring paths above decline. Fires only for the genuine
+        // {explicit catch + re-throwing branchy catch-all} shape; returns null otherwise (falls through).
+        reconstructFaithfulCatchFinally(head, handlerSet, loopCtx)?.let { return it }
+
+        val protectedBlocks = collectProtectedRegion(head, handlerSet, openHere)
 
         // If the (single) handler is a re-throwing finally catch-all that ALSO protects a *split* range
         // outside this one — and the unified finally reconstruction above declined — we must BAIL, never fall
@@ -1755,6 +1767,208 @@ internal class RegionMaker(
 
     /** A use of the caught exception that is just the trailing re-throw (`throw e`), not a real inspection. */
     private fun isCleanupRethrowUse(insn: Instruction): Boolean = insn.opcode == IrOpcode.THROW
+
+    /**
+     * Reconstruct — FAITHFULLY, no de-dup — a two-handler `try { try { body } catch (E e) { cbody } } catch
+     * (Throwable th) { caCleanup; throw th; }` (the catch-all rendered as an explicit re-throwing catch, NOT a
+     * `finally`), for the shape `trycatch/TestNestedTryCatch4` exercises: a body protected by BOTH an explicit
+     * `catch (E)` AND a re-throwing catch-all whose cleanup is **branchy/nested** (its own `try {} catch`), with
+     * the catch-all also protecting the explicit catch's body (so it must nest OUTSIDE the typed catch — the
+     * Phase A handler-granular gate makes that expressible). The dedup finally-factoring paths
+     * ([reconstructTryCatchFinally] / [reconstructMultiExitFinally]) require a straight-line [finallyChain] and
+     * own the byte-identical `finally {}` shapes; this path fires ONLY when they decline (branchy cleanup).
+     *
+     * ## How it composes (nothing here is hidden, moved or de-duplicated)
+     * The catch-all [ca] is opened on every block it protects (the body AND the explicit-catch body), then the
+     * whole body is structured by the ordinary [makeRegion] recursion. Walking the body, the head is still
+     * protected by the UNOPENED explicit handler, so [makeTry] re-enters and builds the INNER `try { body }
+     * catch (E)` over just that one handler ([collectProtectedRegion] subtracts the open catch-all) — the typed
+     * catch nesting INSIDE the catch-all exactly as source. The typed-catch body, and each inlined-cleanup
+     * `try { is.close() } catch` tail, are themselves protected blocks that [makeRegion]/[makeTry] recurse into
+     * and structure (their nested tries placed once). The catch-all is transcribed 1:1 as `catch (Throwable e)`
+     * ([makeRegion] over its handler region, its own nested cleanup try structured recursively). Every block is
+     * placed EXACTLY ONCE by [makeRegion]; [verifyBlockCoverage]/[verifyEdgeCoverage] are the run-exactly-once
+     * proof — a doubled or dropped cleanup copy trips them and discards the whole tree.
+     *
+     * ## Run-exactly-once (each runtime path closes exactly once — STRICTLY better than jadx's double-close)
+     *  - normal exit: body → the inlined `try { close } catch` tail (once) → shared follow.
+     *  - body throws E: `catch (E)` runs its body, incl. its own inlined `try { close } catch` (once).
+     *  - body/catch-body throws non-E (or E-body throws): the catch-all `catch (Throwable)` runs its cleanup
+     *    `try { close } catch` (once), then re-throws.
+     * No path runs a close twice; jadx renders the catch-all as a `finally` and DOUBLE-closes on the normal
+     * path (inline tail + finally) — we deliberately diverge to the correct once-per-path output.
+     *
+     * ## The B33/B40 terminal-tail widening (documented, acceptable-faithful — route (a))
+     * A body / catch-body block that is itself a `try { is.close() } catch (IOException)` tail sits in the DEX
+     * try-table under ONLY its own IOException catch, NOT under the catch-all. Rendered lexically inside the
+     * catch-all's `try {}` (unavoidable — it is the normal continuation of the protected range, and leaving the
+     * method unstructured is worse) it gains catch-all protection: were its `close()` to throw a NON-IOException
+     * (an unchecked error its own catch does not match), control would newly route through the catch-all's
+     * cleanup+rethrow — one extra close the bytecode does not do. This is accepted as faithful because it is
+     * (i) EXACTLY jadx's own model (jadx widens these same tails into its `finally`); (ii) pathological-only —
+     * `InputStream.close()` declares only `IOException`, which the inner catch already handles, so no real path
+     * differs; (iii) the SAME scope-widening every `finally` reconstruction here already performs when it pulls
+     * an inlined-cleanup follow into the `try {}`; and jadxmp stays strictly better than jadx on every real path
+     * (no normal-path double-close). The gate below still REFUSES to pull in an UNPROTECTED throwing
+     * non-terminal block (genuine between-code) — that would silently widen a non-javac input.
+     *
+     * Returns null (falls through / honest bail) on ANY deviation from this narrow shape (rule 4).
+     */
+    private fun reconstructFaithfulCatchFinally(
+        head: BasicBlock,
+        handlerSet: Set<BasicBlock>,
+        loopCtx: LoopCtx?,
+    ): BuiltTry? {
+        if (handlerSet.size != 2) return null
+        val ca = handlerSet.firstOrNull { it[PipelineAttrs.EXC_HANDLER]?.catchAll == true } ?: return null
+        val explicit = handlerSet.single { it !== ca }
+        val caExc = ca[PipelineAttrs.EXC_HANDLER] ?: return null
+        val explicitExc = explicit[PipelineAttrs.EXC_HANDLER] ?: return null
+        if (explicitExc.catchAll) return null // both catch-all ⇒ not a catch + finally shape
+        if (!handlerReThrows(ca)) return null // a real catch (Throwable), not a finally / cleanup catch-all
+        // NOTE: we deliberately do NOT gate on `finallyChain(ca) == null`. The dedup finally-factoring paths
+        // ([reconstructTryCatchFinally]/[reconstructMultiExitFinally]) run BEFORE this in [makeTry] and own every
+        // shape they can factor into a byte-identical `finally {}`; reaching here means they declined. A
+        // catch-all whose cleanup contains a NESTED try (`try { is.close() } catch (IOException)`) looks
+        // straight-line to [finallyChain] (which only walks CLEAN successors, so the nested catch's exception
+        // edge is invisible) yet is NOT factorable — this faithful path renders it 1:1 as `catch (Throwable)`.
+        // Source order: the explicit `catch (E)` is tried BEFORE the catch-all (try-table priority order).
+        val prio = protectingHandlers(head)
+        val iE = prio.indexOf(explicit)
+        val iCA = prio.indexOf(ca)
+        if (iE < 0 || iCA < 0 || iE >= iCA) return null
+        // The catch-all binder must lead its handler and be read ONLY by the trailing re-throw (else its cleanup
+        // inspects the exception — a real catch we must never render as a cleanup rethrow).
+        val caMove = ca.instructions.firstOrNull()?.takeIf { it.opcode == IrOpcode.MOVE_EXCEPTION } ?: return null
+        val caExcVal = caMove.result?.ssaValue
+        if (caExcVal != null && caExcVal.uses.any { it.parent != null && !isCleanupRethrowUse(it.parent!!) }) return null
+        // The explicit catch must lead with a move-exception (the catch parameter).
+        if (explicit.instructions.firstOrNull()?.opcode != IrOpcode.MOVE_EXCEPTION) return null
+
+        val caRegion = handlerRegionBlocks(ca)
+        val eRegion = handlerRegionBlocks(explicit)
+        if (head in caRegion || head in eRegion) return null
+
+        // (1) Clean-flow reach from the head (body + any shared follow) and from the catch entry (catch body +
+        // the same shared follow). Neither enters the catch-all cleanup (reached only via exception edges).
+        val bodyReach = cleanReachable(head, caRegion) // may include the shared follow
+        val catchReach = cleanReachable(explicit, caRegion) // may include the shared follow
+        if (head in catchReach || explicit in bodyReach) return null // the two must not clean-flow into each other
+
+        // (2) The shared follow: where the body's normal exit and the catch's normal exit reconverge. It is the
+        // dominating block of the reach-intersection; it (and its clean tail) belong to NEITHER region — they are
+        // placed ONCE after the whole try/catch. 0 (every path returns/throws) or 1 shared follow is supported.
+        val shared = bodyReach.filter { it in catchReach }
+        val follow: BasicBlock? = when {
+            shared.isEmpty() -> null
+            else -> shared.singleOrNull { blk -> shared.all { it === blk || blk.id in it.dominators } } ?: return null
+        }
+        if (follow === exit) return null
+        val followTail: Set<BasicBlock> = if (follow == null) emptySet() else cleanReachable(follow, caRegion)
+        val body = bodyReach.filterTo(HashSet()) { it !in followTail }
+        val eCatchBody = catchReach.filterTo(HashSet()) { it !in followTail }
+        if (body.isEmpty() || eCatchBody.isEmpty()) return null
+        if (body.any { it in eCatchBody }) return null
+        if (eCatchBody.any { it in caRegion } || body.any { it in caRegion }) return null
+
+        // (3) Validate both bodies: single-entry hammocks; each protected block is covered only by handlers we
+        // model here or its own nested try; each UNPROTECTED throwing non-terminal block bails (route-(a) gate).
+        if (!validFaithfulCatchRegion(body, head, setOf(explicit, ca))) return null
+        if (!validFaithfulCatchRegion(eCatchBody, explicit, setOf(ca))) return null
+
+        // (4) Every block the catch-all protects must lie inside body ∪ eCatchBody, and every block the explicit
+        // catch protects inside body — an omitted range would carry an unaccounted-for exit (a dropped cleanup).
+        val insideTry = HashSet(body).apply { addAll(eCatchBody) }
+        for (b in method.blocks) {
+            if (b === exit || b in caRegion || b in eRegion) continue
+            if (ca in protectingHandlers(b) && b !in insideTry) return null
+            if (explicit in protectingHandlers(b) && b !in body) return null
+        }
+        if (tryDefsEscape(insideTry)) return null
+
+        // (5) Open the catch-all on every block it protects (body + catch body) so [makeRegion] does NOT re-open
+        // it — the typed catch and the nested cleanup tries stay INSIDE this one catch-all. The explicit catch is
+        // deliberately left UNOPENED so the head re-enters [makeTry] and builds the inner `try { body } catch (E)`.
+        val caProtected = insideTry.filter { ca in protectingHandlers(it) }
+        openTryHandlers(caProtected, setOf(ca))
+        val middleBody: Region = try {
+            withActiveExit(follow) {
+                makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            }
+        } finally {
+            closeTryHandlers(caProtected, setOf(ca))
+        }
+        // Every exception edge from a catch-all-protected block to the catch-all is represented (coverage net).
+        for (b in caProtected) recordEdge(b, ca)
+
+        // (6) Faithful catch-all: hide its move-exception (the catch param) and transcribe the handler region as
+        // `catch (Throwable e)`. It re-throws on every path, so it has no normal follow of its own.
+        caMove.add(AttrFlag.DONT_GENERATE)
+        val caBody = makeRegion(ca, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+        val caClause = CatchClause(catchTypesFor(caExc), caMove.result, caBody)
+        return BuiltTry(TryCatchRegion(middleBody, listOf(caClause)), follow)
+    }
+
+    /**
+     * The blocks clean-flow-reachable from [head] (inclusive), stopping at the method exit and at [stopAt] (a
+     * handler region reached only via exception edges, or the shared follow). Used by
+     * [reconstructFaithfulCatchFinally] to delimit the try body and the explicit-catch body.
+     */
+    private fun cleanReachable(head: BasicBlock, stopAt: Set<BasicBlock>): Set<BasicBlock> {
+        val region = HashSet<BasicBlock>()
+        val stack = ArrayDeque<BasicBlock>()
+        stack.addLast(head)
+        while (stack.isNotEmpty()) {
+            cancellation.ensureActive()
+            val b = stack.removeLast()
+            if (b in region) continue
+            region.add(b)
+            for (s in cleanSucc(b)) {
+                if (s === exit || s in stopAt) continue
+                stack.addLast(s)
+            }
+        }
+        return region
+    }
+
+    /**
+     * Validate a [reconstructFaithfulCatchFinally] body: a single-entry hammock ([head] dominates every block,
+     * each entered only from within), no loop header / synchronized inside that this narrow path does not model,
+     * and — the route-(a) gate — no UNPROTECTED throwing NON-terminal block (genuine between-code that would be
+     * NEWLY routed through the catch-all when the bytecode propagates it directly). Blocks protected by
+     * [ownHandlers] (the shared range) or by their OWN nested try (an inlined `try { close } catch` tail) are
+     * allowed: their nested tries are structured by [makeTry] recursion, and their acceptable catch-all
+     * widening is the documented route-(a) faithful divergence (see the method KDoc).
+     */
+    private fun validFaithfulCatchRegion(
+        region: Set<BasicBlock>,
+        head: BasicBlock,
+        ownHandlers: Set<BasicBlock>,
+    ): Boolean {
+        if (region.isEmpty()) return false
+        for (b in region) {
+            if (b !== head && head.id !in b.dominators) return false // single entry
+            // Entered only from within the region — EXCEPT a loop back-edge (the latch is in-region, but a loop
+            // header's clean preds include it). Loop headers are allowed: [makeRegion] structures the inner
+            // `while` (TestNestedTryCatch4's read/write loop lives inside the try) and its follow stays in-region.
+            if (b !== head && b !in loopHeaders && cleanPreds(b).any { it !in region }) return false
+            if (startsSynchronized(b)) return false
+            val handlers = protectingHandlers(b)
+            val ownedByUs = handlers.isNotEmpty() && ownHandlers.containsAll(handlers)
+            // Route-(a) gate: an UNPROTECTED block that can throw and flows ONWARD (non-terminal) would have its
+            // exception newly routed through the catch-all. Terminal `[…; return/throw]` tails are faithful (the
+            // finally copies). A block guarded by its OWN try (a nested cleanup) is fine — its widening is route
+            // (a). The region [head] is exempt: for the try body it is the protected entry, and for the catch
+            // body it is the `move-exception` binder (unprotected by construction, never throwing). Only bare,
+            // unprotected, throwing, non-terminal BETWEEN-code bails.
+            if (b !== head && !ownedByUs && handlers.isEmpty() && !isTerminal(b) &&
+                cleanSucc(b).any { it !== exit } && b.instructions.any { mayThrow(it) }
+            ) {
+                return false
+            }
+        }
+        return true
+    }
 
     private fun reconstructMultiExitFinally(
         head: BasicBlock,
@@ -2210,8 +2424,18 @@ internal class RegionMaker(
      * The maximal set of blocks that lie in the try with this [handlerSet]: reachable from [head] over
      * clean flow while every block carries exactly the same handler set. A block with a different (or no)
      * handler set is outside the try — a follow, a handler, or an inner/outer try's block.
+     *
+     * [openHere] are protecting handlers ALREADY opened by an enclosing try (Phase B nesting: a `finally`
+     * catch-all covering this catch body). They are subtracted before the match, so a block whose UNOPENED
+     * handlers equal [handlerSet] and that is ALSO covered by every open handler joins the region — the inner
+     * try is built over only the not-yet-emitted handlers. With no open handlers (the common case) this is
+     * exactly the old exact-set match, so existing behaviour is unchanged.
      */
-    private fun collectProtectedRegion(head: BasicBlock, handlerSet: Set<BasicBlock>): Set<BasicBlock> {
+    private fun collectProtectedRegion(
+        head: BasicBlock,
+        handlerSet: Set<BasicBlock>,
+        openHere: Set<BasicBlock> = emptySet(),
+    ): Set<BasicBlock> {
         val region = HashSet<BasicBlock>()
         val stack = ArrayDeque<BasicBlock>()
         stack.addLast(head)
@@ -2219,7 +2443,9 @@ internal class RegionMaker(
             cancellation.ensureActive()
             val b = stack.removeLast()
             if (b in region) continue
-            if (protectingHandlers(b).toHashSet() != handlerSet) continue // outside this try
+            val hs = protectingHandlers(b).toHashSet()
+            if (openHere.isNotEmpty() && !hs.containsAll(openHere)) continue // not under the same enclosing try
+            if ((hs - openHere) != handlerSet) continue // outside this try (unopened handlers differ)
             region.add(b)
             for (s in cleanSucc(b)) stack.addLast(s)
         }
@@ -2290,9 +2516,12 @@ internal class RegionMaker(
                 catches.add(CatchClause(catchTypesFor(excHandler), null, SequenceRegion()))
                 continue
             }
-            // A distinct handler (reached only exceptionally). A handler that is itself inside another try
-            // (a nested try in the catch body) is not modelled yet — bail honestly.
-            if (isProtected(h)) throw Bail("nested try in handler not supported yet")
+            // A distinct handler (reached only exceptionally). A handler whose ENTRY is itself protected by an
+            // UNOPENED try (a genuine nested try starting at the catch entry) is not modelled — bail honestly.
+            // But a catch body covered by an already-open ENCLOSING `finally` catch-all (Phase B: the finally
+            // legitimately protects the catch body) is fine — [makeRegion] structures it, recursing into any
+            // nested try it contains via the ordinary [makeTry] gate; unstructurable ⇒ that recursion bails.
+            if (hasUnopenedHandler(h)) throw Bail("nested try in handler not supported yet")
             // The leading move-exception binds the caught
             // value; hide it (it becomes the catch param). makeRegion emits the catch body up to the shared
             // follow, recording/placing those blocks itself.
