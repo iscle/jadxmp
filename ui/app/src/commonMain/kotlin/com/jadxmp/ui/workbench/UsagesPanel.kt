@@ -28,7 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.jadxmp.ui.client.NodeKind
 import com.jadxmp.ui.client.UsageResults
 import com.jadxmp.ui.client.UsageSiteRow
 import com.jadxmp.ui.component.NodeKindBadge
@@ -139,7 +138,9 @@ private fun UsageRow(site: UsageSiteRow, onOpen: () -> Unit) {
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(JadxTheme.spacing.sm),
     ) {
-        NodeKindBadge(NodeKind.CLASS)
+        // The referring site's own kind (method / field / class scope), already resolved by the client —
+        // a method usage must show a method badge, not a blanket class badge.
+        NodeKindBadge(site.kind)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(JadxTheme.spacing.xxs)) {
             Row(horizontalArrangement = Arrangement.spacedBy(JadxTheme.spacing.xs), verticalAlignment = Alignment.CenterVertically) {
                 Text(site.classLabel, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -332,6 +332,38 @@ class WorkbenchStateTest {
         assertEquals(null, state.ui.value.codeSearch, "switching to a name search drops the code scan state")
     }
 
+    @Test
+    fun clearingSearchStopsTheScanAndDropsAllResultSets() = runTest {
+        // The invariant the toolbar search toggle-off (and Esc, and the panel Close) rely on: clearSearch
+        // cancels any running scan and nulls every result set, so reopening search never shows stale hits.
+        val state = WorkbenchState(codeSearchClient(), CoroutineScope(UnconfinedTestDispatcher(testScheduler)))
+        state.runCodeSearch("token")
+        advanceUntilIdle()
+        assertTrue(state.ui.value.codeSearch != null)
+
+        state.clearSearch()
+        assertEquals(null, state.ui.value.codeSearch, "code scan state is dropped")
+        assertEquals(null, state.ui.value.searchResults, "name results are dropped")
+        assertEquals(null, state.ui.value.memberSearch, "member scan state is dropped")
+    }
+
+    // ── Document cache bound (LRU eviction within a project) ──────────────────────
+
+    @Test
+    fun theDocumentCacheIsBoundedAndEvictsTheOldest() = runTest {
+        val state = WorkbenchState(FakeClient(), CoroutineScope(UnconfinedTestDispatcher(testScheduler)))
+        // Open more distinct documents than the cache bound; growth must stop at the bound, evicting oldest
+        // (a revisit re-decompiles through the client's own cache, so eviction is safe).
+        val total = MAX_CACHED_DOCUMENTS + 5
+        for (i in 1..total) state.openDocument(NodeId("cls:C$i"))
+        advanceUntilIdle()
+
+        val docs = state.ui.value.documents
+        assertEquals(MAX_CACHED_DOCUMENTS, docs.size, "the in-memory document cache is bounded")
+        assertFalse(DocKey(NodeId("cls:C1"), CodeView.JAVA) in docs, "the oldest document was evicted")
+        assertTrue(DocKey(NodeId("cls:C$total"), CodeView.JAVA) in docs, "the most-recent document is retained")
+    }
+
     /**
      * A client whose [code] parks the first decompile of [gatedNode] inside a [NonCancellable] section
      * until [gate] completes — modelling a CPU-bound decompile that finishes (and returns) even after

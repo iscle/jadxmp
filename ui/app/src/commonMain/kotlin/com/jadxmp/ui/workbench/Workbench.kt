@@ -73,6 +73,12 @@ import com.jadxmp.ui.theme.JadxTheme
 import com.jadxmp.ui.theme.MonoFontFamily
 
 /**
+ * The focus-owning overlays whose open/close SET drives root focus reclaim (see [Workbench]). Each grabs
+ * focus for its own text field on mount; the usages panel is deliberately absent (it has no field).
+ */
+private enum class OverlayFocus { FIND, GO_TO_LINE, SEARCH }
+
+/**
  * Top-level application composable. Owns the [WorkbenchState] and the light/dark selection, and hosts
  * the [Workbench] inside [JadxTheme]. This is the single entry point the platform shells
  * (desktopApp/webApp/androidApp) call. Injecting a [SettingsStore] makes theme / flatten / preferred
@@ -166,6 +172,9 @@ fun Workbench(
                 ui.goToLine != null -> { state.closeGoToLine(); true }
                 ui.find != null -> { state.closeFind(); true }
                 showSearch -> { showSearch = false; state.clearSearch(); true }
+                // Close the Settings panel before falling back to history-back, so Esc dismisses Settings
+                // instead of silently navigating the editor while the panel stays open.
+                showSettings -> { showSettings = false; true }
                 ui.history.canGoBack -> { state.goBack(); true }
                 else -> false
             }
@@ -176,13 +185,29 @@ fun Workbench(
             null -> false
         }
 
-    // Hold focus at the root whenever no overlay owns it — at startup, and again after the Find bar or
-    // search panel (which grab focus for their fields) close, so global shortcuts keep working without a
-    // click. Keyed on the "no overlay open" state so it only fires on those transitions, not every click.
+    // Hold focus at the root whenever no focus-owning overlay owns it, so global shortcuts keep working
+    // without a click. The focus-owning overlays are the Find bar, the Go-to-line input, and the search
+    // panel — each grabs focus for its text field on mount. The usages panel is excluded: it has no field
+    // and never takes focus. We key on the whole SET of open overlays (not a single "any open" boolean),
+    // because the bug is a STACKED transition: Ctrl+F, then Ctrl+G, then Esc closes Go-to-line while Find
+    // stays open — the surviving Find bar's one-shot focus grab already fired and won't re-fire, so focus
+    // is orphaned and every global shortcut incl. Esc goes dead. A newly-opened overlay focuses its own
+    // field on mount (we must not steal that), so reclaim root focus only on a pure shrink — something
+    // closed, nothing opened — or a full close / startup. That keeps the keyboard live in every case.
     val rootFocus = remember { FocusRequester() }
-    val noOverlayFocus = ui.find == null && ui.goToLine == null && !showSearch
-    LaunchedEffect(noOverlayFocus) {
-        if (noOverlayFocus) runCatching { rootFocus.requestFocus() }
+    val openOverlays = buildSet {
+        if (ui.find != null) add(OverlayFocus.FIND)
+        if (ui.goToLine != null) add(OverlayFocus.GO_TO_LINE)
+        if (showSearch) add(OverlayFocus.SEARCH)
+    }
+    var previousOverlays by remember { mutableStateOf(emptySet<OverlayFocus>()) }
+    LaunchedEffect(openOverlays) {
+        val opened = openOverlays - previousOverlays
+        val closed = previousOverlays - openOverlays
+        if (opened.isEmpty() && (closed.isNotEmpty() || openOverlays.isEmpty())) {
+            runCatching { rootFocus.requestFocus() }
+        }
+        previousOverlays = openOverlays
     }
 
     // Route a shell-delivered file drop through the same open path a picked file takes. Installed at
@@ -219,7 +244,10 @@ fun Workbench(
                 onJumpMainActivity = state::jumpToMainActivity,
                 onJumpApplication = state::jumpToApplicationClass,
                 searchActive = showSearch,
-                onToggleSearch = { if (showSearch) showSearch = false else openSearch("") },
+                // Toggling the search box OFF must also cancel any running scan and drop stale results,
+                // exactly like the Esc path and the panel's Close button — otherwise the scan keeps
+                // burning the (single, on wasm) dispatcher and reopening shows leftover matches.
+                onToggleSearch = { if (showSearch) { showSearch = false; state.clearSearch() } else openSearch("") },
                 settingsActive = showSettings,
                 onToggleSettings = { showSettings = !showSettings },
                 deobfuscated = session is SessionState.Ready,

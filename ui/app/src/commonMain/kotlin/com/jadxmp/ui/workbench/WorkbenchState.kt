@@ -143,9 +143,15 @@ data class WorkbenchUiState(
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
 
-    /** The Resources-tree manifest node, when the open container carries an AndroidManifest.xml. */
-    val manifestNode: TreeNode?
-        get() = roots[TreeKind.RESOURCES]?.firstOrNull { it.id.value == MANIFEST_NODE_ID }
+    /**
+     * The Resources-tree manifest node, when the open container carries an AndroidManifest.xml. Derived
+     * once per state instance rather than on every access — it is read every toolbar recomposition (to
+     * gate the manifest quick-actions). `lazy(NONE)` because this UI state is only ever read on the single
+     * UI dispatcher, so no locking is wanted (and none is allowed on wasm, rule 1).
+     */
+    val manifestNode: TreeNode? by lazy(LazyThreadSafetyMode.NONE) {
+        roots[TreeKind.RESOURCES]?.firstOrNull { it.id.value == MANIFEST_NODE_ID }
+    }
 
     val activeDocument: CodeDocument?
         get() = tabs.active?.let { documents[DocKey(it.nodeId, it.view)] }
@@ -639,6 +645,7 @@ class WorkbenchState(
 
     fun closeTab(index: Int) {
         _ui.update { it.copy(tabs = it.tabs.close(index)) }
+        afterTabsChanged()
     }
 
     fun togglePin(index: Int) {
@@ -655,21 +662,51 @@ class WorkbenchState(
     /** Close every tab except [index] (and pinned tabs). */
     fun closeOtherTabs(index: Int) {
         _ui.update { it.copy(tabs = it.tabs.closeOthers(index)) }
+        afterTabsChanged()
     }
 
     /** Close every tab to the left of [index] (pinned tabs are kept). */
     fun closeTabsToLeft(index: Int) {
         _ui.update { it.copy(tabs = it.tabs.closeToLeft(index)) }
+        afterTabsChanged()
     }
 
     /** Close every tab to the right of [index] (pinned tabs are kept). */
     fun closeTabsToRight(index: Int) {
         _ui.update { it.copy(tabs = it.tabs.closeToRight(index)) }
+        afterTabsChanged()
     }
 
     /** Close all tabs except pinned ones. */
     fun closeAllTabs() {
         _ui.update { it.copy(tabs = it.tabs.closeAll()) }
+        afterTabsChanged()
+    }
+
+    /**
+     * Reconcile the in-editor Find / Go-to-line overlays after a tab-set change from any close path.
+     * [activateTab] already re-syncs Find (through ensureDocument → [recomputeFind]) and [openProject]'s
+     * fresh-state rebuild drops both overlays, but the close methods mutate [TabsState] directly — so
+     * without this they leave two things wrong: Find keeps painting the *previous* tab's matches on the
+     * now-active document, and — once the strip empties — [WorkbenchUiState.find] stays non-null over a
+     * torn-down editor, which holds the root focus-reclaim guard false so every global shortcut (Esc
+     * included) goes dead until the user clicks. So: when no tab remains, drop both overlays (nothing to
+     * find or jump within); otherwise recompute Find over whatever document is active now. The usages
+     * panel is deliberately untouched — its results are symbol-scoped, not tied to the active tab, so
+     * closing a tab never makes them stale. Runs on [scope]'s single dispatcher; [recomputeFind] no-ops
+     * when Find is hidden, so this is free on ordinary closes.
+     */
+    private fun afterTabsChanged() {
+        val active = _ui.value.tabs.active
+        if (active == null) {
+            _ui.update { it.copy(find = null, goToLine = null) }
+        } else {
+            // Load the newly-active document if it was LRU-evicted from the bounded cache — a close can
+            // auto-activate a neighbor whose doc was evicted, which would otherwise show a stuck
+            // "Loading…" until clicked. ensureDocument no-ops on a cache hit and re-syncs Find either
+            // way, so it subsumes the plain recomputeFind.
+            ensureDocument(active.nodeId, active.view)
+        }
     }
 
     /** Ctrl+Tab: activate the most-recently-used tab other than the current one (P2#14). */
@@ -677,17 +714,6 @@ class WorkbenchState(
         val index = _ui.value.tabs.lastUsedIndex() ?: return
         // Reuse the full activate path so history/tree-selection/document-load all stay in sync.
         activateTab(index)
-    }
-
-    /**
-     * "Select in tree" from the tab menu (P1#7): highlight the tab's node in the matching tree, switching
-     * the tree panel to Classes/Resources as needed. Best-effort — it selects the node but does not expand
-     * ancestors or scroll to it (a full reveal is a later batch).
-     */
-    fun selectTabInTree(index: Int) {
-        val tab = _ui.value.tabs.tabs.getOrNull(index) ?: return
-        val kind = if (tab.nodeId.value.startsWith("res:")) TreeKind.RESOURCES else TreeKind.CLASSES
-        _ui.update { it.copy(tree = it.tree.switchTree(kind).select(tab.nodeId)) }
     }
 
     fun updateCaret(caret: Int) {
@@ -1228,7 +1254,7 @@ class WorkbenchState(
                 }
                 state.copy(
                     busy = false,
-                    documents = state.documents + (key to doc),
+                    documents = putBoundedDocument(state.documents, key, doc),
                     tabs = state.tabs.copy(tabs = tabs),
                     status = doc.title,
                 )
@@ -1257,8 +1283,8 @@ class WorkbenchState(
     /**
      * The full "Select in tree" reveal: switch to the target's Classes/Resources tree, expand every
      * ancestor container so the node becomes a visible row, select it, and signal the tree pane (via
-     * [WorkbenchUiState.revealNonce]) to scroll it on-screen. A strict superset of [selectTabInTree],
-     * which only selected. Async on [scope] (it loads each ancestor's children) and epoch-guarded so a
+     * [WorkbenchUiState.revealNonce]) to scroll it on-screen — expanding ancestors and scrolling the row
+     * into view, not merely selecting it. Async on [scope] (it loads each ancestor's children) and epoch-guarded so a
      * superseded project's reveal is dropped. Fault isolation (rule 4): unresolved ancestors are skipped
      * — the client's own [DecompilerClient.childNodes] is fault-isolated, exactly as [loadChildren] relies.
      */
@@ -1414,6 +1440,34 @@ fun rememberWorkbenchState(
 
 /** Cap on nodes visited by [WorkbenchState.expandSubtree] so "expand subtree" on a giant package can't freeze the single wasm dispatcher (rule 1). */
 private const val MAX_SUBTREE_EXPAND: Int = 2000
+
+/**
+ * Max decompiled documents kept in [WorkbenchUiState.documents] within one open project. The cache is
+ * wiped on [WorkbenchState.openProject] but never pruned within a session, so a long browse could pin
+ * every class ever viewed. Bounding it is safe: a revisited tab re-decompiles through the client, which
+ * caches the result, so an eviction costs at most one cheap re-fetch — never a wrong render (rule 4).
+ * ~50 keeps the handful of open/recent tabs hot.
+ */
+internal const val MAX_CACHED_DOCUMENTS: Int = 50
+
+/**
+ * Insert [key]→[doc] into [documents], most-recent last, bounding the map to [MAX_CACHED_DOCUMENTS] by
+ * evicting the oldest entries. A [LinkedHashMap] preserves insertion order (wasm-safe — no `java.util`
+ * access, mirroring this file's existing uses); dropping and re-adding an existing key refreshes its
+ * recency so a reloaded tab is treated as newest. The just-inserted key is last, so it is never the one
+ * evicted. Pure — unit-tested via the [WorkbenchState.openDocument] path.
+ */
+private fun putBoundedDocument(
+    documents: Map<DocKey, CodeDocument>,
+    key: DocKey,
+    doc: CodeDocument,
+): Map<DocKey, CodeDocument> {
+    val next = LinkedHashMap<DocKey, CodeDocument>()
+    for ((k, v) in documents) if (k != key) next[k] = v
+    next[key] = doc
+    while (next.size > MAX_CACHED_DOCUMENTS) next.remove(next.keys.first())
+    return next
+}
 
 /**
  * Container node ids to expand so [target] becomes a visible tree row, root-most first. Pure and

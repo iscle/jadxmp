@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import com.jadxmp.ui.client.NodeId
 import com.jadxmp.ui.client.NodeKind
@@ -45,13 +46,19 @@ fun TreePane(
 ) {
     val tree = state.tree
     val roots = state.roots[tree.kind].orEmpty()
-    val rows = buildVisibleRows(
-        roots = roots,
-        childrenOf = { state.children(it) },
-        expanded = tree.expanded,
-        flattenPackages = tree.flattenPackages,
-        filter = tree.filter,
-    )
+    // Memoize the flattened row list. buildVisibleRows is O(n) (and O(n²) while a filter walks each
+    // subtree), yet TreePane recomposes on every unrelated UI change (selection, hover, the reveal nonce).
+    // Recompute only when an input that actually shapes the rows changes. childrenOf reads
+    // state.childrenCache, so that map is a key; the lambda re-captures the current [state] on each rerun.
+    val rows = remember(roots, state.childrenCache, tree.expanded, tree.flattenPackages, tree.filter) {
+        buildVisibleRows(
+            roots = roots,
+            childrenOf = { state.children(it) },
+            expanded = tree.expanded,
+            flattenPackages = tree.flattenPackages,
+            filter = tree.filter,
+        )
+    }
 
     // Eager package-chain compaction: with Flatten on (and no filter), a single-child package chain
     // must collapse into one dotted row without a click. buildVisibleRows only folds through children

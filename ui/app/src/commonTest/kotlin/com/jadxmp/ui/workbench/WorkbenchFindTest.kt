@@ -135,6 +135,60 @@ class WorkbenchFindTest {
         assertFalse(state.ui.value.find!!.noMatch)
     }
 
+    @Test
+    fun closingTheActiveTabRecomputesFindForTheNewlyActiveDocument() = runTest {
+        // Bug A: A + B open, Find active on A, close A → B becomes active. Find must recompute over B, not
+        // keep painting A's (now-gone) matches. Before the reconciler, closeTab left ui.find holding A's.
+        val state = WorkbenchState(FindFake(mapOf(a to "foo\nbar foo\nbaz", b to "foo")), scope())
+        state.openDocument(a)
+        state.openDocument(b)
+        advanceUntilIdle()
+        state.activateTab(0) // make A active
+        advanceUntilIdle()
+        state.setFindQueryOpen("foo")
+        advanceUntilIdle()
+        assertEquals(2, state.ui.value.find!!.count, "two 'foo' hits in A")
+
+        state.closeTab(0) // close A; B becomes active
+        advanceUntilIdle()
+        assertEquals(1, state.ui.value.find!!.count, "recomputed to B's single hit — no stale A matches")
+    }
+
+    @Test
+    fun closingTheLastTabClearsTheFindAndGoToLineOverlays() = runTest {
+        // Bug B: with the strip emptied the editor (and its Find/Go-to-line bars) unmounts, but the state
+        // overlays lingered non-null, which held the root focus-reclaim guard false → dead keyboard. The
+        // reconciler must drop both overlays when no tab remains.
+        val state = WorkbenchState(FindFake(mapOf(a to "foo\nbar")), scope())
+        state.openDocument(a)
+        advanceUntilIdle()
+        state.setFindQueryOpen("foo")
+        state.openGoToLine()
+        advanceUntilIdle()
+        assertTrue(state.ui.value.find != null && state.ui.value.goToLine != null, "both overlays open")
+
+        state.closeTab(0) // last tab
+        advanceUntilIdle()
+        assertNull(state.ui.value.find, "no tab left → the Find bar is dropped")
+        assertNull(state.ui.value.goToLine, "no tab left → the Go-to-line input is dropped")
+    }
+
+    @Test
+    fun closeAllTabsAlsoClearsTheFindOverlay() = runTest {
+        // The bulk closers (closeAll here) must reconcile the overlays exactly like closeTab.
+        val state = WorkbenchState(FindFake(mapOf(a to "foo", b to "foo")), scope())
+        state.openDocument(a)
+        state.openDocument(b)
+        advanceUntilIdle()
+        state.setFindQueryOpen("foo")
+        advanceUntilIdle()
+        assertTrue(state.ui.value.find != null)
+
+        state.closeAllTabs() // no pins → strip empties
+        advanceUntilIdle()
+        assertNull(state.ui.value.find, "Close-all with no pins empties the strip and drops Find")
+    }
+
     /** Open the Find bar (if closed) and set the query — mirrors typing into the bar. */
     private fun WorkbenchState.setFindQueryOpen(text: String) {
         if (ui.value.find == null) openFind()
