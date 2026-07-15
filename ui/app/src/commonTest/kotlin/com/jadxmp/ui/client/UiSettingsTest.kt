@@ -26,7 +26,8 @@ class UiSettingsTest {
     fun serializesToAFlatAllStringJsonObject() {
         val settings = UiSettings(ThemeMode.DARK, flattenPackages = true, preferredView = CodeView.KOTLIN)
         assertEquals(
-            """{"themeMode":"DARK","flattenPackages":"true","preferredView":"KOTLIN","wordWrap":"false","codeFontSize":"13.0"}""",
+            """{"themeMode":"DARK","flattenPackages":"true","preferredView":"KOTLIN","wordWrap":"false",""" +
+                """"codeFontSize":"13.0","showLineNumbers":"true","highlightCurrentLine":"true"}""",
             settings.serialize(),
         )
     }
@@ -46,6 +47,24 @@ class UiSettingsTest {
         val parsed = UiSettings.parse("""{"themeMode":"DARK"}""")
         assertEquals(false, parsed.wordWrap)
         assertEquals(DEFAULT_CODE_FONT_SIZE_SP, parsed.codeFontSize)
+    }
+
+    @Test
+    fun roundTripsLineNumberAndCurrentLineToggles() {
+        // Flip both editor toggles off their "on" default and confirm they survive the hand-rolled codec.
+        val settings = UiSettings(showLineNumbers = false, highlightCurrentLine = false)
+        val parsed = UiSettings.parse(settings.serialize())
+        assertEquals(false, parsed.showLineNumbers)
+        assertEquals(false, parsed.highlightCurrentLine)
+        assertEquals(settings, parsed)
+    }
+
+    @Test
+    fun missingLineNumberAndCurrentLineTogglesFallBackToOn() {
+        // A pre-preferences-window settings string carries neither key — each degrades to its "on" default.
+        val parsed = UiSettings.parse("""{"themeMode":"DARK"}""")
+        assertEquals(true, parsed.showLineNumbers)
+        assertEquals(true, parsed.highlightCurrentLine)
     }
 
     @Test

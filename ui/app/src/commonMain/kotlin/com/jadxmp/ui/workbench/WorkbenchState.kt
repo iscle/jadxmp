@@ -103,6 +103,10 @@ data class WorkbenchUiState(
     val wordWrap: Boolean = false,
     /** Code-editor font size in sp (P1#12 zoom); clamped to [MIN_CODE_FONT_SIZE_SP]..[MAX_CODE_FONT_SIZE_SP]. Persisted. */
     val codeFontSize: Float = DEFAULT_CODE_FONT_SIZE_SP,
+    /** Show the code-editor line-number gutter (Preferences → Editor). Persisted; defaults on. */
+    val showLineNumbers: Boolean = true,
+    /** Wash the caret's current line in the code editor (Preferences → Editor). Persisted; defaults on. */
+    val highlightCurrentLine: Boolean = true,
 ) {
     /** Children currently known for [parent] (empty until lazily loaded on expand). */
     fun children(parent: NodeId): List<TreeNode> = childrenCache[parent].orEmpty()
@@ -143,6 +147,8 @@ class WorkbenchState(
             tree = TreeUiState(flattenPackages = loadedSettings.flattenPackages),
             wordWrap = loadedSettings.wordWrap,
             codeFontSize = clampCodeFontSize(loadedSettings.codeFontSize),
+            showLineNumbers = loadedSettings.showLineNumbers,
+            highlightCurrentLine = loadedSettings.highlightCurrentLine,
         ),
     )
     val ui: StateFlow<WorkbenchUiState> = _ui.asStateFlow()
@@ -246,6 +252,8 @@ class WorkbenchState(
                 tree = TreeUiState(flattenPackages = prev.tree.flattenPackages),
                 wordWrap = prev.wordWrap,
                 codeFontSize = prev.codeFontSize,
+                showLineNumbers = prev.showLineNumbers,
+                highlightCurrentLine = prev.highlightCurrentLine,
             )
             maybeAutoOpenSingleClass(epoch)
         }
@@ -368,6 +376,8 @@ class WorkbenchState(
                 preferredView = s.preferredView,
                 wordWrap = s.wordWrap,
                 codeFontSize = s.codeFontSize,
+                showLineNumbers = s.showLineNumbers,
+                highlightCurrentLine = s.highlightCurrentLine,
             ),
         )
     }
@@ -398,6 +408,20 @@ class WorkbenchState(
         val clamped = clampCodeFontSize(sizeSp)
         if (clamped == _ui.value.codeFontSize) return
         _ui.update { it.copy(codeFontSize = clamped) }
+        persistSettings()
+    }
+
+    /** Toggle the code-editor line-number gutter (Preferences → Editor). Persists only on a real change. */
+    fun setShowLineNumbers(on: Boolean) {
+        if (on == _ui.value.showLineNumbers) return
+        _ui.update { it.copy(showLineNumbers = on) }
+        persistSettings()
+    }
+
+    /** Toggle the current-line highlight (Preferences → Editor). Persists only on a real change. */
+    fun setHighlightCurrentLine(on: Boolean) {
+        if (on == _ui.value.highlightCurrentLine) return
+        _ui.update { it.copy(highlightCurrentLine = on) }
         persistSettings()
     }
 

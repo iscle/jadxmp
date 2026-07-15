@@ -34,6 +34,10 @@ data class UiSettings(
     val wordWrap: Boolean = false,
     /** Code-editor font size in sp (P1#12 zoom). Kept flat so it round-trips through the codec. */
     val codeFontSize: Float = DEFAULT_CODE_FONT_SIZE_SP,
+    /** Show the code-editor line-number gutter. Defaults on (jadx-gui shows numbers by default). */
+    val showLineNumbers: Boolean = true,
+    /** Wash the caret's current line in the code editor. Defaults on (jadx-gui highlights it). */
+    val highlightCurrentLine: Boolean = true,
 ) {
     /** Serialize to the compact string a [SettingsStore] persists. */
     fun serialize(): String = SettingsCodec.serialize(this)
@@ -59,6 +63,8 @@ internal object SettingsCodec {
     private const val KEY_VIEW = "preferredView"
     private const val KEY_WORD_WRAP = "wordWrap"
     private const val KEY_FONT_SIZE = "codeFontSize"
+    private const val KEY_SHOW_LINE_NUMBERS = "showLineNumbers"
+    private const val KEY_HIGHLIGHT_CURRENT_LINE = "highlightCurrentLine"
 
     // Matches "key":"value" pairs. Keys are identifiers; values contain no quotes (enum names / booleans).
     private val PAIR = Regex("\"([A-Za-z0-9_]+)\"\\s*:\\s*\"([^\"]*)\"")
@@ -74,6 +80,10 @@ internal object SettingsCodec {
         appendField(KEY_WORD_WRAP, settings.wordWrap.toString())
         append(',')
         appendField(KEY_FONT_SIZE, settings.codeFontSize.toString())
+        append(',')
+        appendField(KEY_SHOW_LINE_NUMBERS, settings.showLineNumbers.toString())
+        append(',')
+        appendField(KEY_HIGHLIGHT_CURRENT_LINE, settings.highlightCurrentLine.toString())
         append('}')
     }
 
@@ -86,6 +96,9 @@ internal object SettingsCodec {
             preferredView = fields[KEY_VIEW].toCodeView(),
             wordWrap = fields[KEY_WORD_WRAP]?.toBooleanStrictOrNull() ?: false,
             codeFontSize = fields[KEY_FONT_SIZE]?.toFloatOrNull() ?: DEFAULT_CODE_FONT_SIZE_SP,
+            // Missing keys (an older settings string) degrade to the "on" defaults, never a throw.
+            showLineNumbers = fields[KEY_SHOW_LINE_NUMBERS]?.toBooleanStrictOrNull() ?: true,
+            highlightCurrentLine = fields[KEY_HIGHLIGHT_CURRENT_LINE]?.toBooleanStrictOrNull() ?: true,
         )
     }
 

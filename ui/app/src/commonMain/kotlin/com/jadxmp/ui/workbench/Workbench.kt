@@ -282,6 +282,14 @@ fun Workbench(
                             onFlattenChange = state::setFlatten,
                             defaultView = ui.preferredView,
                             onDefaultViewChange = state::setPreferredView,
+                            showLineNumbers = ui.showLineNumbers,
+                            onShowLineNumbersChange = state::setShowLineNumbers,
+                            highlightCurrentLine = ui.highlightCurrentLine,
+                            onHighlightCurrentLineChange = state::setHighlightCurrentLine,
+                            wordWrap = ui.wordWrap,
+                            onWordWrapChange = state::setWordWrap,
+                            codeFontSize = ui.codeFontSize,
+                            onCodeFontSizeChange = state::setCodeFontSize,
                             onClose = { showSettings = false },
                         )
                     }
@@ -459,6 +467,9 @@ private fun EditorArea(
                     codeFontSize = ui.codeFontSize,
                     onZoomIn = state::zoomInCode,
                     onZoomOut = state::zoomOutCode,
+                    // Presentational editor preferences (Preferences → Editor).
+                    showLineNumbers = ui.showLineNumbers,
+                    highlightCurrentLine = ui.highlightCurrentLine,
                 )
             } else {
                 EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())

@@ -172,4 +172,22 @@ class WorkbenchSettingsTest {
         state.resetCodeZoom()
         assertEquals(DEFAULT_CODE_FONT_SIZE_SP, state.ui.value.codeFontSize, "reset returns to default")
     }
+
+    @Test
+    fun lineNumberAndCurrentLineTogglesSeedAndPersist() = runTest {
+        // Seed the non-default (off) state from the store and confirm it lands in the live UI state.
+        val store = RecordingStore(UiSettings(showLineNumbers = false, highlightCurrentLine = false))
+        val state = WorkbenchState(EmptyClient(), scope(testScheduler), settingsStore = store)
+        assertFalse(state.ui.value.showLineNumbers)
+        assertFalse(state.ui.value.highlightCurrentLine)
+
+        // Each setter flips the live state and persists through the store.
+        state.setShowLineNumbers(true)
+        assertTrue(state.ui.value.showLineNumbers)
+        assertTrue(store.latest().showLineNumbers, "line-number toggle persists")
+
+        state.setHighlightCurrentLine(true)
+        assertTrue(state.ui.value.highlightCurrentLine)
+        assertTrue(store.latest().highlightCurrentLine, "current-line toggle persists")
+    }
 }

@@ -142,6 +142,10 @@ fun CodeViewer(
     onZoomIn: () -> Unit = {},
     /** Ctrl/Cmd+wheel-down over the code — shrink the font. */
     onZoomOut: () -> Unit = {},
+    /** Show the line-number gutter (Preferences → Editor). When false the gutter column is omitted entirely. */
+    showLineNumbers: Boolean = true,
+    /** Wash the caret's current line (Preferences → Editor). When false every row stays transparent. */
+    highlightCurrentLine: Boolean = true,
 ) {
     val syntax = JadxTheme.colors.syntax
     val scheme = MaterialTheme.colorScheme
@@ -257,7 +261,9 @@ fun CodeViewer(
                         codeStyle = codeStyle,
                         rowHeight = rowHeight,
                         gutterWidth = gutterWidth,
+                        showLineNumbers = showLineNumbers,
                         isCurrent = line.number == currentLine,
+                        highlightCurrentLine = highlightCurrentLine,
                         wrap = wordWrap,
                         hScroll = hScroll,
                         findRange = findRange,
@@ -299,7 +305,12 @@ fun CodeViewer(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .fillMaxWidth()
-                    .padding(start = gutterWidth, end = JadxTheme.spacing.xs, bottom = 2.dp),
+                    // Track the code column: offset by the gutter only while it is shown, else hug the edge.
+                    .padding(
+                        start = if (showLineNumbers) gutterWidth else JadxTheme.spacing.xs,
+                        end = JadxTheme.spacing.xs,
+                        bottom = 2.dp,
+                    ),
             )
         }
 
@@ -429,7 +440,9 @@ private fun CodeLineRow(
     codeStyle: TextStyle,
     rowHeight: Dp,
     gutterWidth: Dp,
+    showLineNumbers: Boolean,
     isCurrent: Boolean,
+    highlightCurrentLine: Boolean,
     wrap: Boolean,
     hScroll: ScrollState,
     findRange: IntRange?,
@@ -448,7 +461,8 @@ private fun CodeLineRow(
 ) {
     val colors = JadxTheme.colors
     val scheme = MaterialTheme.colorScheme
-    val rowBackground = if (isCurrent) colors.currentLineBackground else Color.Transparent
+    // Current-line wash is guarded by the preference; off leaves the row transparent (existing behavior otherwise).
+    val rowBackground = if (isCurrent && highlightCurrentLine) colors.currentLineBackground else Color.Transparent
     // The tokens of this line, shared by the wrap (FlowRow) and no-wrap (horizontal-scroll Row) paths so
     // each token keeps its exact click-to-def / right-click / find + occurrence highlight either way.
     val tokenContent: @Composable () -> Unit = {
@@ -491,22 +505,25 @@ private fun CodeLineRow(
     ) {
         // Gutter — fixed width, right-aligned line number in the code face. Top-aligned so a wrapped line
         // keeps its number beside the first visual row (single lines look centered since lineHeight == rowHeight).
-        Box(
-            Modifier
-                .width(gutterWidth)
-                .heightIn(min = rowHeight)
-                .background(scheme.background)
-                .padding(end = JadxTheme.spacing.lg),
-            contentAlignment = Alignment.TopEnd,
-        ) {
-            // Line numbers are excluded from a copied selection.
-            DisableSelection {
-                Text(
-                    line.number.toString(),
-                    style = codeStyle,
-                    color = if (isCurrent) colors.gutterActiveText else colors.gutterText,
-                    textAlign = TextAlign.End,
-                )
+        // Omitted wholesale when the line-number preference is off, reclaiming the column's horizontal space.
+        if (showLineNumbers) {
+            Box(
+                Modifier
+                    .width(gutterWidth)
+                    .heightIn(min = rowHeight)
+                    .background(scheme.background)
+                    .padding(end = JadxTheme.spacing.lg),
+                contentAlignment = Alignment.TopEnd,
+            ) {
+                // Line numbers are excluded from a copied selection.
+                DisableSelection {
+                    Text(
+                        line.number.toString(),
+                        style = codeStyle,
+                        color = if (isCurrent) colors.gutterActiveText else colors.gutterText,
+                        textAlign = TextAlign.End,
+                    )
+                }
             }
         }
         // Fold margin (P1#10): a chevron on header lines, empty elsewhere. Only present when the document
