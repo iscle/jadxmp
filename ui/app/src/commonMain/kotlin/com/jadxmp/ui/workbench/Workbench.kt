@@ -51,6 +51,7 @@ import com.jadxmp.ui.component.EmptyState
 import com.jadxmp.ui.component.GearGlyph
 import com.jadxmp.ui.component.HorizontalSplitPane
 import com.jadxmp.ui.component.Kbd
+import com.jadxmp.ui.component.AppClassGlyph
 import com.jadxmp.ui.component.ManifestGlyph
 import com.jadxmp.ui.component.SettingsPanel
 import com.jadxmp.ui.component.TargetGlyph
@@ -190,6 +191,7 @@ fun Workbench(
                 hasManifest = ui.manifestNode != null,
                 onOpenManifest = state::openManifest,
                 onJumpMainActivity = state::jumpToMainActivity,
+                onJumpApplication = state::jumpToApplicationClass,
                 searchActive = showSearch,
                 onToggleSearch = { if (showSearch) showSearch = false else openSearch("") },
                 settingsActive = showSettings,
@@ -297,6 +299,7 @@ private fun WorkbenchToolbar(
     hasManifest: Boolean,
     onOpenManifest: () -> Unit,
     onJumpMainActivity: () -> Unit,
+    onJumpApplication: () -> Unit,
     searchActive: Boolean,
     onToggleSearch: () -> Unit,
     settingsActive: Boolean,
@@ -325,9 +328,11 @@ private fun WorkbenchToolbar(
         ToolbarButton(onClick = onBack, enabled = canBack, square = true) { tint -> DirectionCaret(pointsLeft = true, tint = tint) }
         ToolbarButton(onClick = onForward, enabled = canForward, square = true) { tint -> DirectionCaret(pointsLeft = false, tint = tint) }
         VDivider()
-        // jadx quick actions: open the manifest and jump to the launcher activity (disabled with no manifest).
+        // jadx quick actions: open the manifest, jump to the launcher activity, jump to the Application
+        // class (all read the manifest, so all are disabled when the container carries none).
         ToolbarButton(onClick = onOpenManifest, enabled = hasManifest, square = true) { tint -> ManifestGlyph(tint = tint) }
         ToolbarButton(onClick = onJumpMainActivity, enabled = hasManifest, square = true) { tint -> TargetGlyph(tint = tint) }
+        ToolbarButton(onClick = onJumpApplication, enabled = hasManifest, square = true) { tint -> AppClassGlyph(tint = tint) }
 
         // Centered command/search box.
         Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {

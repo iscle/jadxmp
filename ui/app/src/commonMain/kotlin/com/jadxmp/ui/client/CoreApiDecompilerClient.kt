@@ -88,10 +88,11 @@ class CoreApiDecompilerClient(
                     model = LoadedModel()
                     return@withLock LoadOutcome(-1, decompiler.diagnostics)
                 }
-                // Badge each class row by its kind (interface/enum/annotation/class), read cheaply from the
-                // model with no decompilation and fault-isolated to the generic CLASS badge on any fault.
+                // Badge each class row by its kind (interface/enum/annotation/class) AND its access
+                // visibility (public/protected/private/package), read cheaply from the model with no
+                // decompilation and fault-isolated to the generic CLASS badge (no overlay) on any fault.
                 model = LoadedModel.build(decompiler.classNames) { fqn ->
-                    classNodeKind(runCatching { decompiler.classInfo(fqn) }.getOrNull())
+                    classNodeBadge(runCatching { decompiler.classInfo(fqn) }.getOrNull())
                 }
                 // Build the resources tree here (under the same lock) so a non-APK input honestly yields
                 // an empty Resources tree, and so the one-time manifest/arsc decode the tree needs runs on
@@ -169,6 +170,7 @@ class CoreApiDecompilerClient(
                 // A class expands to its declared members (childNodes(cls:…)); show the expander.
                 hasChildren = true,
                 secondary = fqn.substringBeforeLast('.', missingDelimiterValue = ""),
+                visibility = model.visibilityOf(fqn),
             )
         }
     }
@@ -347,6 +349,8 @@ class CoreApiDecompilerClient(
             nestedFqn = nestedFqn,
             // A nested-class row badges by its own kind; the lookup is cheap (no decompile) and fault-isolated.
             nestedKind = nestedFqn?.let { classNodeKind(runCatching { decompiler.classInfo(it) }.getOrNull()) },
+            // Access-visibility overlay from the member's own source modifiers (already computed by the model).
+            visibility = visibilityOf(modifiers),
         )
     }
 
@@ -461,29 +465,31 @@ class CoreApiDecompilerClient(
         val children: Map<NodeId, List<TreeNode>>,
         val classNames: List<String>,
         val classIndex: Map<String, String>,
-        private val kindByFqn: Map<String, NodeKind>,
+        private val badgeByFqn: Map<String, ClassNodeBadge>,
     ) {
         constructor() : this(emptyList(), emptyMap(), emptyList(), emptyMap(), emptyMap())
 
         /** The badge kind for a class row, falling back to the generic [NodeKind.CLASS] for an unknown fqn. */
-        fun kindOf(fqn: String): NodeKind = kindByFqn[fqn] ?: NodeKind.CLASS
+        fun kindOf(fqn: String): NodeKind = badgeByFqn[fqn]?.kind ?: NodeKind.CLASS
+
+        /** The access-visibility overlay for a class row, or `null` (no overlay) for an unknown fqn. */
+        fun visibilityOf(fqn: String): Visibility? = badgeByFqn[fqn]?.visibility
 
         companion object {
             /**
-             * Build the class tree. [kindOf] supplies each class row's badge kind
-             * (interface/enum/annotation/class), derived once per load from the model (no decompilation)
-             * so the whole tree — roots, package children, the scan index and search results — badges
-             * consistently from a single cached map.
+             * Build the class tree. [badgeOf] supplies each class row's kind + access visibility, derived
+             * once per load from the model (no decompilation) so the whole tree — roots, package children,
+             * the scan index and search results — badges consistently from a single cached map.
              */
-            fun build(names: List<String>, kindOf: (String) -> NodeKind): LoadedModel {
+            fun build(names: List<String>, badgeOf: (String) -> ClassNodeBadge): LoadedModel {
                 // childrenByPackage[""] holds the roots (top-level packages + default-package classes).
                 val childrenByPackage = HashMap<String, MutableList<TreeNode>>()
                 val allPackages = HashSet<String>()
-                val kindByFqn = HashMap<String, NodeKind>(names.size)
+                val badgeByFqn = HashMap<String, ClassNodeBadge>(names.size)
 
                 for (fqn in names) {
-                    val kind = kindOf(fqn)
-                    kindByFqn[fqn] = kind
+                    val badge = badgeOf(fqn)
+                    badgeByFqn[fqn] = badge
                     val pkg = fqn.substringBeforeLast('.', missingDelimiterValue = "")
                     if (pkg.isNotEmpty()) {
                         val parts = pkg.split('.')
@@ -493,9 +499,10 @@ class CoreApiDecompilerClient(
                         id = NodeId("cls:$fqn"),
                         label = fqn.substringAfterLast('.'),
                         // Distinct badge per class kind (interface/enum/annotation), generic CLASS otherwise.
-                        kind = kind,
+                        kind = badge.kind,
                         // Expands to the class's declared members (childNodes(cls:…)).
                         hasChildren = true,
+                        visibility = badge.visibility,
                     )
                 }
                 for (pkg in allPackages) {
@@ -514,7 +521,7 @@ class CoreApiDecompilerClient(
                     .mapValues { (_, kids) -> kids.sortedWith(nodeOrder) }
                 val roots = childrenByPackage[""].orEmpty().sortedWith(nodeOrder)
                 val classIndex = names.associateBy { canonicalName(it) }
-                return LoadedModel(roots, children, names, classIndex, kindByFqn)
+                return LoadedModel(roots, children, names, classIndex, badgeByFqn)
             }
 
             // Packages before classes; each group alphabetical — a conventional class-tree ordering.

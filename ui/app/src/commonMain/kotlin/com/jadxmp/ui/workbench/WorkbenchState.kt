@@ -50,8 +50,13 @@ private val LAUNCHER_ACTIVITY_REGEX = Regex(
     """<activity(?:-alias)?\b[^>]*?android:name\s*=\s*"([^"]+)"[\s\S]*?android\.intent\.category\.LAUNCHER""",
 )
 
-/** Extracts the `<manifest package="…">` app package for resolving a relative activity name. */
+/** Extracts the `<manifest package="…">` app package for resolving a relative activity/class name. */
 private val MANIFEST_PACKAGE_REGEX = Regex("""<manifest\b[^>]*?package\s*=\s*"([^"]+)"""")
+
+/** Locates the `<application android:name="…">` class name in decoded manifest text (best-effort). */
+private val APPLICATION_CLASS_REGEX = Regex(
+    """<application\b[^>]*?android:name\s*=\s*"([^"]+)"""",
+)
 
 /** The full observable UI state of the workbench. Derived render lists are computed in composables. */
 @Immutable
@@ -218,7 +223,20 @@ class WorkbenchState(
                 preferredView = prev.preferredView,
                 tree = TreeUiState(flattenPackages = prev.tree.flattenPackages),
             )
+            maybeAutoOpenSingleClass(epoch)
         }
+    }
+
+    /**
+     * jadx-gui convenience: when a freshly opened input holds exactly one class, open it immediately so a
+     * single-class jar/dex lands on its source rather than an unexpanded tree. Epoch-guarded (a superseded
+     * open never auto-opens into a newer project) and fault-isolated — a failed enumeration just skips it.
+     */
+    private suspend fun maybeAutoOpenSingleClass(epoch: Int) {
+        val classes = runCatching { client.classNodes() }.getOrNull().orEmpty()
+        if (epoch != openEpoch || classes.size != 1) return
+        val only = classes.single()
+        openDocument(only.id, only.label, kind = only.kind)
     }
 
     /** Views a node can be shown in (sync — used by the toolbar view switcher). */
@@ -329,16 +347,40 @@ class WorkbenchState(
         }
     }
 
+    /**
+     * jadx "Go to Application class" quick action (best-effort), mirroring [jumpToMainActivity]. Decodes
+     * the manifest, finds the `<application android:name=…>` class, resolves it to a loaded class node,
+     * and opens it. Anything unresolved — no manifest, no `<application>` name, or the class isn't in the
+     * tree — falls back to opening the manifest, never an error (rule 4). All parsing is guarded.
+     */
+    fun jumpToApplicationClass() {
+        val manifest = _ui.value.manifestNode ?: return
+        val epoch = openEpoch
+        scope.launch {
+            val text = runCatching { client.code(manifest.id, CodeView.JAVA).plainText() }.getOrNull()
+            if (epoch != openEpoch) return@launch
+            val appClass = text?.let { resolveApplicationClassName(it) }
+            if (appClass == null) {
+                openManifest()
+                return@launch
+            }
+            val classNode = findClassNode(appClass)
+            if (epoch != openEpoch) return@launch
+            if (classNode != null) {
+                switchTree(TreeKind.CLASSES)
+                openDocument(classNode.id, classNode.label, kind = classNode.kind)
+            } else {
+                openManifest()
+            }
+        }
+    }
+
     /** Parse the launcher activity's fully-qualified class name from decoded manifest [text], or null. */
     private fun resolveLauncherActivity(text: String): String? = runCatching {
         val name = LAUNCHER_ACTIVITY_REGEX.find(text)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
             ?: return@runCatching null
         val pkg = MANIFEST_PACKAGE_REGEX.find(text)?.groupValues?.getOrNull(1).orEmpty()
-        when {
-            name.startsWith(".") -> pkg + name
-            !name.contains('.') && pkg.isNotEmpty() -> "$pkg.$name"
-            else -> name
-        }
+        qualifyManifestClassName(name, pkg)
     }.getOrNull()
 
     /** Find the loaded class node matching fully-qualified [fqcn] (exact `cls:` id or fq-name suffix). */
@@ -921,6 +963,25 @@ internal fun CodeView.fileExtension(): String = when (this) {
     CodeView.JAVA -> "java"
     CodeView.KOTLIN -> "kt"
     CodeView.SMALI -> "smali"
+}
+
+/**
+ * Resolve the `<application android:name=…>` class's fully-qualified name from decoded manifest [text],
+ * or null when absent. Mirrors the launcher-activity resolver: a leading-dot or bare name is qualified
+ * against the `<manifest package>`. Pure and fault-isolated (never throws), so it is unit-tested directly.
+ */
+internal fun resolveApplicationClassName(text: String): String? = runCatching {
+    val name = APPLICATION_CLASS_REGEX.find(text)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+        ?: return@runCatching null
+    val pkg = MANIFEST_PACKAGE_REGEX.find(text)?.groupValues?.getOrNull(1).orEmpty()
+    qualifyManifestClassName(name, pkg)
+}.getOrNull()
+
+/** Qualify a manifest class [name] against the app [pkg]: `.Foo`→`pkg.Foo`, bare `Foo`→`pkg.Foo`, else as-is. */
+internal fun qualifyManifestClassName(name: String, pkg: String): String = when {
+    name.startsWith(".") -> pkg + name
+    !name.contains('.') && pkg.isNotEmpty() -> "$pkg.$name"
+    else -> name
 }
 
 /** Create a [WorkbenchState] scoped to the composition. */

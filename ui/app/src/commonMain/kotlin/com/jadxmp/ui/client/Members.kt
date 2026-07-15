@@ -35,6 +35,8 @@ data class MemberDescriptor(
      * the kind is unknown.
      */
     val nestedKind: NodeKind? = null,
+    /** Access visibility for the badge overlay (from the engine's `MemberInfo.modifiers`); null = unknown. */
+    val visibility: Visibility? = null,
 )
 
 /**
@@ -95,6 +97,7 @@ object MemberTree {
                 // Only nested classes recurse into their own members; methods/fields are leaves.
                 hasChildren = m.sort == MemberSort.NESTED_CLASS,
                 secondary = m.signature,
+                visibility = m.visibility,
             )
         }
 

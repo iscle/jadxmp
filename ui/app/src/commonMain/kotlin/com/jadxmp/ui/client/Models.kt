@@ -28,6 +28,14 @@ enum class NodeKind {
 /** The two top-level trees jadx-gui offers. */
 enum class TreeKind { CLASSES, RESOURCES }
 
+/**
+ * Source-level access visibility of a class/member tree node, projected from the engine's `Modifier`
+ * set. Drives a small colored overlay on the node badge (jadx-gui shows public/protected/private/
+ * package-private glyphs). `null` on a node means "unknown / not applicable" (packages, resources,
+ * or a class the cheap no-decompile lookup could not classify) → no overlay.
+ */
+enum class Visibility { PUBLIC, PROTECTED, PACKAGE_PRIVATE, PRIVATE }
+
 /** Source rendering a node can be shown in. */
 enum class CodeView { JAVA, KOTLIN, SMALI }
 
@@ -43,6 +51,12 @@ data class TreeNode(
     val hasChildren: Boolean,
     /** e.g. a method descriptor or field type shown dimmed after the label. */
     val secondary: String? = null,
+    /**
+     * Access visibility of a class/member row, for the badge overlay. `null` for packages/resources or
+     * when the client could not classify it — those render no overlay. Optional + defaulted so existing
+     * node constructions are unaffected.
+     */
+    val visibility: Visibility? = null,
 )
 
 /**

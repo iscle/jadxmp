@@ -48,4 +48,40 @@ class ClassBadgeTest {
         // Fault isolation (rule 4): an unknown class or a lookup fault yields the generic badge, never a crash.
         assertEquals(NodeKind.CLASS, classNodeKind(null))
     }
+
+    // ── visibility overlay mapping ────────────────────────────────────────────
+
+    @Test
+    fun explicitAccessModifiersMapToVisibility() {
+        assertEquals(Visibility.PUBLIC, visibilityOf(setOf(Modifier.PUBLIC)))
+        assertEquals(Visibility.PROTECTED, visibilityOf(setOf(Modifier.PROTECTED)))
+        assertEquals(Visibility.PRIVATE, visibilityOf(setOf(Modifier.PRIVATE)))
+    }
+
+    @Test
+    fun noAccessModifierIsPackagePrivate() {
+        // A declaration with only non-access modifiers (or none) is package-private (the JVM default).
+        assertEquals(Visibility.PACKAGE_PRIVATE, visibilityOf(emptySet()))
+        assertEquals(Visibility.PACKAGE_PRIVATE, visibilityOf(setOf(Modifier.STATIC, Modifier.FINAL)))
+    }
+
+    @Test
+    fun privateWinsWhenMultipleAccessBitsPresent() {
+        // Defensive: a malformed flag set with several access bits resolves deterministically (private first).
+        assertEquals(Visibility.PRIVATE, visibilityOf(setOf(Modifier.PUBLIC, Modifier.PRIVATE)))
+    }
+
+    @Test
+    fun nullModifiersYieldNoOverlay() {
+        assertEquals(null, visibilityOf(null))
+    }
+
+    @Test
+    fun classNodeBadgeCarriesKindAndVisibility() {
+        val badge = classNodeBadge(ClassInfo(ClassKind.INTERFACE, modifiers = setOf(Modifier.PUBLIC), isInner = false))
+        assertEquals(NodeKind.INTERFACE, badge.kind)
+        assertEquals(Visibility.PUBLIC, badge.visibility)
+        // A null info degrades to a generic class badge with no overlay.
+        assertEquals(ClassNodeBadge(NodeKind.CLASS, null), classNodeBadge(null))
+    }
 }

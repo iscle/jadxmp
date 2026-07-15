@@ -83,7 +83,8 @@ fun TreeRow(
                 }
             }
             Spacer(Modifier.width(JadxTheme.spacing.xs))
-            NodeKindBadge(item.node.kind)
+            // Visibility overlay (class/member access) + a resource-type glyph keyed off the file name.
+            NodeKindBadge(item.node.kind, visibility = item.node.visibility, fileName = item.node.label)
             Spacer(Modifier.width(JadxTheme.spacing.sm))
             Text(
                 item.node.label,

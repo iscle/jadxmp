@@ -3,6 +3,7 @@ package com.jadxmp.ui.component
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -10,7 +11,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -21,8 +24,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jadxmp.ui.client.NodeKind
+import com.jadxmp.ui.client.Visibility
 import com.jadxmp.ui.theme.JadxTheme
 import com.jadxmp.ui.theme.MonoFontFamily
+import com.jadxmp.ui.theme.WorkbenchColors
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -209,9 +214,20 @@ fun TargetGlyph(tint: Color, modifier: Modifier = Modifier) {
  * jadx-style node marker. Leaf nodes (classes/members/resources) get a compact tinted letter badge
  * whose hue encodes the category (mockup: cyan class, violet interface, blue method, pink field);
  * containers (packages/dirs) get an outline folder, matching the mockup's tree exactly.
+ *
+ * Two refinements over the plain category badge:
+ *  - **[visibility]** paints a small corner dot encoding access (public/protected/private/package),
+ *    so a tree of members reads its visibility at a glance (jadx-gui parity). `null` → no dot.
+ *  - **[fileName]** lets a resource/file row pick a glyph by extension (image/audio/json/…), instead
+ *    of the generic `<>`; unknown extensions keep the generic badge.
  */
 @Composable
-fun NodeKindBadge(kind: NodeKind, modifier: Modifier = Modifier) {
+fun NodeKindBadge(
+    kind: NodeKind,
+    modifier: Modifier = Modifier,
+    visibility: Visibility? = null,
+    fileName: String? = null,
+) {
     val colors = JadxTheme.colors
     val faint = colors.onSurfaceFaint
     if (kind == NodeKind.PACKAGE || kind == NodeKind.DIRECTORY) {
@@ -220,7 +236,35 @@ fun NodeKindBadge(kind: NodeKind, modifier: Modifier = Modifier) {
         }
         return
     }
-    val (glyph, color) = when (kind) {
+    val (glyph, color) = badgeGlyph(kind, fileName, colors)
+    Box(modifier.size(JadxTheme.spacing.badgeSize)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clip(MaterialTheme.shapes.extraSmall)
+                .background(color.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = glyph,
+                color = color,
+                fontFamily = MonoFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = if (glyph.length > 1) 8.sp else 10.sp,
+            )
+        }
+        if (visibility != null) {
+            VisibilityDot(color = visibilityColor(visibility), modifier = Modifier.align(Alignment.BottomEnd))
+        }
+    }
+}
+
+/** Glyph + hue for a leaf badge: a resource/file row keys off its [fileName] extension; else the kind. */
+private fun badgeGlyph(kind: NodeKind, fileName: String?, colors: WorkbenchColors): Pair<String, Color> {
+    if ((kind == NodeKind.RESOURCE || kind == NodeKind.FILE) && fileName != null) {
+        resourceGlyph(fileName, colors)?.let { return it }
+    }
+    return when (kind) {
         NodeKind.CLASS -> "C" to colors.cyan
         NodeKind.INTERFACE -> "I" to colors.accentSecondary
         NodeKind.ENUM -> "E" to colors.warning
@@ -230,21 +274,68 @@ fun NodeKindBadge(kind: NodeKind, modifier: Modifier = Modifier) {
         NodeKind.RESOURCE -> "<>" to colors.warning
         NodeKind.FILE -> "<>" to colors.warning
         NodeKind.IMAGE -> "▦" to colors.accentSecondary
-        else -> "•" to faint
+        else -> "•" to colors.onSurfaceFaint
     }
-    Box(
-        modifier
-            .size(JadxTheme.spacing.badgeSize)
-            .clip(MaterialTheme.shapes.extraSmall)
-            .background(color.copy(alpha = 0.14f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = glyph,
-            color = color,
-            fontFamily = MonoFontFamily,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = if (glyph.length > 1) 8.sp else 10.sp,
-        )
+}
+
+/** A distinct glyph/hue for a known resource file extension, or `null` to fall back to the kind badge. */
+private fun resourceGlyph(fileName: String, colors: WorkbenchColors): Pair<String, Color>? =
+    when (fileName.substringAfterLast('.', "").lowercase()) {
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg" -> "▦" to colors.accentSecondary
+        "mp3", "ogg", "wav", "m4a", "aac", "flac", "opus" -> "♪" to colors.info
+        "mp4", "webm", "mkv", "avi", "mov", "3gp" -> "▶" to colors.info
+        "ttf", "otf", "woff", "woff2" -> "F" to colors.pink
+        "json" -> "{}" to colors.warning
+        "xml" -> "<>" to colors.warning
+        "html", "htm" -> "<>" to colors.cyan
+        "css" -> "#" to colors.accentSecondary
+        "js", "mjs", "cjs" -> "JS" to colors.warning
+        "sql" -> "DB" to colors.info
+        "arsc" -> "▤" to colors.cyan
+        "zip", "jar", "apk", "aar", "dex" -> "▣" to colors.onSurfaceFaint
+        "txt", "md", "properties", "ini", "yaml", "yml", "cfg", "pro", "pem" -> "≡" to colors.info
+        else -> null
+    }
+
+/** Access-visibility → dot color: green public, amber protected, red private, faint package-private. */
+@Composable
+private fun visibilityColor(v: Visibility): Color = when (v) {
+    Visibility.PUBLIC -> JadxTheme.colors.success
+    Visibility.PROTECTED -> JadxTheme.colors.warning
+    Visibility.PRIVATE -> MaterialTheme.colorScheme.error
+    Visibility.PACKAGE_PRIVATE -> JadxTheme.colors.onSurfaceFaint
+}
+
+/** A tiny filled dot with a surface halo so it stays legible when overlaid on a colored badge corner. */
+@Composable
+private fun VisibilityDot(color: Color, modifier: Modifier = Modifier) {
+    val halo = MaterialTheme.colorScheme.surface
+    Canvas(modifier.size(7.dp)) {
+        drawCircle(halo, radius = size.minDimension * 0.5f)
+        drawCircle(color, radius = size.minDimension * 0.34f)
+    }
+}
+
+/** A 2×2 rounded-square "apps" grid — the "Go to Application class" toolbar affordance. */
+@Composable
+fun AppClassGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(15.dp)) {
+        val s = size.minDimension
+        val cell = s * 0.30f
+        val gap = s * 0.12f
+        val x0 = s * 0.15f
+        val y0 = s * 0.15f
+        val stroke = Stroke(width = 1.4.dp.toPx(), join = StrokeJoin.Round)
+        for (r in 0..1) {
+            for (c in 0..1) {
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(x0 + c * (cell + gap), y0 + r * (cell + gap)),
+                    size = Size(cell, cell),
+                    cornerRadius = CornerRadius(cell * 0.3f),
+                    style = stroke,
+                )
+            }
+        }
     }
 }

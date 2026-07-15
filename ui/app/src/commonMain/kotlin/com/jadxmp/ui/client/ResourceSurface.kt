@@ -35,6 +35,14 @@ public object ResourceSurface {
      */
     public const val UNDECODABLE_MARKER: String = "(could not decode)"
 
+    /**
+     * Resource text at or above this many characters is NOT rendered into the viewer (jadx uses a ~10 MB
+     * cap). A placeholder is shown instead, so opening a huge file never freezes the single-threaded UI
+     * on a giant text render + colorize pass (rule 1). The cap is on the decoded character count — a
+     * cheap, honest proxy for the file's size.
+     */
+    internal const val MAX_VIEW_CHARS: Int = 10 * 1024 * 1024
+
     /** True if [node] belongs to the Resources tree (so [DecompilerClient.code] routes it here). */
     public fun isResourceNode(node: NodeId): Boolean {
         val v = node.value
@@ -179,10 +187,10 @@ public object ResourceSurface {
     public fun document(provider: ResourceProvider, node: NodeId, view: CodeView): CodeDocument {
         val v = node.value
         return when {
-            v == MANIFEST_ID -> renderXml(node, view, MANIFEST_PATH, provider.decodeManifest(), provider.diagnostics)
+            v == MANIFEST_ID -> renderTextResource(node, view, MANIFEST_PATH, provider.decodeManifest(), provider.diagnostics)
             v.startsWith(RES_PREFIX) -> {
                 val path = v.removePrefix(RES_PREFIX)
-                renderXml(node, view, path, provider.decodeXml(path), provider.diagnostics)
+                renderTextResource(node, view, path, provider.decodeXml(path), provider.diagnostics)
             }
             v.startsWith(TYPE_PREFIX) -> {
                 val type = v.removePrefix(TYPE_PREFIX)
@@ -197,7 +205,15 @@ public object ResourceSurface {
     public fun unavailable(node: NodeId, view: CodeView): CodeDocument =
         placeholder(node, view, labelOf(node), "// resources are not available for this input")
 
-    private fun renderXml(
+    /**
+     * Render a decoded text resource, choosing a syntax colorizer by the file extension (manifest and
+     * every `res/…xml` colorize as XML; `.json`/`.css`/`.sql`/… get their own; unknown types are shown
+     * plain — see [ResourceColorizers]). A `null` decode becomes an honest placeholder; a file whose
+     * decoded text exceeds [MAX_VIEW_CHARS] is not rendered at all (a "too large to view" placeholder is
+     * shown instead of freezing on a giant colorize). A partial/best-effort decode still surfaces its
+     * per-file decode notes so a salvaged file is never presented as complete (rule 4).
+     */
+    private fun renderTextResource(
         node: NodeId,
         view: CodeView,
         path: String,
@@ -208,21 +224,36 @@ public object ResourceSurface {
         if (text == null) {
             return placeholder(node, view, title, "// Could not decode $path")
         }
-        // Syntax-highlight the decoded XML (manifest and every res/…xml flow through here). The colorizer
-        // returns 1-based lines; the decode-notes footer below continues from where it leaves off.
-        val lines = ArrayList<CodeLine>(XmlColorizer.colorize(text))
-        var n = lines.size + 1
+        // Large-file guard (rule 1): never load a huge document into the viewer — checked BEFORE the
+        // colorize pass, which is the expensive part that would freeze the single-threaded UI.
+        if (text.length >= MAX_VIEW_CHARS) {
+            return placeholder(node, view, title, "// File too large to view (${megabytesOf(text.length)} MB)")
+        }
+        // The colorizer returns 1-based lines; the decode-notes footer below continues where it leaves off.
+        val lines = ArrayList<CodeLine>(ResourceColorizers.colorize(path, text))
         // A partial/best-effort decode is still returned, but its diagnostics (prefixed with the path by
-        // the engine) must surface so the reader knows the file isn't wholly decoded.
+        // the engine) must surface so the reader knows the file isn't wholly decoded. Use a comment style
+        // that fits the file (XML/HTML → markup comment; everything else → line comment).
         val notes = diagnostics.filter { it.startsWith("$path:") }
         if (notes.isNotEmpty()) {
+            val markup = ResourceColorizers.isMarkup(path)
+            var n = lines.size + 1
             lines += CodeLine(n++, listOf(CodeToken("", TokenKind.PLAIN)))
-            lines += CodeLine(n++, listOf(CodeToken("<!-- decode notes -->", TokenKind.COMMENT)))
+            lines += CodeLine(n++, listOf(CodeToken(comment("decode notes", markup), TokenKind.COMMENT)))
             for (note in notes) {
-                lines += CodeLine(n++, listOf(CodeToken("<!-- $note -->", TokenKind.COMMENT)))
+                lines += CodeLine(n++, listOf(CodeToken(comment(note, markup), TokenKind.COMMENT)))
             }
         }
         return CodeDocument(node, title, view, lines)
+    }
+
+    /** A one-line comment wrapping [text] in the file's comment syntax (markup `<!-- … -->` vs `// …`). */
+    private fun comment(text: String, markup: Boolean): String = if (markup) "<!-- $text -->" else "// $text"
+
+    /** Whole-plus-one-decimal megabytes for [chars], integer-only (wasm has no `String.format`). */
+    internal fun megabytesOf(chars: Int): String {
+        val tenths = chars.toLong() * 10 / (1024L * 1024L)
+        return "${tenths / 10}.${tenths % 10}"
     }
 
     private fun renderTable(node: NodeId, view: CodeView, type: String, entries: List<ResTableEntry>): CodeDocument {
