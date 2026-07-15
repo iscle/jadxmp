@@ -245,20 +245,34 @@ class CoreApiDecompilerClient(
 
     /**
      * Raw bytes of a resource node for the image / hex viewer, forwarded from the [ResourceProvider] seam
-     * under the same [lock] as the other resource decodes.
+     * under the same [lock] as the other resource decodes. Only genuine binary `res/` blobs route here:
+     * [ApkResourcesProvider] surfaces them via `ApkResources.binaryResourcePaths` (the `res/` image/raw
+     * leaves, listed cheaply from the container's central directory) and inflates the selected one on demand
+     * via `ApkResources.rawResource` — so the image/hex viewers render straight from a real APK with no eager
+     * inflation of the whole `res/` tree.
      *
-     * NOTE (engine gap): the current `core:api` [ApkResources] retains only `AndroidManifest.xml`,
-     * `resources.arsc` and `res/…xml`, and exposes no raw-byte accessor — so [ApkResourcesProvider.rawResource]
-     * returns `null` and this yields `null` today (the viewers degrade to the existing text/placeholder
-     * path). The seam is in place: once `ApkResources` retains image/binary entries and exposes their bytes,
-     * that one adapter method forwards them and the image/hex viewers light up here with no UI change.
+     * The [binaryResourcePaths][ResourceProvider.binaryResourcePaths] gate is load-bearing: it excludes
+     * `AndroidManifest.xml`, `resources.arsc` and every compiled `res/…xml`, which are eagerly held as raw
+     * COMPILED binary XML (AXML magic `03 00 08 00`, NUL at index 1). Without the gate, `rawResource` would
+     * eager-hit those bytes and the workbench's content sniffer — seeing the NUL — would classify them HEX
+     * and render a hex dump instead of the decoded XML. Gating keeps them on `null` here so they fall through
+     * to the decoded-text document path. A non-APK input (`resourceProvider == null`), a non-`res:` node, or
+     * any path that is not a binary blob all yield `null` (the viewer shows its honest placeholder; rule 4).
      */
     override suspend fun resourceBytes(node: NodeId): ByteArray? {
         val v = node.value
         if (!ResourceSurface.isResourceNode(node) || !v.startsWith("res:")) return null
         val path = v.removePrefix("res:")
         return withContext(Dispatchers.Default) {
-            lock.withLock { resourceProvider?.rawResource(path) }
+            lock.withLock {
+                val provider = resourceProvider ?: return@withLock null
+                // Gate: only a genuine binary res/ blob (image / raw file) is handed to the byte→image/hex
+                // path. binaryResourcePaths excludes the manifest, resources.arsc and every compiled res/…xml
+                // by construction, so those return null here and keep decoding to TEXT via document() —
+                // rawResource would otherwise eager-hit their raw AXML bytes and the sniffer would hex-dump
+                // them (regression guard, see CoreApiDecompilerClientResourcesTest).
+                if (path in provider.binaryResourcePaths) provider.rawResource(path) else null
+            }
         }
     }
 
@@ -471,6 +485,13 @@ class CoreApiDecompilerClient(
         override val xmlResourcePaths: List<String> get() = res.xmlResourcePaths
         override fun decodeXml(path: String): String? =
             if (xmlCache.containsKey(path)) xmlCache[path] else res.decodeXml(path).also { xmlCache[path] = it }
+
+        // Binary res/ seam: the leaf names come from the engine's cheap central-directory listing, and the
+        // selected blob's bytes are inflated on demand by the engine (one entry at a time). Deliberately NOT
+        // cached here — caching inflated image bytes would defeat the whole point of the on-demand design
+        // (keeping the wasm heap small); the workbench opens a single image/hex node at a time.
+        override val binaryResourcePaths: List<String> get() = res.binaryResourcePaths
+        override fun rawResource(path: String): ByteArray? = res.rawResource(path)
 
         override val tableTypes: List<ResTableType> by lazy {
             val table = res.table ?: return@lazy emptyList()

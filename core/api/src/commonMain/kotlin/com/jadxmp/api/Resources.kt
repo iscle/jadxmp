@@ -57,13 +57,24 @@ public class ResourceTableView internal constructor(
  * loaded input is a zip/APK that actually carries resources; a bare `.dex`/`.jar` yields `null`.
  *
  * Decoding is **fault-isolated** (rule 4): a single malformed manifest/xml/arsc returns `null` (or an
- * error-marked table) with a diagnostic, and never crashes the surrounding load. Only the resource
- * entries themselves are retained (`AndroidManifest.xml`, `resources.arsc`, and binary XML under `res/`) —
- * `classes.dex`, signatures, and binary assets are not held here.
+ * error-marked table) with a diagnostic, and never crashes the surrounding load. The small, repeatedly
+ * decoded entries (`AndroidManifest.xml`, `resources.arsc`, binary XML under `res/`) are held eagerly;
+ * binary `res/` blobs (images, raw files) are listed by name and inflated one at a time on demand from the
+ * retained container (see [binaryResourcePaths]/[rawResource]), never eagerly expanded into the heap.
+ * `classes.dex`, signatures, and non-`res/` assets are not exposed here.
  */
 public class ApkResources internal constructor(
-    // Sanitized `/`-separated entry name → raw (already-inflated) bytes.
+    // Sanitized `/`-separated entry name → raw (already-inflated) bytes. Eagerly held, but ONLY for the
+    // small, repeatedly-decoded entries (AndroidManifest.xml, resources.arsc, res/…xml). Binary res/ blobs
+    // are deliberately NOT here — they are served on demand from [container] (see [rawResource]).
     private val entries: Map<String, ByteArray>,
+    // The retained COMPRESSED container bytes (the base APK's own bytes) that [entries] was extracted from,
+    // kept so binary res/ blobs can be listed ([binaryResourcePaths]) and inflated one entry at a time on
+    // demand ([rawResource]) WITHOUT holding the whole res/ tree inflated — a real APK's res/ is tens of MB
+    // expanded, far too much for a wasm heap. `null` when built from crafted entries (tests) with no backing
+    // zip: then only [entries] is reachable and there are no binary res/ paths. Compressed form is the
+    // minimal representation — we never keep a second, inflated copy of the archive.
+    private val container: ByteArray? = null,
     diagnostics: List<String>,
 ) {
     // Backing store so per-file decode diagnostics (S1: a chunk-skipped XML) and an unexpected arsc-decode
@@ -112,6 +123,47 @@ public class ApkResources internal constructor(
     /** Every `res/…xml` path present, sorted — the files [decodeXml] can render. */
     public val xmlResourcePaths: List<String> by lazy {
         entries.keys.filter { it.startsWith(RES_PREFIX) && it.endsWith(XML_SUFFIX) }.sorted()
+    }
+
+    /**
+     * Every binary `res/` resource path present — the images and raw blobs: everything under `res/` that
+     * is NOT `…xml`, sorted. Listed straight from the container's central directory ([ZipReader.entryNames])
+     * with **no inflation**, so surfacing even tens of MB of drawables to the tree costs only their names
+     * (rule 1 — the wasm heap). Empty when there is no backing container (a crafted-entries instance) or the
+     * container carries no binary `res/` entries. These are the leaves the image/hex viewers open via
+     * [rawResource]; the text `res/…xml` set stays on [xmlResourcePaths], untouched.
+     */
+    public val binaryResourcePaths: List<String> by lazy {
+        val bytes = container ?: return@lazy emptyList()
+        ZipReader.entryNames(bytes)
+            .filter { it.startsWith(RES_PREFIX) && !it.endsWith(XML_SUFFIX) && !it.endsWith("/") }
+            .distinct()
+            .sorted()
+    }
+
+    // Membership index for [rawResource]'s on-demand gate — the same paths as [binaryResourcePaths] but as
+    // a Set, so a bogus/absent path returns null in O(1) WITHOUT draining the whole archive to discover it
+    // is not there. Memoized alongside the list it derives from.
+    private val binaryResourcePathSet: Set<String> by lazy { binaryResourcePaths.toSet() }
+
+    /**
+     * The raw (already-inflated) bytes of a resource entry by [path], or `null` when it is absent or
+     * unreadable. Fault-isolated: never throws (rule 4). Resolved in two steps:
+     *  1. an eagerly-held entry (`AndroidManifest.xml`, `resources.arsc`, a `res/…xml`) is returned straight
+     *     from memory — its raw compiled bytes, not decoded text;
+     *  2. a binary `res/` blob (an image / raw file listed in [binaryResourcePaths]) is inflated from the
+     *     retained [container] ONE entry at a time here, so the whole `res/` tree never sits inflated in the
+     *     heap (rule 1 — the wasm target). The default [ZipReader] guard/zip-slip policy still applies.
+     * Any other path (a non-resource entry, or nothing at all) is a cheap `null`. The image/hex viewers
+     * sniff these bytes to choose a renderer.
+     */
+    public fun rawResource(path: String): ByteArray? {
+        entries[path]?.let { return it }
+        val bytes = container ?: return null
+        // Gate on the known binary set so an absent/non-resource path is a cheap null rather than a wasted
+        // full-archive drain; then inflate just this one wanted entry.
+        if (path !in binaryResourcePathSet) return null
+        return runCatching { ZipReader.extract(bytes) { it == path }.firstOrNull()?.bytes }.getOrNull()
     }
 
     /**
@@ -202,7 +254,11 @@ public class ApkResources internal constructor(
             if (extracted.isEmpty()) return null
             val map = LinkedHashMap<String, ByteArray>(extracted.size)
             for (entry in extracted) map[entry.name] = entry.bytes
-            return ApkResources(map, diagnostics = emptyList())
+            // Retain the (base-APK) container so binary res/ blobs can be listed + inflated on demand later,
+            // without eagerly holding the whole res/ tree. `resourceBytes` already honors the bundle
+            // (APKM/XAPK/APKS) base-APK redirection above, so on-demand extraction targets the same archive
+            // the eager entries came from.
+            return ApkResources(map, container = resourceBytes, diagnostics = emptyList())
         }
 
         private fun isResourceEntry(name: String): Boolean =
