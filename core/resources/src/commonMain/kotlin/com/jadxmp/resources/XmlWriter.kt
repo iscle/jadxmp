@@ -30,13 +30,42 @@ internal object XmlWriter {
         if (declaration) {
             sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
         }
-        writeElement(sb, root, 0)
+        writeTree(sb, root)
         return sb.toString()
     }
 
-    private fun writeElement(sb: StringBuilder, element: XmlElement, depth: Int) {
-        val pad = INDENT.repeat(depth)
-        sb.append(pad).append('<').append(element.name)
+    /**
+     * Serialise the element tree with an explicit work stack instead of recursion. The AXML *parse*
+     * is iterative, so a hostile file can nest elements thousands deep — a recursive writer would then
+     * StackOverflowError here, and this runs *outside* BinaryXmlDecoder's try/catch. Indentation is
+     * carried in a buffer grown/shrunk one level per element (never rebuilt with `INDENT.repeat(depth)`
+     * per node, which made a deep-but-narrow tree O(depth^2)). Output is byte-for-byte identical to the
+     * former recursive writer; the decoder additionally caps tree depth so this is never handed an
+     * unbounded tree.
+     */
+    private fun writeTree(sb: StringBuilder, root: XmlElement) {
+        val indent = StringBuilder()
+        val work = ArrayDeque<Step>()
+        work.addLast(Open(root))
+        while (work.isNotEmpty()) {
+            when (val step = work.removeLast()) {
+                is Open -> openElement(sb, indent, step.element, work)
+                is CloseTag -> {
+                    indent.setLength(indent.length - INDENT.length)
+                    sb.append(indent).append("</").append(step.name).append(">\n")
+                }
+                is TextLine -> sb.append(indent).append(escapeText(step.text)).append('\n')
+            }
+        }
+    }
+
+    private fun openElement(
+        sb: StringBuilder,
+        indent: StringBuilder,
+        element: XmlElement,
+        work: ArrayDeque<Step>,
+    ) {
+        sb.append(indent).append('<').append(element.name)
         for ((prefix, uri) in element.namespaces) {
             sb.append(" xmlns")
             if (prefix.isNotEmpty()) sb.append(':').append(prefix)
@@ -52,24 +81,32 @@ internal object XmlWriter {
             return
         }
         // Inline when the only child is text: <tag>text</tag>.
-        val onlyText = children.size == 1 && children[0] is XmlText
-        if (onlyText) {
+        if (children.size == 1 && children[0] is XmlText) {
             sb.append('>').append(escapeText((children[0] as XmlText).text))
             sb.append("</").append(element.name).append(">\n")
             return
         }
         sb.append(">\n")
-        for (child in children) {
-            when (child) {
-                is XmlElement -> writeElement(sb, child, depth + 1)
+        indent.append(INDENT)
+        // Push the close first so it runs after all children; push children in reverse so LIFO pops
+        // them back into document order. Text children are pre-trimmed here exactly as before.
+        work.addLast(CloseTag(element.name))
+        for (i in children.indices.reversed()) {
+            when (val child = children[i]) {
+                is XmlElement -> work.addLast(Open(child))
                 is XmlText -> {
                     val t = child.text.trim()
-                    if (t.isNotEmpty()) sb.append(INDENT.repeat(depth + 1)).append(escapeText(t)).append('\n')
+                    if (t.isNotEmpty()) work.addLast(TextLine(t))
                 }
             }
         }
-        sb.append(pad).append("</").append(element.name).append(">\n")
     }
+
+    /** A unit of serialisation work on [writeTree]'s explicit stack (replaces call-stack recursion). */
+    private sealed interface Step
+    private class Open(val element: XmlElement) : Step
+    private class CloseTag(val name: String) : Step
+    private class TextLine(val text: String) : Step
 
     /** Escape text content: `&`, `<`, `>`. */
     fun escapeText(s: String): String {

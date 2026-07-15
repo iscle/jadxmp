@@ -87,6 +87,13 @@ internal class StringPool private constructor(
 
         private fun readUtf16(reader: ByteReader): String {
             val units = readLen16(reader)
+            // `units` is an attacker-controlled aapt varint that can reach ~2^31 (this path runs on
+            // every APK open — manifest/arsc). Bound it against the bytes remaining (2 per UTF-16 unit)
+            // before StringBuilder pre-allocates, so a crafted length fails as a catchable
+            // ByteReaderException (caught by parse() → PLACEHOLDER) instead of OOM-ing. Valid strings
+            // always have their units*2 bytes within the buffer, so this never rejects honest input.
+            // (The UTF-8 sibling is already safe via bounds-checked readBytes.)
+            reader.requireAvailable(units.toLong() * 2L)
             val sb = StringBuilder(units)
             // Char is itself a UTF-16 code unit, so surrogate pairs round-trip verbatim.
             repeat(units) { sb.append(reader.readU16().toChar()) }

@@ -113,6 +113,12 @@ internal class DexInstruction(
             DexFormat.FILL_ARRAY_DATA_PAYLOAD -> {
                 val elemSize = code.readU16()
                 val size = code.readS32()
+                // Mirror decodeFillArray()'s guard: `size` is attacker-controlled. Validate it against
+                // the bytes remaining before it drives the skip amount, so a crafted huge/negative size
+                // fails as a catchable ByteReaderException instead of overflowing `size * elemSize` or
+                // tripping ByteReader.skip's negative-count IllegalArgumentException. After the check,
+                // size * elemSize <= remaining, so the Int arithmetic here cannot overflow.
+                Bounds.checkCount(size, stride = elemSize.coerceAtLeast(1), reader = code)
                 if (elemSize == 1) code.skip(size + size % 2) else code.skip(size * elemSize)
                 lengthValue = (size * elemSize + 1) / 2 + 4
             }

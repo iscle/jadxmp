@@ -98,7 +98,7 @@ internal class AnnotationsParser(private val dex: Dex) {
         return list
     }
 
-    fun readAnnotation(input: ByteReader, readVisibility: Boolean): AnnotationData {
+    fun readAnnotation(input: ByteReader, readVisibility: Boolean, depth: Int = 0): AnnotationData {
         val visibility = if (readVisibility) visibilityOf(input.readU8()) else null
         val typeIdx = input.readUleb128().toInt()
         val size = input.readUleb128().toInt()
@@ -107,7 +107,9 @@ internal class AnnotationsParser(private val dex: Dex) {
         val valueParser = EncodedValueParser(dex)
         repeat(size) {
             val name = dex.string(input.readUleb128().toInt()) ?: "?"
-            values[name] = valueParser.parseValue(input)
+            // Carry the nesting depth so annotation-in-value recursion is bounded too (an annotation
+            // value can be another annotation/array); EncodedValueParser enforces the cap.
+            values[name] = valueParser.parseValue(input, depth + 1)
         }
         return AnnotationData(
             annotationType = dex.type(typeIdx) ?: "?",

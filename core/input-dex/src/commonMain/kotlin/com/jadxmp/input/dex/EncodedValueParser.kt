@@ -17,7 +17,18 @@ import com.jadxmp.io.ByteReaderException
  */
 internal class EncodedValueParser(private val dex: Dex) {
 
-    fun parseValue(input: ByteReader): EncodedValue {
+    /**
+     * @param depth current nesting depth. `encoded_value` is mutually recursive — VALUE_ARRAY nests
+     * an `encoded_array` and VALUE_ANNOTATION an `encoded_annotation`, both of which parse further
+     * `encoded_value`s. A ~100 KB blob of nothing but nested arrays would otherwise recurse tens of
+     * thousands of frames deep and raise StackOverflowError (an Error that escapes catch(Exception),
+     * fired inside eager class parsing). Cap the nesting so a hostile blob fails as a catchable
+     * ByteReaderException; [MAX_NESTING_DEPTH] is far above any depth real annotation data reaches.
+     */
+    fun parseValue(input: ByteReader, depth: Int = 0): EncodedValue {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw ByteReaderException("encoded value nested deeper than $MAX_NESTING_DEPTH")
+        }
         val argAndType = input.readU8()
         val type = argAndType and 0x1F
         val arg = (argAndType and 0xE0) ushr 5
@@ -45,21 +56,22 @@ internal class EncodedValueParser(private val dex: Dex) {
             VALUE_METHOD -> EncodedValue(EncodedValueType.METHOD, dex.methodRef(parseUnsigned(input, size)))
             VALUE_METHOD_TYPE -> EncodedValue(EncodedValueType.METHOD_TYPE, dex.proto(parseUnsigned(input, size)))
             VALUE_METHOD_HANDLE -> EncodedValue(EncodedValueType.METHOD_HANDLE, dex.methodHandle(parseUnsigned(input, size)))
-            VALUE_ARRAY -> EncodedValue(EncodedValueType.ARRAY, parseArray(input))
+            VALUE_ARRAY -> EncodedValue(EncodedValueType.ARRAY, parseArray(input, depth))
             VALUE_ANNOTATION -> EncodedValue(
                 EncodedValueType.ANNOTATION,
-                AnnotationsParser(dex).readAnnotation(input, readVisibility = false),
+                AnnotationsParser(dex).readAnnotation(input, readVisibility = false, depth = depth + 1),
             )
             else -> throw ByteReaderException("unknown encoded value type: 0x${type.toString(16)}")
         }
     }
 
-    fun parseArray(input: ByteReader): List<EncodedValue> {
+    fun parseArray(input: ByteReader, depth: Int = 0): List<EncodedValue> {
         val count = input.readUleb128().toInt()
         // Each element is at least one byte, so cap the preallocation to the bytes remaining; a hostile
         // huge/negative count fails gracefully when the reads run out rather than OOM-ing here.
         return ArrayList<EncodedValue>(Bounds.capacity(count, stride = 1, reader = input)).apply {
-            repeat(count) { add(parseValue(input)) }
+            // depth + 1: each array element is one nesting level deeper (see parseValue's cap).
+            repeat(count) { add(parseValue(input, depth + 1)) }
         }
     }
 
@@ -92,6 +104,14 @@ internal class EncodedValueParser(private val dex: Dex) {
     }
 
     private companion object {
+        /**
+         * Maximum `encoded_value` nesting. jadx does not cap this, but real annotation/array data
+         * nests only a handful deep, so a few hundred is orders of magnitude of headroom while still
+         * throwing long before the recursion (~2 frames per level) can overflow even a small (wasm)
+         * stack.
+         */
+        const val MAX_NESTING_DEPTH = 500
+
         const val VALUE_BYTE = 0x00
         const val VALUE_SHORT = 0x02
         const val VALUE_CHAR = 0x03

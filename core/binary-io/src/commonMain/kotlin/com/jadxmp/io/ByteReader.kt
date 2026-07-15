@@ -169,7 +169,16 @@ public class ByteReader(
      * encoded as a surrogate pair of three-byte sequences rather than a single four-byte sequence.
      */
     public fun readMutf8(utf16Units: Int): String {
-        require(utf16Units >= 0) { "negative length: $utf16Units" }
+        // utf16Units comes straight from an attacker-controlled uleb128 (a DEX string_data_item's
+        // utf16_size, via Dex.string()). Modified UTF-8 needs at least one byte per UTF-16 code unit,
+        // so a unit count larger than the bytes remaining — or a negative one — cannot be honest
+        // input. Bound it here, before StringBuilder pre-allocates: a crafted 0x7FFFFFFF would
+        // otherwise ask for a ~2 GiB buffer and throw OutOfMemoryError (an Error that slips past the
+        // facade's catch(Exception)). requireAvailable converges both the negative and the too-large
+        // case on ByteReaderException — the one catchable invariant every parser relies on. The bound
+        // is a tight lower bound, so it never rejects a valid string (which always has >= utf16Units
+        // bytes of MUTF-8 following).
+        requireAvailable(utf16Units.toLong())
         val sb = StringBuilder(utf16Units)
         var produced = 0
         while (produced < utf16Units) {

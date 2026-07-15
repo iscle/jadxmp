@@ -22,12 +22,31 @@ import com.jadxmp.io.ByteReaderException
  */
 internal class DexClassParser(private val dex: Dex) {
 
+    private val diagnosticsList = ArrayList<String>()
+
+    /**
+     * Non-fatal problems hit while walking the class table: each entry is a class that was skipped
+     * because parsing it threw. Recorded rather than swallowed so the loss is never silent
+     * (CLAUDE.md rule 4); exposed for tests and ready for the loader to surface.
+     */
+    val diagnostics: List<String> get() = diagnosticsList
+
     fun parseAll(): List<ClassData> {
         val count = dex.header.classDefsSize
         val classDefsOff = dex.header.classDefsOff
         val list = ArrayList<ClassData>(count)
         for (i in 0 until count) {
-            list.add(parseClass(classDefsOff + i * CLASS_DEF_SIZE))
+            // Per-class fault isolation, mirroring ArscDecoder's per-chunk salvage. Without this, one
+            // corrupt class_def (bad type_idx / class_data_off, or a hostile constant/annotation blob
+            // that exhausts memory or the stack) throws all the way up through Decompiler.load and
+            // drops EVERY class in the DEX — a rule-4 violation. Catch Throwable, not just
+            // ByteReaderException, so even an OutOfMemoryError / StackOverflowError from a single
+            // poison class is contained and the rest of the container still loads.
+            try {
+                list.add(parseClass(classDefsOff + i * CLASS_DEF_SIZE))
+            } catch (e: Throwable) {
+                diagnosticsList += "class_def #$i skipped: ${e.message ?: "unrecoverable parse error"}"
+            }
         }
         return list
     }

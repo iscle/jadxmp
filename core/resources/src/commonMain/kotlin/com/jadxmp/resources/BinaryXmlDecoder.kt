@@ -28,6 +28,13 @@ public object BinaryXmlDecoder {
     private const val ANDROID_NS_URI = "http://schemas.android.com/apk/res/android"
     private const val ANDROID_NS_PREFIX = "android"
 
+    /**
+     * Maximum element nesting kept in the tree. Real manifests/layouts nest a few dozen deep at most,
+     * so this is huge headroom, while a hostile AXML that nests thousands deep is bounded here (see
+     * [Decoder.parseStartElement]) so the serialised output can't blow up to O(depth^2).
+     */
+    private const val MAX_ELEMENT_DEPTH = 500
+
     /** Decode to text XML; convenience over [decodeWithDiagnostics]. Never throws for bad input. */
     public fun decode(bytes: ByteArray, table: ResourceTable? = null): String =
         decodeWithDiagnostics(bytes, table).xml
@@ -59,6 +66,9 @@ public object BinaryXmlDecoder {
         /** Namespace declarations seen but not yet attached to an element. */
         private val pendingNamespaces = mutableListOf<Pair<String, String>>()
         private val stack = ArrayDeque<XmlElement>()
+
+        /** Set once when [MAX_ELEMENT_DEPTH] is first exceeded, so the diagnostic is recorded only once. */
+        private var depthCapReported = false
         var root: XmlElement? = null
             private set
 
@@ -133,11 +143,21 @@ public object BinaryXmlDecoder {
                 parseAttribute(reader, element, seen)
             }
 
-            val parent = stack.lastOrNull()
-            if (parent == null) {
-                if (root == null) root = element
-            } else {
-                parent.children += element
+            // Cap tree depth. A hostile AXML can nest START_ELEMENT chunks thousands deep; the parse
+            // stays iterative (no overflow), but attaching an unbounded-depth tree would make the
+            // serialised output O(depth^2) in size (indentation per line × lines) and risk OOM. Beyond
+            // the cap we keep the stack balanced — so END_ELEMENT bookkeeping stays correct — but leave
+            // the element detached from the tree, so only the first MAX_ELEMENT_DEPTH levels are emitted.
+            if (stack.size < MAX_ELEMENT_DEPTH) {
+                val parent = stack.lastOrNull()
+                if (parent == null) {
+                    if (root == null) root = element
+                } else {
+                    parent.children += element
+                }
+            } else if (!depthCapReported) {
+                depthCapReported = true
+                diagnostics += "element nesting exceeds $MAX_ELEMENT_DEPTH; deeper elements omitted"
             }
             stack.addLast(element)
         }

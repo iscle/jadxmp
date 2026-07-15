@@ -54,4 +54,22 @@ class XmlWriterTest {
         val root = XmlElement("item").apply { children += XmlText("hello") }
         assertTrue(XmlWriter.write(root, declaration = false).trim() == "<item>hello</item>")
     }
+
+    @Test
+    fun serializesMixedTextAndElementChildren() {
+        // Guards the iterative writer's byte-for-byte fidelity on the mixed-children branch: a trimmed
+        // text line, an element sibling, and a whitespace-only text child that must be dropped.
+        val root = XmlElement("root").apply {
+            children += XmlText("  hello  ")
+            children += XmlElement("child").apply { attributes += "k" to "v" }
+            children += XmlText("   ")
+        }
+        val expected = """
+            <root>
+                hello
+                <child k="v"/>
+            </root>
+        """.trimIndent() + "\n"
+        assertEquals(expected, XmlWriter.write(root, declaration = false))
+    }
 }
