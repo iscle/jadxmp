@@ -149,4 +149,119 @@ class CodeSearchTest {
         val furthest = sink.progress.maxOf { it.first }
         assertTrue(furthest in 1 until 200, "cancel stops the scan mid-way (reached $furthest of 200)")
     }
+
+    // ── Result-row match highlighting (matchSpans) ──────────────────────────────
+
+    @Test
+    fun matchSpansFindsEveryNonOverlappingHit() {
+        assertEquals(
+            listOf(MatchSpan(0, 5), MatchSpan(8, 13)),
+            matchSpans("token = token;", "token", ignoreCase = true, useRegex = false),
+        )
+    }
+
+    @Test
+    fun matchSpansAvoidsOverlappingHits() {
+        // "aa" over "aaaa" advances by the query length, so the two hits abut, never overlap.
+        assertEquals(
+            listOf(MatchSpan(0, 2), MatchSpan(2, 4)),
+            matchSpans("aaaa", "aa", ignoreCase = true, useRegex = false),
+        )
+    }
+
+    @Test
+    fun matchSpansHonoursCaseSensitivity() {
+        val text = "Token token TOKEN"
+        assertEquals(
+            listOf(MatchSpan(6, 11)),
+            matchSpans(text, "token", ignoreCase = false, useRegex = false),
+            "case-sensitive matches only the exact-case occurrence",
+        )
+        assertEquals(
+            listOf(MatchSpan(0, 5), MatchSpan(6, 11), MatchSpan(12, 17)),
+            matchSpans(text, "token", ignoreCase = true, useRegex = false),
+            "case-insensitive matches all three casings",
+        )
+    }
+
+    @Test
+    fun matchSpansReturnsEmptyForNoMatchBlankOrEmpty() {
+        assertTrue(matchSpans("abc", "z", ignoreCase = true, useRegex = false).isEmpty(), "no occurrence")
+        assertTrue(matchSpans("abc", "", ignoreCase = true, useRegex = false).isEmpty(), "empty query")
+        assertTrue(matchSpans("abc", "   ", ignoreCase = true, useRegex = false).isEmpty(), "blank query")
+        assertTrue(matchSpans("", "abc", ignoreCase = true, useRegex = false).isEmpty(), "empty text")
+    }
+
+    @Test
+    fun matchSpansSupportsRegexIncludingIgnoreCase() {
+        assertEquals(
+            listOf(MatchSpan(1, 3), MatchSpan(4, 5)),
+            matchSpans("a12b3", "\\d+", ignoreCase = true, useRegex = true),
+        )
+        assertEquals(
+            listOf(MatchSpan(0, 3)),
+            matchSpans("ABC", "abc", ignoreCase = true, useRegex = true),
+            "regex honours the ignore-case flag",
+        )
+    }
+
+    @Test
+    fun matchSpansInvalidRegexHighlightsNothingRatherThanThrowing() {
+        assertTrue(
+            matchSpans("[unclosed here", "[", ignoreCase = true, useRegex = true).isEmpty(),
+            "a broken pattern degrades to no spans (mirrors the scan's matcher)",
+        )
+    }
+
+    @Test
+    fun matchSpansRegexDropsZeroWidthMatches() {
+        // "a*" matches an empty string between characters; those zero-width hits must be dropped (and must
+        // not loop), leaving only the real "a".
+        assertEquals(
+            listOf(MatchSpan(1, 2)),
+            matchSpans("bab", "a*", ignoreCase = true, useRegex = true),
+        )
+    }
+
+    // ── Result pagination (resultPage) ──────────────────────────────────────────
+
+    @Test
+    fun resultPageUnderLimitShowsAllWithNoMore() {
+        val page = resultPage(collected = 10, limit = 60, capped = false)
+        assertEquals(10, page.shown)
+        assertFalse(page.hasMore)
+        assertEquals("showing 10 of 10", page.label)
+    }
+
+    @Test
+    fun resultPageOverLimitOffersShowMore() {
+        val page = resultPage(collected = 200, limit = 60, capped = false)
+        assertEquals(60, page.shown)
+        assertTrue(page.hasMore, "there are collected rows beyond the window to reveal")
+        assertEquals("showing 60 of 200", page.label)
+    }
+
+    @Test
+    fun resultPageCappedRendersAPlusOnceAllRevealed() {
+        val page = resultPage(collected = 300, limit = 300, capped = true)
+        assertEquals(300, page.shown)
+        assertFalse(page.hasMore, "everything collected is shown; more exist only beyond the scan's cap")
+        assertEquals("showing 300 of 300+", page.label, "the cap is surfaced as N+, never a silent total")
+    }
+
+    @Test
+    fun resultPageCappedStillPagesTheCollectedWindow() {
+        val page = resultPage(collected = 300, limit = 60, capped = true)
+        assertEquals(60, page.shown)
+        assertTrue(page.hasMore)
+        assertEquals("showing 60 of 300+", page.label)
+    }
+
+    @Test
+    fun resultPageEmptyIsZeroOfZero() {
+        val page = resultPage(collected = 0, limit = 60, capped = false)
+        assertEquals(0, page.shown)
+        assertFalse(page.hasMore)
+        assertEquals("showing 0 of 0", page.label)
+    }
 }

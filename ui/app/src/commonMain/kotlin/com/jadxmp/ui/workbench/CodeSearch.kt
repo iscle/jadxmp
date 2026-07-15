@@ -183,3 +183,70 @@ data class CodeSearchUiState(
     val hasResults: Boolean get() = matches.isNotEmpty()
     val fraction: Float get() = if (total == 0) 0f else scanned.toFloat() / total
 }
+
+// ── Result-row match highlighting (pure; unit-tested) ─────────────────────────
+//
+// These back the search panel's *presentation* (which characters of a result row to emphasise, how many
+// rows to reveal) rather than the scan itself, but they belong here beside the matcher they mirror so the
+// two can never drift: the highlight has to land on exactly what [CodeSearch.Query.matcher] found. Kept
+// free of Compose so the span math and paging math are asserted directly (see CodeSearchTest).
+
+/** A half-open `[start, end)` span of a matched substring within a result row's display text. */
+@Immutable
+internal data class MatchSpan(val start: Int, val end: Int)
+
+/**
+ * Every non-overlapping span of [query] within [text], honouring [ignoreCase] / [useRegex] — the slices a
+ * result row paints amber to show *why* it matched. Deliberately mirrors the scan's own matcher so a row's
+ * highlight always agrees with the hit that produced it:
+ *
+ * - A blank query, an invalid regex, or simply no occurrence all yield an empty list and never throw
+ *   (rule 4) — exactly as [CodeSearch.Query] degrades a bad pattern to "matches nothing".
+ * - Plain matches advance by the query length, so `"aa"` over `"aaaa"` highlights `[0,2)` and `[2,4)`, never
+ *   overlapping.
+ * - Regex zero-width hits (e.g. `a*` matching between characters) are dropped, so a row can never paint an
+ *   empty range and [findAll]'s own advance rules keep it from looping.
+ *
+ * Pure — the easiest piece to assert on.
+ */
+internal fun matchSpans(text: String, query: String, ignoreCase: Boolean, useRegex: Boolean): List<MatchSpan> {
+    if (query.isBlank() || text.isEmpty()) return emptyList()
+    if (useRegex) {
+        val regex = runCatching {
+            Regex(query, if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
+        }.getOrNull() ?: return emptyList()
+        return regex.findAll(text)
+            .mapNotNull { m -> if (m.range.isEmpty()) null else MatchSpan(m.range.first, m.range.last + 1) }
+            .toList()
+    }
+    val out = ArrayList<MatchSpan>()
+    val step = query.length // query is non-blank here, so step >= 1 → the loop always advances
+    var idx = text.indexOf(query, startIndex = 0, ignoreCase = ignoreCase)
+    while (idx >= 0) {
+        out += MatchSpan(idx, idx + query.length)
+        idx = text.indexOf(query, startIndex = idx + step, ignoreCase = ignoreCase)
+    }
+    return out
+}
+
+// ── Result pagination (pure; unit-tested) ─────────────────────────────────────
+
+/** Default reveal window: how many collected results a scope shows before offering "Show more". */
+internal const val RESULT_PAGE_SIZE: Int = 60
+
+/**
+ * The window of collected results to reveal plus an honest count label. [collected] is how many matches are
+ * in hand right now; [limit] the current reveal window (grown by "Show more"); [capped] is true when the
+ * scan itself stopped at its hard cap, so *more than [collected]* may exist — rendered as "N+" so the count
+ * is never a silent lie (rule 4: no silent loss). [hasMore] means there are already-collected rows beyond
+ * the window that "Show more" can reveal instantly; the cap-driven "+" is surfaced separately by the panel.
+ * Pure.
+ */
+@Immutable
+internal data class ResultPage(val shown: Int, val hasMore: Boolean, val label: String)
+
+internal fun resultPage(collected: Int, limit: Int, capped: Boolean): ResultPage {
+    val shown = collected.coerceIn(0, maxOf(0, limit))
+    val total = if (capped) "$collected+" else "$collected"
+    return ResultPage(shown = shown, hasMore = shown < collected, label = "showing $shown of $total")
+}
