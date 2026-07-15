@@ -1,5 +1,8 @@
 package com.jadxmp.codegen.java
 
+import com.jadxmp.codegen.AliasMap
+import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.ir.insn.FieldRef
 import com.jadxmp.ir.insn.MethodRef
 import com.jadxmp.ir.node.IrClass
@@ -37,18 +40,25 @@ internal object JavaMemberAliases {
 
     // ---- fields -------------------------------------------------------------
 
-    /** The unique, valid identifier for [field] within its declaring class. */
-    fun aliasOf(field: IrField): String =
-        buildFieldAliases(field.declaringClass)[field] ?: JavaIdentifiers.sanitize(field.name)
+    /**
+     * The unique, valid identifier for [field] within its declaring class. When [aliasMap] carries a
+     * (deobfuscation/user) override for the field it is used as the base spelling *before* the same
+     * within-class uniqueness pass runs — so an override that happens to clash with a kept member is still
+     * disambiguated by the existing, tested machinery. An [AliasMap.EMPTY] map falls through to the exact
+     * prior behavior (byte-identical output).
+     */
+    fun aliasOf(field: IrField, aliasMap: AliasMap = AliasMap.EMPTY): String =
+        buildFieldAliases(field.declaringClass, aliasMap)[field] ?: JavaIdentifiers.sanitize(field.name)
 
     /**
      * The identifier a *reference* to [ref] must render. Resolves the referenced [IrField] against the
-     * loaded model so it renders the exact same disambiguated alias as that field's definition; falls
-     * back to a plain sanitize when the field is not in the model (a library field is never renamed).
+     * loaded model so it renders the exact same disambiguated alias as that field's definition (including
+     * any [aliasMap] override, which is keyed by the field's declaring identity so def and use agree);
+     * falls back to a plain sanitize when the field is not in the model (a library field is never renamed).
      */
-    fun aliasForFieldRef(root: IrRoot?, ref: FieldRef): String {
+    fun aliasForFieldRef(root: IrRoot?, ref: FieldRef, aliasMap: AliasMap = AliasMap.EMPTY): String {
         val field = resolveField(root, ref) ?: return JavaIdentifiers.sanitize(ref.name)
-        return aliasOf(field)
+        return aliasOf(field, aliasMap)
     }
 
     private fun resolveField(root: IrRoot?, ref: FieldRef): IrField? {
@@ -64,13 +74,23 @@ internal object JavaMemberAliases {
     }
 
     /** Field-name aliases for every field of [cls], keyed by field identity, in declaration order. */
-    private fun buildFieldAliases(cls: IrClass): Map<IrField, String> {
+    private fun buildFieldAliases(cls: IrClass, aliasMap: AliasMap): Map<IrField, String> {
         val used = HashSet<String>()
         val result = HashMap<IrField, String>()
         for (f in cls.fields) {
-            result[f] = uniqueSuffixed(JavaIdentifiers.sanitize(f.name), used)
+            result[f] = uniqueSuffixed(fieldBase(cls, f, aliasMap), used)
         }
         return result
+    }
+
+    /**
+     * The pre-uniqueness base name of [f]: an [aliasMap] override (deobfuscation/user rename) when present,
+     * else the sanitized raw name. The `isEmpty` fast path keeps the no-override case allocation-free and
+     * byte-identical to the pre-feature behavior.
+     */
+    private fun fieldBase(cls: IrClass, f: IrField, aliasMap: AliasMap): String {
+        if (!aliasMap.isEmpty) aliasMap.aliasOf(FieldNodeRef(cls.fullName, f.name))?.let { return it }
+        return JavaIdentifiers.sanitize(f.name)
     }
 
     // ---- methods ------------------------------------------------------------
@@ -80,20 +100,22 @@ internal object JavaMemberAliases {
      * the static initializer (`<clinit>`) are never renamed here — the backend renders them specially
      * (as the class name / a `static {}` block) — so their raw name is returned unchanged.
      */
-    fun aliasOf(method: IrMethod): String {
+    fun aliasOf(method: IrMethod, aliasMap: AliasMap = AliasMap.EMPTY): String {
         if (isSpecial(method.name)) return method.name
-        return buildMethodAliases(method.declaringClass)[method] ?: JavaIdentifiers.sanitize(method.name)
+        return buildMethodAliases(method.declaringClass, aliasMap)[method] ?: JavaIdentifiers.sanitize(method.name)
     }
 
     /**
      * The identifier a *call* of [ref] must render. Resolves the referenced [IrMethod] against the model
-     * so an invoke renders the same disambiguated alias as the method's definition; falls back to a plain
-     * sanitize when the method is not in the model (a library/inherited method is never renamed here).
+     * so an invoke renders the same disambiguated alias as the method's definition (including any
+     * [aliasMap] override, keyed by the method's declaring identity so call and definition agree); falls
+     * back to a plain sanitize when the method is not in the model (a library/inherited method is never
+     * renamed here).
      */
-    fun aliasForMethodRef(root: IrRoot?, ref: MethodRef): String {
+    fun aliasForMethodRef(root: IrRoot?, ref: MethodRef, aliasMap: AliasMap = AliasMap.EMPTY): String {
         if (isSpecial(ref.name)) return JavaIdentifiers.sanitize(ref.name)
         val method = resolveMethod(root, ref) ?: return JavaIdentifiers.sanitize(ref.name)
-        return aliasOf(method)
+        return aliasOf(method, aliasMap)
     }
 
     private fun resolveMethod(root: IrRoot?, ref: MethodRef): IrMethod? {
@@ -117,13 +139,13 @@ internal object JavaMemberAliases {
      * parameter types): a real Java overload (same name, different parameters) keeps its name, while two
      * methods sharing a name AND parameter types are a hard collision and the later ones are suffixed.
      */
-    private fun buildMethodAliases(cls: IrClass): Map<IrMethod, String> {
+    private fun buildMethodAliases(cls: IrClass, aliasMap: AliasMap): Map<IrMethod, String> {
         // Set of "name(paramSignature)" already committed, so a rename never re-collides with an overload.
         val usedSignatures = HashSet<String>()
         val result = HashMap<IrMethod, String>()
         for (m in cls.methods) {
             if (isSpecial(m.name)) continue
-            val base = JavaIdentifiers.sanitize(m.name)
+            val base = methodBase(cls, m, aliasMap)
             val paramKey = m.argTypes.joinToString(",") { it.toString() }
             var candidate = base
             var n = 1
@@ -134,6 +156,18 @@ internal object JavaMemberAliases {
             result[m] = candidate
         }
         return result
+    }
+
+    /**
+     * The pre-uniqueness base name of [m]: an [aliasMap] override (deobfuscation/user rename) when present,
+     * else the sanitized raw name. Keyed by the method's declaring identity + erased arg descriptors — the
+     * exact [MethodNodeRef] the backend records as metadata — so a call site resolves to the same override.
+     */
+    private fun methodBase(cls: IrClass, m: IrMethod, aliasMap: AliasMap): String {
+        if (!aliasMap.isEmpty) {
+            aliasMap.aliasOf(MethodNodeRef(cls.fullName, m.name, m.argTypes.map { it.toString() }))?.let { return it }
+        }
+        return JavaIdentifiers.sanitize(m.name)
     }
 
     // ---- shared -------------------------------------------------------------

@@ -2,6 +2,7 @@ package com.jadxmp.api
 
 import com.jadxmp.api.internal.CodegenBridge
 import com.jadxmp.api.internal.RenderabilityGuard
+import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeInfo
 import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.java.JavaCodeGenerator
@@ -52,6 +53,13 @@ import kotlinx.coroutines.yield
 class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
 
     private var root: IrRoot? = null
+    // The deobfuscation alias map for the loaded model. Built ONCE in [load] — only when
+    // args.deobfuscation is on, else [AliasMap.EMPTY] — and thereafter READ-ONLY, so the parallel per-class
+    // render path reads it race-free (mirrors the "pure, built-once" naming design in codegen). The safety
+    // invariant: EMPTY makes every codegen naming seam take its pre-feature path, so output is byte-identical
+    // to a build without this feature — which is why default-args runs (the differential oracle) are
+    // completely unaffected.
+    private var aliasMap: AliasMap = AliasMap.EMPTY
     // The loaded input model, retained so [smali] can disassemble a class's raw bytecode straight from
     // the parser output — no pipeline decompile. Keyed by the same binary (dotted) name as [classNames]
     // (the parser's descriptor `Lp/C;` folded to `p.C`), so a UI/tool selection resolves without a scan.
@@ -96,6 +104,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         usageIndexCache.clear()
         resourcesInternal = null
         inputClasses = emptyMap()
+        aliasMap = AliasMap.EMPTY
         val loader = try {
             args.registry.load(name, bytes) ?: ListCodeLoader(emptyList())
         } catch (e: Exception) {
@@ -113,6 +122,9 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         }
         val built = ModelBuilder.build(loader)
         root = built
+        // Build the deobfuscation alias map once for this model — empty unless opted in via
+        // [DecompilerArgs.deobfuscation]. Read-only after this point (see the [aliasMap] field).
+        aliasMap = if (args.deobfuscation) Deobfuscator.buildAliasMap(built) else AliasMap.EMPTY
         return built.classes.size
     }
 
@@ -429,14 +441,17 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         // metadata contract are shared across formats. [format] is the per-call override, not necessarily
         // args.outputFormat — the same lowered class can be re-emitted in either format.
         val info: CodeInfo = when (format) {
-            OutputFormat.JAVA -> JavaCodeGenerator().generate(cls)
+            // Java applies the deobfuscation alias map (EMPTY unless opted in ⇒ byte-identical when off);
+            // Kotlin renaming is a follow-up, so it always renders with the raw names.
+            OutputFormat.JAVA -> JavaCodeGenerator().generate(cls, aliasMap)
             OutputFormat.KOTLIN -> KotlinCodeGenerator().generate(cls)
         }
         return DecompiledClass(
             // The result's fullName is the EMITTED SOURCE name (sanitized package + simple name), which is
             // what the file path / recompile location must use so `class doWord` lands in `doWord.java` — not
-            // the binary IrClass.fullName (`do`). The backend that renders the body is the source of truth.
-            fullName = sourceFullName(cls, format),
+            // the binary IrClass.fullName (`do`). The backend that renders the body is the source of truth,
+            // so a renamed class's file path follows its body via the same alias map.
+            fullName = sourceFullName(cls, format, aliasMap),
             code = info.code,
             metadata = ClassMetadata(
                 code = info.metadata,
@@ -566,7 +581,11 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
  * Kotlin keeps the binary name for now — the `.kt` backend has the same file-naming gap and it is tracked
  * as a parallel follow-up (see the codegen-kotlin work item), not fixed here.
  */
-internal fun sourceFullName(cls: IrClass, format: OutputFormat): String = when (format) {
-    OutputFormat.JAVA -> JavaCodeGenerator.sourceName(cls)
+internal fun sourceFullName(
+    cls: IrClass,
+    format: OutputFormat,
+    aliasMap: AliasMap = AliasMap.EMPTY,
+): String = when (format) {
+    OutputFormat.JAVA -> JavaCodeGenerator.sourceName(cls, aliasMap)
     OutputFormat.KOTLIN -> cls.fullName
 }

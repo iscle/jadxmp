@@ -1,5 +1,7 @@
 package com.jadxmp.codegen.java
 
+import com.jadxmp.codegen.AliasMap
+import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.ir.node.IrClass
 
 /**
@@ -33,9 +35,9 @@ internal object JavaSourceName {
      * The full dotted Java source name of top-level [cls] — sanitized package (if any) + [sourceSimpleName].
      * This is what the output file path (`pkg/Simple.java`, `pkg/Simple.class`) must be derived from.
      */
-    fun sourceName(cls: IrClass): String {
+    fun sourceName(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): String {
         val pkg = sourcePackage(cls)
-        val simple = sourceSimpleName(cls)
+        val simple = sourceSimpleName(cls, aliasMap)
         return if (pkg.isEmpty()) simple else "$pkg.$simple"
     }
 
@@ -54,11 +56,22 @@ internal object JavaSourceName {
      * disambiguation does not apply). For a **top-level** class it is disambiguated against the other
      * top-level classes that share its sanitized package (see [disambiguatedTopLevel]).
      */
-    fun sourceSimpleName(cls: IrClass): String {
-        val base = JavaIdentifiers.sanitize(cls.shortName)
+    fun sourceSimpleName(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): String {
+        val base = classBase(cls, aliasMap)
         // Only top-level classes become their own file, so only they can collide on a file name.
         if (cls.outerClass != null) return base
-        return disambiguatedTopLevel(cls)
+        return disambiguatedTopLevel(cls, aliasMap)
+    }
+
+    /**
+     * The pre-disambiguation base spelling of [cls]'s simple name: an [aliasMap] override (deobfuscation/
+     * user rename) when present, else the sanitized [IrClass.shortName]. The `isEmpty` fast path keeps the
+     * no-override case byte-identical to the pre-feature behavior. Renamed classes are always leaf
+     * top-level (the populator's restriction), so the override is a plain, already-valid identifier.
+     */
+    private fun classBase(cls: IrClass, aliasMap: AliasMap): String {
+        if (!aliasMap.isEmpty) aliasMap.aliasOf(ClassNodeRef(cls.fullName))?.let { return it }
+        return JavaIdentifiers.sanitize(cls.shortName)
     }
 
     /**
@@ -71,17 +84,17 @@ internal object JavaSourceName {
      * Scoped to same-package siblings, so the scan is proportional to a package's size, not the whole
      * program; the common no-collision case returns the base after one pass.
      */
-    private fun disambiguatedTopLevel(cls: IrClass): String {
+    private fun disambiguatedTopLevel(cls: IrClass, aliasMap: AliasMap): String {
         val pkg = sourcePackage(cls)
         val used = HashSet<String>()
         for (other in cls.root.classes) {
             if (other.outerClass != null) continue
             if (sourcePackage(other) != pkg) continue
-            val name = uniqueSuffixed(JavaIdentifiers.sanitize(other.shortName), used)
+            val name = uniqueSuffixed(classBase(other, aliasMap), used)
             if (other === cls) return name
         }
         // cls is always present in its own root, so the loop returns above; this is an unreachable guard.
-        return JavaIdentifiers.sanitize(cls.shortName)
+        return classBase(cls, aliasMap)
     }
 
     /** [base] if free, else `base2`, `base3`, … — the first form not already in [used]; records the pick. */

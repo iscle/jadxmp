@@ -1,5 +1,6 @@
 package com.jadxmp.codegen.java
 
+import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
@@ -105,8 +106,11 @@ internal class MethodBodyWriter(
     // renamed to dodge a `values()`/`valueOf` collision must be CALLED by its new name. Null off the enum
     // path. See [EnumReconstruction] / [JavaCodeGenerator].
     private val enumRewrites: EnumRefRewrites? = null,
+    // Deobfuscation/user rename overrides, applied to member call/read sites and renamed-class type refs
+    // in this body. [AliasMap.EMPTY] (the default) ⇒ the byte-identical no-deobfuscation path.
+    private val aliasMap: AliasMap = AliasMap.EMPTY,
 ) {
-    private val types = JavaTypeRenderer(imports)
+    private val types = JavaTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
     /**
      * The enum-reference rewrites [MethodBodyWriter] applies while emitting an obfuscated enum's user
@@ -543,8 +547,9 @@ internal class MethodBodyWriter(
         if (field != null) {
             code.attachReference(FieldNodeRef(className(field.declaringType), field.name))
             // Reference display resolves to the referenced field's scope-unique alias (matching its
-            // definition); the metadata ref above keeps the binary name for jump-to-def identity.
-            code.add(JavaMemberAliases.aliasForFieldRef(root, field))
+            // definition, including any deobfuscation/user override in [aliasMap]); the metadata ref above
+            // keeps the binary name for jump-to-def identity.
+            code.add(JavaMemberAliases.aliasForFieldRef(root, field, aliasMap))
         } else {
             // A field-opcode insn that is not a FieldInstruction carries no field name. The decoder always
             // builds the right subclass, so this is unreachable today — but fabricating a `field` identifier
@@ -1282,7 +1287,7 @@ internal class MethodBodyWriter(
             // the compiler-regenerated `values()`/`valueOf()` (a wrong target that still compiles).
             crossClassEnumRename(method, ownerName)?.let { return it }
         }
-        return JavaMemberAliases.aliasForMethodRef(root, method)
+        return JavaMemberAliases.aliasForMethodRef(root, method, aliasMap)
     }
 
     /**

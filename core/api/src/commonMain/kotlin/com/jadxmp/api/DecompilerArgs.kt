@@ -51,4 +51,16 @@ data class DecompilerArgs(
     val parallelism: Int = defaultParallelism(),
     /** Input/pass plugins available to this run. Defaults to the built-in DEX input plugin. */
     val registry: PluginRegistry = PluginRegistry.default(),
+    /**
+     * Auto-rename clearly-obfuscated identifiers (short/mangled class, field and method names) to stable,
+     * readable, collision-free names, applied consistently at the definition and every reference.
+     * **Opt-in and OFF by default**, matching jadx (whose deobfuscator is also off by default).
+     *
+     * The safety invariant: when `false`, no alias map is built and every naming seam takes its
+     * pre-feature path, so decompiled output is **byte-for-byte identical** to a build without this
+     * feature (the differential oracle, which runs default args, is therefore unaffected). Turning it on
+     * only ever *adds* renames; it never changes control flow, types, or structure. First cut: Java output
+     * only (Kotlin renaming is a follow-up).
+     */
+    val deobfuscation: Boolean = false,
 )

@@ -1,5 +1,6 @@
 package com.jadxmp.codegen.java
 
+import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.CodeInfo
 import com.jadxmp.codegen.CodeWriter
@@ -19,6 +20,7 @@ import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrFieldConst
 import com.jadxmp.ir.node.IrMethod
+import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.type.TypeKind
 
@@ -42,13 +44,17 @@ internal val ERROR_SURFACED_INLINE: AttrKey<Boolean> = AttrKey("java.codegen.err
  */
 class JavaCodeGenerator {
 
-    /** Render [cls] to Java source and metadata. */
-    fun generate(cls: IrClass): CodeInfo {
+    /**
+     * Render [cls] to Java source and metadata. [aliasMap] carries deobfuscation/user rename overrides
+     * (default [AliasMap.EMPTY] ⇒ no renaming ⇒ output byte-identical to the pre-feature backend). It is
+     * read-only here, so the parallel per-class render path stays race-free.
+     */
+    fun generate(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = ImportCollector(packageName)
 
         // Pass 1: populate imports (output discarded).
-        ClassEmitter(CodeWriter(), imports).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root).emitClass(cls, topLevel = true)
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -61,7 +67,7 @@ class JavaCodeGenerator {
             for (imp in importList) code.add("import ").add(JavaIdentifiers.sanitizeQualified(imp)).add(";").newLine()
             code.newLine()
         }
-        ClassEmitter(code, imports).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -70,17 +76,21 @@ class JavaCodeGenerator {
          * The emitted Java source name of top-level [cls] (sanitized package + simple name) — the name the
          * output file path (`pkg/Simple.java` / `pkg/Simple.class`) must use so it agrees with the class
          * body this backend renders. `core:api` reads this instead of the binary [IrClass.fullName]; the
-         * body itself already routes through the same [JavaSourceName]. See [JavaSourceName].
+         * body itself already routes through the same [JavaSourceName]. [aliasMap] must be the SAME map
+         * passed to [generate] so the file path follows a renamed class's body. See [JavaSourceName].
          */
-        fun sourceName(cls: IrClass): String = JavaSourceName.sourceName(cls)
+        fun sourceName(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): String =
+            JavaSourceName.sourceName(cls, aliasMap)
     }
 
     /** Writes a class declaration, its members, and nested classes into [code]. */
     private class ClassEmitter(
         private val code: CodeWriter,
         private val imports: ImportCollector,
+        private val aliasMap: AliasMap = AliasMap.EMPTY,
+        private val root: IrRoot? = null,
     ) {
-        private val types = JavaTypeRenderer(imports)
+        private val types = JavaTypeRenderer(imports, aliasMap, root)
 
         fun emitClass(cls: IrClass, topLevel: Boolean) {
             emitErrorComment(cls)
@@ -103,8 +113,9 @@ class JavaCodeGenerator {
             code.add(classKeyword(cls.accessFlags)).add(" ")
             code.attachDefinition(ClassNodeRef(cls.fullName))
             // The emitted simple name is the single source of truth shared with the output file path
-            // (JavaSourceName): a top-level class is disambiguated so its body name equals its file name.
-            code.add(JavaSourceName.sourceSimpleName(cls))
+            // (JavaSourceName) AND every reference (JavaTypeRenderer routes renamed refs through it): a
+            // top-level class is disambiguated so its body name equals its file name and its use sites.
+            code.add(JavaSourceName.sourceSimpleName(cls, aliasMap))
             // A Java `enum` implicitly extends java.lang.Enum — never spell the `extends` out.
             if (enumInfo == null) emitExtends(cls)
             emitImplements(cls)
@@ -250,7 +261,7 @@ class JavaCodeGenerator {
         private fun emitEnumConstantArgs(cls: IrClass, e: EnumReconstruction, c: EnumReconstruction.EnumConstant) {
             val clinit = e.clinit
             val writer = clinit?.let {
-                MethodBodyWriter(code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns)
+                MethodBodyWriter(code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns, aliasMap = aliasMap)
             }
             // A resolved plan (folded `new T[]{…}` arrays + backward inter-constant NAME references +
             // inlined expressions) renders directly; its support instructions are already suppressed from
@@ -277,7 +288,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(),
-                e.suppressedClinitInsns, e.constantResultFields, ctx.refRewrites,
+                e.suppressedClinitInsns, e.constantResultFields, ctx.refRewrites, aliasMap,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -292,7 +303,7 @@ class JavaCodeGenerator {
         private fun emitEnumConstructor(cls: IrClass, method: IrMethod, ctx: EnumContext) {
             emitErrorComment(method)
             code.attachDefinition(MethodNodeRef(cls.fullName, method.name, method.argTypes.map { it.toString() }))
-            code.add(JavaSourceName.sourceSimpleName(cls))
+            code.add(JavaSourceName.sourceSimpleName(cls, aliasMap))
 
             val methodNames = NameGenerator()
             val paramNames = resolveParamNames(method, methodNames)
@@ -318,7 +329,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames, suppressed,
-                enumRewrites = ctx.refRewrites,
+                enumRewrites = ctx.refRewrites, aliasMap = aliasMap,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -348,8 +359,9 @@ class JavaCodeGenerator {
             code.add(types.render(field.type)).add(" ")
             code.attachDefinition(FieldNodeRef(cls.fullName, field.name))
             // The metadata ref above keeps the binary name (jump-to-def identity); the emitted text uses
-            // the scope-unique alias so a name duplicated with another field is disambiguated.
-            code.add(JavaMemberAliases.aliasOf(field))
+            // the scope-unique alias so a name duplicated with another field is disambiguated — and a
+            // deobfuscation/user override, when present in [aliasMap], is applied here and at every use.
+            code.add(JavaMemberAliases.aliasOf(field, aliasMap))
             val const = field.constValue
             when {
                 // A `static final` field's compile-time constant is emitted as a declaration initializer
@@ -424,9 +436,9 @@ class JavaCodeGenerator {
             // An obfuscated-enum user method renamed to dodge a `values()`/`valueOf` collision is spelled
             // with its new name at the definition site (call sites go through MethodBodyWriter).
             val definitionName = when {
-                isConstructor -> JavaSourceName.sourceSimpleName(cls)
+                isConstructor -> JavaSourceName.sourceSimpleName(cls, aliasMap)
                 ctx?.renamedByMethod?.get(method) != null -> ctx.renamedByMethod.getValue(method)
-                else -> JavaMemberAliases.aliasOf(method)
+                else -> JavaMemberAliases.aliasOf(method, aliasMap)
             }
             code.add(definitionName)
 
@@ -487,7 +499,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
-                enumRewrites = ctx?.refRewrites,
+                enumRewrites = ctx?.refRewrites, aliasMap = aliasMap,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
