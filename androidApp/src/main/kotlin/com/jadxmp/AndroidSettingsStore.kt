@@ -16,8 +16,11 @@ import com.jadxmp.ui.client.UiSettings
 class AndroidSettingsStore(context: Context) : SettingsStore {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    // Whole body guarded: the raw read AND the parse are wrapped so load() — which runs during startup
+    // composition — degrades to defaults instead of crashing launch, even if a future non-total parse
+    // throws (rule 4). Normal + empty-store cases are unchanged (empty store → parse(null) → defaults).
     override fun load(): UiSettings =
-        UiSettings.parse(runCatching { prefs.getString(KEY, null) }.getOrNull())
+        runCatching { UiSettings.parse(prefs.getString(KEY, null)) }.getOrDefault(UiSettings())
 
     override fun save(settings: UiSettings) {
         runCatching { prefs.edit().putString(KEY, settings.serialize()).apply() }

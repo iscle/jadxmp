@@ -15,8 +15,12 @@ import web.storage.localStorage
  */
 class BrowserSettingsStore : SettingsStore {
 
+    // Whole body guarded: the raw `localStorage` read AND the parse are wrapped so load() — which runs
+    // during startup composition — degrades to defaults instead of crashing launch, even if a future
+    // non-total parse throws (rule 4). Normal + empty-store cases are unchanged (missing key →
+    // getItem returns null → parse(null) → defaults).
     override fun load(): UiSettings =
-        UiSettings.parse(runCatching { localStorage.getItem(KEY) }.getOrNull())
+        runCatching { UiSettings.parse(localStorage.getItem(KEY)) }.getOrDefault(UiSettings())
 
     override fun save(settings: UiSettings) {
         runCatching { localStorage.setItem(KEY, settings.serialize()) }

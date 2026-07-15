@@ -49,10 +49,20 @@ class AndroidFileSaver(context: Context) : FileSaver {
         }
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val uri = resolver.insert(collection, pending) ?: return false
-        resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
-        // Clear the pending flag so the file becomes visible to other apps.
-        resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
-        return true
+        // The insert created a row flagged IS_PENDING=1. If opening the stream fails (null), writing the
+        // bytes throws, or clearing the pending flag throws, that row would linger forever as an
+        // invisible orphan in Downloads. So guard open+write+update as one unit and, on ANY failure,
+        // delete the row before returning false — rolling back the half-created entry (rule 4).
+        return runCatching {
+            val stream = resolver.openOutputStream(uri) ?: error("openOutputStream returned null")
+            stream.use { it.write(bytes) }
+            // Clear the pending flag so the file becomes visible to other apps.
+            resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+            true
+        }.getOrElse {
+            runCatching { resolver.delete(uri, null, null) } // best-effort rollback; itself never throws.
+            false
+        }
     }
 
     private fun saveToAppExternalDownloads(name: String, bytes: ByteArray): Boolean {
