@@ -111,17 +111,14 @@ private fun dumpSample(
 }
 
 /** Which signals jadx passed but jadxmp failed on one sample (the regressed signals). */
-private fun regressedSignals(ref: SignalScore, cand: SignalScore): List<String> = buildList {
-    if (ref.noErrors && !cand.noErrors) add("no-error")
-    if (ref.recompiles && !cand.recompiles) add("recompiles")
-    if (ref.executesCheck == true && cand.executesCheck == false) add("exec-check")
-}
+private fun regressedSignals(ref: SignalScore, cand: SignalScore): List<String> =
+    regressedSignalNames(ref, cand).toList()
 
 /** Which signals jadxmp passed but jadx failed on one sample (the improved signals). */
 private fun improvedSignals(ref: SignalScore, cand: SignalScore): List<String> = buildList {
-    if (!ref.noErrors && cand.noErrors) add("no-error")
-    if (!ref.recompiles && cand.recompiles) add("recompiles")
-    if (ref.executesCheck == false && cand.executesCheck == true) add("exec-check")
+    if (!ref.noErrors && cand.noErrors) add(SignalNames.NO_ERROR)
+    if (!ref.recompiles && cand.recompiles) add(SignalNames.RECOMPILES)
+    if (ref.executesCheck == false && cand.executesCheck == true) add(SignalNames.EXEC_CHECK)
 }
 
 private fun renderSmaliReport(
@@ -147,17 +144,19 @@ private fun renderSmaliReport(
     appendLine("    tied-fail    : $tied   (every signal fails on both sides — INDETERMINATE, not evidence)")
     appendLine("  regression     : ${verdicts[Verdict.REGRESSION] ?: 0}")
     appendLine("  improvement    : ${verdicts[Verdict.IMPROVEMENT] ?: 0}")
+    appendLine("  exp-divergence : ${verdicts[Verdict.EXPECTED_DIVERGENCE] ?: 0}   (allowlisted jadx-bugs; excluded from gate)")
     appendLine()
 
-    // Per-category table: parity split into evidenced (P!) and tied-fail (P?).
-    appendLine("per-category (evidenced-parity / tied-parity / regression / improvement):")
-    appendLine("  %-14s %6s %6s %7s %7s".format("category", "par!", "par?", "regr", "impr"))
+    // Per-category table: parity split into evidenced (P!) and tied-fail (P?); xdiv = expected divergences.
+    appendLine("per-category (evidenced-parity / tied-parity / regression / improvement / expected-divergence):")
+    appendLine("  %-14s %6s %6s %7s %7s %7s".format("category", "par!", "par?", "regr", "impr", "xdiv"))
     scored.groupBy { it.category ?: "?" }.toSortedMap().forEach { (cat, rows) ->
         val pe = rows.count { it.isEvidencedParity }
         val pt = rows.count { it.verdict == Verdict.PARITY && !it.isEvidencedParity }
         val r = rows.count { it.verdict == Verdict.REGRESSION }
         val i = rows.count { it.verdict == Verdict.IMPROVEMENT }
-        appendLine("  %-14s %6d %6d %7d %7d".format(cat, pe, pt, r, i))
+        val x = rows.count { it.verdict == Verdict.EXPECTED_DIVERGENCE }
+        appendLine("  %-14s %6d %6d %7d %7d %7d".format(cat, pe, pt, r, i, x))
     }
     appendLine()
 
@@ -173,6 +172,33 @@ private fun renderSmaliReport(
                 val signals = regressedSignals(r.reference, r.candidate!!).joinToString(", ")
                 appendLine("  ${r.sample.padEnd(40)} fails: $signals")
             }
+        appendLine()
+    }
+
+    val divergences = board.expectedDivergences()
+    if (divergences.isNotEmpty()) {
+        appendLine(
+            "EXPECTED DIVERGENCES (allowlisted: jadx passes by MISCOMPILING, jadxmp faithfully fails — " +
+                "excluded from the gate, NOT hidden):",
+        )
+        divergences
+            .sortedBy { it.sample }
+            .forEach { r ->
+                val entry = DocumentedDivergences.forSample(r.sample)
+                val signals = regressedSignals(r.reference, r.candidate!!).joinToString(", ")
+                appendLine("  ${r.sample.padEnd(40)} expected fails: $signals")
+                entry?.rationale?.let { appendLine("      why jadx is buggy: $it") }
+            }
+        appendLine()
+    }
+
+    val stale = board.staleAllowlistEntries()
+    if (stale.isNotEmpty()) {
+        appendLine(
+            "STALE ALLOWLIST ENTRIES (jadxmp now passes an allowlisted signal — remove from " +
+                "DocumentedDivergences):",
+        )
+        stale.sortedBy { it.sample }.forEach { appendLine("  ${it.sample}  (documented: ${it.signals.sorted()})") }
         appendLine()
     }
 
