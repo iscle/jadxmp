@@ -39,7 +39,7 @@ import com.jadxmp.pipeline.pass.CancellationCheck
  * if a fixed CFG somehow does not structure faithfully, structuring still bails to unstructured — never
  * wrong code (rule 4). A residual irreducibility this transform cannot fix is likewise left to that bail.
  *
- * ## The two supported shapes (mirroring jadx)
+ * ## The supported shapes (mirroring jadx)
  * A DFS coloring classifies edges into **back edges** (to a still-open/GRAY block) and **cross edges**
  * (to a finished/BLACK block). A back edge whose header does NOT dominate its loop-end is a multi-entry
  * loop. For such a back edge (header `H`, loop-end `E`):
@@ -51,6 +51,12 @@ import com.jadxmp.pipeline.pass.CancellationCheck
  *    from inside the loop. Requires `E` straight-line whose single successor is `H`, and — the guard jadx
  *    omits — `X` must NOT already branch straight to `H` (else rerouting would collapse a two-armed
  *    branch that feeds both `E` and `H`, silently changing control flow).
+ *  - **header back-edge split (fallback)**: when neither above matches but the back-edge header `H` is
+ *    itself straight-line, it is duplicated onto the back edge exactly like header-successor entry
+ *    (`E -> copy(H) -> S`), without requiring the idom/cross precondition. This handles the mirror DFS
+ *    orientation in which the loop's second entry is `H` reached via a tree edge. See
+ *    [tryHeaderBackEdgeSplit] for the soundness argument (the split is behavior-preserving for any
+ *    straight-line header; the dropped precondition was pattern-recognition, not a correctness gate).
  *
  * ## Bounds / termination (rule 4)
  * Only a straight-line, single-successor, non-self-looping, unprotected, monitor-free block with
@@ -152,31 +158,59 @@ internal class FixMultiEntryLoops(
     private fun fixLoop(backEdge: Edge, crossEdges: List<Edge>): Boolean {
         if (tryHeaderSuccessorEntry(backEdge, crossEdges)) return true
         if (tryEndBlockEntry(backEdge, crossEdges)) return true
+        if (tryHeaderBackEdgeSplit(backEdge)) return true
         return false
     }
 
     private fun tryHeaderSuccessorEntry(backEdge: Edge, crossEdges: List<Edge>): Boolean {
         val header = backEdge.end
-        val loopEnd = backEdge.start
         val headerIDom = header.immediateDominator ?: return false
         val subEntries = crossEdges.filter { it.start === headerIDom }
         if (subEntries.size != 1) return false
-        val subEntry = subEntries[0]
         val headerSuccs = cleanSucc(header)
-        if (headerSuccs.size != 1 || headerSuccs[0] !== subEntry.end) return false
-        val subEntryBlock = subEntry.end
-        // We duplicate the header (straight-line by the single-successor check). Reroute the back edge
-        // `loopEnd -> header` to `loopEnd -> copy(header) -> subEntryBlock`: faithful because `header`'s
-        // sole successor is `subEntryBlock`, so a latch that ran `header` then fell to `subEntryBlock`
-        // still does exactly that, and `header` keeps only its true (dominator-side) entries. The reroute
-        // is SLOT-PRESERVING ([replaceSuccessor]): a conditional latch's back-edge arm may be its taken
-        // arm (`successors[0]`), and that index must stay the arm that reaches the loop — else branch
-        // polarity inverts while the condition text is unchanged (a rule-4 miscompile).
-        if (!canDuplicate(header) || anyProtected(header, loopEnd, subEntryBlock)) return false
+        if (headerSuccs.size != 1 || headerSuccs[0] !== subEntries[0].end) return false
+        // The header's alternative entry is the idom's cross edge into the header's single successor:
+        // recognizing that pattern, duplicate the header onto the back edge.
+        return splitHeaderOntoBackEdge(header, backEdge.start)
+    }
+
+    /**
+     * **Shape 3 — fallback header split.** Tried only after shapes 1 & 2 decline, so it never changes a
+     * loop those already handle. When a multi-entry back edge's header is itself straight-line, duplicate
+     * it onto the back edge exactly as [tryHeaderSuccessorEntry] does — `loopEnd -> copy(header) -> S`,
+     * leaving the header's entry-side predecessors reaching `S` unchanged. This covers the orientation in
+     * which the loop's second entry is the back-edge **header** (reached via a DFS *tree* edge), rather
+     * than the header-successor cross edge shape 1 keys on (jadx sees the mirror orientation because its
+     * DFS discovers the dominating header first; the transform is the same node split).
+     *
+     * ## Why dropping shape 1's idom/cross precondition is sound
+     * That precondition only *recognizes* a known-good pattern; it is not a correctness gate. The split is
+     * behavior-preserving for ANY straight-line header: [canDuplicate] guarantees a single clean successor
+     * `S`, so `copy(header)` reproduces exactly the `header -> S` run, the back-edge path `loopEnd -> copy
+     * -> S` does precisely what `loopEnd -> header -> S` did, and `header` keeps every other predecessor
+     * still flowing to `S`. No block/edge is dropped and the reroute is SLOT-PRESERVING ([replaceSuccessor])
+     * so branch polarity of a conditional latch is unchanged. If this fails to reduce the loop, structuring
+     * still bails to unstructured (rule 4) — never wrong code; and duplication stays bounded by [MAX_SPLITS].
+     */
+    private fun tryHeaderBackEdgeSplit(backEdge: Edge): Boolean =
+        splitHeaderOntoBackEdge(backEdge.end, backEdge.start)
+
+    /**
+     * Duplicate the straight-line [header] onto the `loopEnd -> header` back edge:
+     * `loopEnd -> copy(header) -> S` where `S` is the header's single successor, keeping the header's other
+     * predecessors intact. The reroute mutates the back-edge slot IN PLACE ([replaceSuccessor]): a
+     * conditional latch's back-edge arm may be its taken arm (`successors[0]`), and that index must stay
+     * the arm that reaches the loop — else branch polarity inverts while the condition text is unchanged
+     * (a rule-4 miscompile). Refuses (no change) any header that is not a bounded, clonable, single clean
+     * successor block, or if any touched block is exception-protected.
+     */
+    private fun splitHeaderOntoBackEdge(header: BasicBlock, loopEnd: BasicBlock): Boolean {
+        val successor = cleanSucc(header).singleOrNull() ?: return false
+        if (!canDuplicate(header) || anyProtected(header, loopEnd, successor)) return false
         val copy = newBlock()
         copyBlockData(header, copy)
         replaceSuccessor(loopEnd, header, copy)
-        connect(copy, subEntryBlock)
+        connect(copy, successor)
         return true
     }
 
