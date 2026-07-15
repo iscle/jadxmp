@@ -56,7 +56,12 @@ class PluginRegistry(
     }
 
     companion object {
-        /** The built-in registry: DEX input, standard passes only. More can be registered by callers. */
-        fun default(): PluginRegistry = PluginRegistry(inputPlugins = listOf(DexInputPlugin))
+        /**
+         * The built-in registry: bundle input (APKM/XAPK/APKS) tried first, then plain DEX input;
+         * standard passes only. Bundle detection is content-first and rejects a plain APK, so ordering
+         * bundle before DEX only diverts a *real* bundle — a plain `.apk`/`.dex`/`.jar` still lands on
+         * [DexInputPlugin] unchanged. More can be registered by callers.
+         */
+        fun default(): PluginRegistry = PluginRegistry(inputPlugins = listOf(BundleInputPlugin, DexInputPlugin))
     }
 }
