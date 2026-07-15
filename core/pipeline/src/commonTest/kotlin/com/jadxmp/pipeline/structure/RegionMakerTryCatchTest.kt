@@ -1021,4 +1021,62 @@ class RegionMakerTryCatchTest {
         assertNull(method.region, "two genuine normal exits must bail to a null region (honest), not a wrong tree")
         assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true, "a bailed method must NOT be flagged FULLY_STRUCTURED")
     }
+
+    @Test
+    fun splitRangeExplicitCatchSharedAcrossDisjointRangesBailsHonestly() {
+        // The essential mechanism behind the `trycatch/TestUnreachableCatch` corpus regression, reduced to
+        // its core: ONE explicit (non-catch-all) `catch (IOException e)` handler protects TWO DISJOINT
+        // clean-flow ranges. This is a javac try-with-resources desugaring — a single source-level `catch`
+        // is emitted as several separate try-ranges (around the resource open, and around the trailing
+        // close) that all point at the SAME handler, with the ranges separated by intervening code that the
+        // handler does not cover. jadx unifies them into one `try { … } catch (IOException e) {}` spanning
+        // the whole span; jadxmp collects a try body by EXACT protecting-handler-set match, which the
+        // intervening block breaks — so the FIRST range opens a try and PLACES the shared handler, and the
+        // SECOND range then opens another try for the SAME handler and tries to re-place it: the
+        // "unexpected revisit of placed handler" bail. Reconstructing this soundly needs split-range
+        // EXPLICIT-catch unification (a body grown across the intervening/nested code up to the shared
+        // follow) that the engine does not yet have — a substantial capability entangled with jadx's
+        // exception-handler block-splitting and unreachable-catch pruning (jadx even disables compilation
+        // for its own copy of this sample). Until it lands, the method MUST bail honestly (region==null →
+        // the `// JADXMP ERROR` marker) rather than emit a structured-but-wrong tree that would double-run
+        // a range or drop the shared handler on one path (rule 4: an honest bail beats a silent miscompile).
+        //   A:  sink();   (try_start_1 → H, range 1)
+        //   B:  other();  (UNPROTECTED between-code — breaks the exact-handler-set range)
+        //   C:  sink();   (try_start_2 → H, range 2: the SAME handler, disjoint range)
+        //   F:  return;   (the shared normal follow)
+        //   H:  move-exception; return;   (the single explicit catch, reached only exceptionally)
+        val other = FakeMethodRef("Lcom/example/Foo;", "other", "V", emptyList())
+        val reader = FakeCodeReader(
+            1, // v0 = exception var
+            listOf(
+                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), methodRef = voidCall), // A: range-1 body
+                Insn(Opcode.INVOKE_STATIC, 1, intArrayOf(), methodRef = other), // B: unprotected between-code
+                Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(), methodRef = voidCall), // C: range-2 body
+                Insn(Opcode.RETURN_VOID, 3), // F: shared follow
+                Insn(Opcode.MOVE_EXCEPTION, 4, intArrayOf(0)), // H: shared explicit catch handler
+                Insn(Opcode.RETURN_VOID, 5), // H body: return
+            ),
+            tries = listOf(
+                FakeTryBlock(0, 0, FakeCatchHandler(listOf("Ljava/io/IOException;"), listOf(4), -1)), // range 1: A
+                FakeTryBlock(2, 2, FakeCatchHandler(listOf("Ljava/io/IOException;"), listOf(4), -1)), // range 2: C
+            ),
+        )
+        val method = TestPipeline.buildMethod(reader, methodName = "m")
+        TestPipeline.structured(method)
+
+        // A SAFETY net, not a blessing of the limitation: the split-range explicit catch must never be
+        // mis-structured. When the unification feature lands this assertion flips to expecting a single
+        // unified try/catch — but the shape may NEVER silently become a structured-but-wrong region.
+        assertNull(
+            method.region,
+            "a split-range explicit catch sharing one handler must bail honestly, never a mis-structured tree",
+        )
+        assertTrue(method[PipelineAttrs.FULLY_STRUCTURED] != true, "a bailed method must NOT be flagged FULLY_STRUCTURED")
+        // And the honesty accounting fires: the method carries no region, so RenderabilityGuard flags it and
+        // codegen emits the `// JADXMP ERROR` marker (no-error fails) — the honest, clearly-marked output.
+        //
+        // (Control, verified while writing this pin: the SAME blocks under ONE contiguous try-range
+        // 0..2 — instead of the two disjoint ranges — DO structure into a single TryCatchRegion. The bail
+        // is therefore specifically the SPLIT range, not an artifact of the fixture.)
+    }
 }
