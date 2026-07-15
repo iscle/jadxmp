@@ -5,8 +5,31 @@ package com.jadxmp.oracle
  * - [PARITY] — jadxmp passes every signal jadx passes (the gate's steady state).
  * - [REGRESSION] — jadx passed a signal jadxmp fails (a real accuracy loss; the CI gate is zero of these).
  * - [IMPROVEMENT] — jadxmp passes a signal jadx fails (celebrated; promoted into Layer A once stable).
+ * - [EXPECTED_DIVERGENCE] — a would-be REGRESSION on a [documented-divergence allowlist][DocumentedDivergences]
+ *   sample where jadx is the *buggy* side and jadxmp is faithfully correct. Excluded from the gate but
+ *   shown as its own visible category with a written rationale — never silently hidden. Scored ONLY when
+ *   the jadx-passes/jadxmp-fails signals match the allowlist entry EXACTLY (see [SampleResult.classify]).
  */
-enum class Verdict { PARITY, REGRESSION, IMPROVEMENT }
+enum class Verdict { PARITY, REGRESSION, IMPROVEMENT, EXPECTED_DIVERGENCE }
+
+/** Canonical accuracy-signal names, as printed in the scoreboard's `fails:` list and matched by the allowlist. */
+object SignalNames {
+    const val NO_ERROR = "no-error"
+    const val RECOMPILES = "recompiles"
+    const val EXEC_CHECK = "exec-check"
+}
+
+/**
+ * The signals jadx PASSES but jadxmp FAILS on one sample — i.e. the signals that make the sample a
+ * REGRESSION. By construction every element is a signal jadx genuinely passes and jadxmp genuinely
+ * fails, which is exactly the "real divergence" invariant the allowlist's sanity guard needs: a signal
+ * jadx also fails can never appear here, so it can never be honored as an expected divergence.
+ */
+fun regressedSignalNames(ref: SignalScore, cand: SignalScore): Set<String> = buildSet {
+    if (ref.noErrors && !cand.noErrors) add(SignalNames.NO_ERROR)
+    if (ref.recompiles && !cand.recompiles) add(SignalNames.RECOMPILES)
+    if (ref.executesCheck == true && cand.executesCheck == false) add(SignalNames.EXEC_CHECK)
+}
 
 /** Pass/fail of the three accuracy signals for one decompiler on one sample. */
 data class SignalScore(
@@ -57,7 +80,7 @@ data class SampleResult(
     /** Optional grouping key (smali construct category); null for the flat binary run. */
     val category: String? = null,
 ) {
-    val verdict: Verdict? get() = candidate?.let { classify(reference, it) }
+    val verdict: Verdict? get() = candidate?.let { classify(sample, reference, it) }
 
     /**
      * True when this PARITY is backed by a shared PASS (real evidence), false for a *tied-fail* parity
@@ -93,6 +116,30 @@ data class SampleResult(
                 else -> Verdict.PARITY
             }
         }
+
+        /**
+         * Sample-aware classification: identical to the pure [classify] above, EXCEPT a mechanical
+         * REGRESSION is re-scored [Verdict.EXPECTED_DIVERGENCE] when — and only when — the sample is on
+         * the [documented-divergence allowlist][DocumentedDivergences] AND the jadx-passes/jadxmp-fails
+         * signals equal the entry's documented set **exactly**.
+         *
+         * The exact-set match is the anti-masking guard: an additional failing signal not in the entry
+         * ⇒ the sets differ ⇒ still a REGRESSION (the allowlist can never absorb a new/different loss).
+         * The sanity guard is inherent: [regressedSignalNames] only contains signals jadx genuinely
+         * passes, so a signal jadx also fails can never match an allowlisted expectation. A non-REGRESSION
+         * mechanical verdict is returned untouched, so jadxmp improving to pass an allowlisted signal is
+         * scored PARITY/IMPROVEMENT (and the runner then flags the entry stale).
+         */
+        fun classify(sample: String, ref: SignalScore, cand: SignalScore): Verdict {
+            val mechanical = classify(ref, cand)
+            if (mechanical != Verdict.REGRESSION) return mechanical
+            val entry = DocumentedDivergences.forSample(sample) ?: return Verdict.REGRESSION
+            return if (regressedSignalNames(ref, cand) == entry.signals) {
+                Verdict.EXPECTED_DIVERGENCE
+            } else {
+                Verdict.REGRESSION
+            }
+        }
     }
 }
 
@@ -115,6 +162,25 @@ class Scoreboard {
 
     /** Samples jadxmp regressed on — jadx passed a signal jadxmp fails. The accuracy-gap worklist. */
     fun regressions(): List<SampleResult> = results.filter { it.verdict == Verdict.REGRESSION }
+
+    /**
+     * Allowlisted samples scored [Verdict.EXPECTED_DIVERGENCE] — jadx is the buggy side, jadxmp faithful.
+     * Excluded from the gate but surfaced as a distinct, rationale-bearing category (transparency, not
+     * suppression).
+     */
+    fun expectedDivergences(): List<SampleResult> =
+        results.filter { it.verdict == Verdict.EXPECTED_DIVERGENCE }
+
+    /**
+     * Allowlist entries that no longer apply: the sample was scored but jadxmp now PASSES at least one of
+     * the entry's documented signals (so it is no longer a divergence on that signal). Such an entry is
+     * stale dead weight and should be deleted from [DocumentedDivergences].
+     */
+    fun staleAllowlistEntries(): List<DocumentedDivergence> =
+        DocumentedDivergences.entries.filter { entry ->
+            val row = results.firstOrNull { it.sample == entry.sample && it.candidate != null }
+            row != null && !regressedSignalNames(row.reference, row.candidate!!).containsAll(entry.signals)
+        }
 
     /** PARITY samples backed by a shared PASS (real evidence of equivalence). */
     fun evidencedParityCount(): Int = results.count { it.isEvidencedParity }
@@ -147,6 +213,16 @@ class Scoreboard {
             }
             appendLine()
             appendLine(if (hasRegression()) "GATE: FAIL (regressions present)" else "GATE: PASS (zero regressions)")
+            val divergences = expectedDivergences()
+            if (divergences.isNotEmpty()) {
+                appendLine()
+                appendLine("EXPECTED DIVERGENCES (allowlisted; jadx is buggy, jadxmp faithful — excluded from gate):")
+                for (d in divergences.sortedBy { it.sample }) {
+                    val entry = DocumentedDivergences.forSample(d.sample)
+                    appendLine("  ${d.sample} — expected fails: ${entry?.signals?.sorted()?.joinToString(", ")}")
+                    entry?.rationale?.let { appendLine("    rationale: $it") }
+                }
+            }
         }
         appendLine()
         appendLine("per-sample:")
