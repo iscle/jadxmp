@@ -10,7 +10,6 @@ import web.events.EventType
 import web.events.addEventListener
 import web.events.removeEventListener
 import web.file.File
-import web.focus.FocusEvent
 import web.html.HTMLInputElement
 import web.html.HtmlTagName
 import web.html.InputType
@@ -115,8 +114,11 @@ class BrowserFileOpener : FileOpener {
         var settled = false
         var dialogOpened = false
         var focusTimeout: Timeout? = null
-        val blurType = EventType<FocusEvent>("blur")
-        val focusType = EventType<FocusEvent>("focus")
+        // Typed `Event`, not `FocusEvent`: on wasmJs the runtime blur/focus event object is a base
+        // `Event`, so a `(FocusEvent) -> Unit` listener throws ClassCastException. We read no
+        // FocusEvent-specific member here, so the base type is correct.
+        val blurType = EventType<Event>("blur")
+        val focusType = EventType<Event>("focus")
         // `change`/`cancel` are attached via addEventListener, NOT the `input.onchange`/`oncancel`
         // property setters: those setters fail to link on wasmJs (IrLinkageError — the kotlin-wrappers
         // `HTMLInputElement.onchange` accessor signature doesn't resolve at runtime), which crashed the
@@ -124,8 +126,8 @@ class BrowserFileOpener : FileOpener {
         val changeType = EventType<Event>("change")
         val cancelType = EventType<Event>("cancel")
         // Held so cleanup can removeEventListener the exact same references it registered.
-        var blurListener: ((FocusEvent) -> Unit)? = null
-        var focusListener: ((FocusEvent) -> Unit)? = null
+        var blurListener: ((Event) -> Unit)? = null
+        var focusListener: ((Event) -> Unit)? = null
         var changeListener: ((Event) -> Unit)? = null
         var cancelListener: ((Event) -> Unit)? = null
 
@@ -144,11 +146,11 @@ class BrowserFileOpener : FileOpener {
             continuation.resume(file)
         }
 
-        val onBlur: (FocusEvent) -> Unit = {
+        val onBlur: (Event) -> Unit = {
             // The picker is open now; a later focus return may be a cancel.
             dialogOpened = true
         }
-        val onFocus: (FocusEvent) -> Unit = {
+        val onFocus: (Event) -> Unit = {
             // Only a focus that follows the dialog's own blur can be a cancel; ignore spurious ones.
             // `change` fires just after focus on a real pick, so debounce to let it win the race.
             if (dialogOpened) {
