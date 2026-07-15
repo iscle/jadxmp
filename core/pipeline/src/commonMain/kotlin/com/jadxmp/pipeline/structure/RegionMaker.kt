@@ -1373,6 +1373,12 @@ internal class RegionMaker(
         // places its return AFTER the try, matching jadx). Returns null (falls through) on any deviation.
         reconstructMultiExitFinally(head, handlerSet, loopCtx)?.let { return it }
 
+        // Tier-2: `try { … } catch (E e) { … } finally { cleanup }` — the SAME inlined-cleanup shape but with
+        // an explicit catch alongside the synthetic catch-all finally, the catch body itself catch-all
+        // protected (so the finally covers it). Narrower and stricter than the pure-finally path above;
+        // returns null (falls through) on any deviation.
+        reconstructTryCatchFinally(head, handlerSet, loopCtx)?.let { return it }
+
         val protectedBlocks = collectProtectedRegion(head, handlerSet)
 
         // If the (single) handler is a re-throwing finally catch-all that ALSO protects a *split* range
@@ -1612,6 +1618,247 @@ internal class RegionMaker(
         for (s in h.successors) recordEdge(h, s)
         val finallyRegion = SequenceRegion().apply { add(h) }
         return BuiltTry(TryCatchRegion(tryRegion, catches = emptyList(), finallyRegion = finallyRegion), follow = null)
+    }
+
+    /** An ordered straight-line catch-all cleanup chain `[move-exception e; C…; throw e]` (single- or multi-block). */
+    private class FinallyChain(
+        val blocks: List<BasicBlock>,
+        val cleanup: List<Instruction>,
+        val moveExc: Instruction,
+        val throwInsn: Instruction,
+    )
+
+    /**
+     * The straight-line cleanup of a synthetic catch-all finally handler, generalized to a **MULTI-BLOCK
+     * LINEAR** chain: `[move-exception e]` (block 0) joined by `goto`s through straight-line cleanup blocks
+     * to a terminal `[C…; throw e]`. Returns the ordered chain + the flattened cleanup `C`, or null if [handler]
+     * is not that shape. The chain must be a single simple path with NO branching (every non-terminal block
+     * has exactly ONE clean successor inside the handler region — a branch ⇒ null), `C` must be non-empty and
+     * carry no control transfer (so hoisting it into a `finally {}` cannot alter control flow), and the caught
+     * exception `e` must be used ONLY by the trailing re-throw (a handler that reads `e` is a real `catch`).
+     * The single-block case (`[move-exception; C…; throw]`) is the degenerate one-element chain.
+     */
+    private fun finallyChain(handler: BasicBlock): FinallyChain? {
+        val exc = handler[PipelineAttrs.EXC_HANDLER] ?: return null
+        if (!exc.catchAll) return null
+        val region = handlerRegionBlocks(handler)
+        // Order the region as a linear path from the handler entry; bail on any branch or cycle.
+        val ordered = ArrayList<BasicBlock>()
+        val seen = HashSet<BasicBlock>()
+        var b: BasicBlock? = handler
+        while (b != null) {
+            val cur = b
+            if (!seen.add(cur)) return null // cycle ⇒ not a straight-line cleanup
+            ordered.add(cur)
+            if (cur.instructions.lastOrNull()?.opcode == IrOpcode.THROW) {
+                b = null // terminal re-throw block
+            } else {
+                val next = cleanSucc(cur).filter { it !== exit && it in region }
+                if (next.size != 1) return null // branching (or dead-end) cleanup ⇒ bail
+                b = next.single()
+            }
+        }
+        if (ordered.size != region.size) return null // the region must be exactly the linear chain
+        val moveExc = ordered.first().instructions.firstOrNull() ?: return null
+        if (moveExc.opcode != IrOpcode.MOVE_EXCEPTION) return null
+        val throwInsn = ordered.last().instructions.lastOrNull() ?: return null
+        if (throwInsn.opcode != IrOpcode.THROW) return null
+        // Flatten the cleanup: every emittable insn across the chain except the binder, the block-joining
+        // gotos, and the terminal re-throw. Any other control transfer would change flow when hoisted ⇒ bail.
+        val cleanup = ArrayList<Instruction>()
+        for (blk in ordered) {
+            for (insn in blk.instructions) {
+                if (insn === moveExc || insn === throwInsn) continue
+                if (insn.opcode == IrOpcode.GOTO) continue
+                if (isCleanupControlTransfer(insn)) return null
+                cleanup.add(insn)
+            }
+        }
+        if (cleanup.isEmpty()) return null
+        val excVal = moveExc.result?.ssaValue
+        if (excVal != null && excVal.uses.any { it.parent != null && it.parent !== throwInsn }) return null
+        return FinallyChain(ordered, cleanup, moveExc, throwInsn)
+    }
+
+    /**
+     * Grow a single-entry body rooted at [head] whose blocks are all protected by EXACTLY [bodyHandlers],
+     * collecting the unprotected `[C-copy; return]` cleanup-exits ([isCleanupExit]) that leave it. Returns
+     * the body + exits, or null on any deviation from this narrow shape. Used by [reconstructTryCatchFinally]
+     * for BOTH the try body (protected by `{catch, finally}`) and the explicit-catch body (protected by
+     * `{finally}`). Unlike [growFinallyBody] this requires a uniform handler set on every body block (no
+     * split ranges / between-code — narrower by design) and performs no whole-method "no range omitted"
+     * check (the two bodies partition the catch-all's protected blocks between them, validated by the caller).
+     * Bails (null) if: any body block has a different handler set, a body block transfers straight to the
+     * method exit WITHOUT a cleanup (a drop hazard), the body is not single-entry (some block is entered from
+     * outside), or an exit is reached from outside the body.
+     */
+    private fun growCleanupBody(
+        head: BasicBlock,
+        bodyHandlers: Set<BasicBlock>,
+        c: List<Instruction>,
+    ): FinallyBody? {
+        val body = HashSet<BasicBlock>()
+        val exits = LinkedHashSet<BasicBlock>()
+        val stack = ArrayDeque<BasicBlock>()
+        stack.addLast(head)
+        while (stack.isNotEmpty()) {
+            cancellation.ensureActive()
+            val b = stack.removeLast()
+            if (b in body) continue
+            if (protectingHandlers(b).toHashSet() != bodyHandlers) return null // other/nested try or wrong range
+            body.add(b)
+            for (s in cleanSucc(b)) {
+                when {
+                    s === exit -> return null // a body block returns WITHOUT a cleanup copy — drop hazard
+                    isCleanupExit(s, c) -> exits.add(s)
+                    else -> stack.addLast(s)
+                }
+            }
+        }
+        if (body.isEmpty()) return null
+        if (exits.any { it in body }) return null
+        for (b in body) {
+            if (b !== head && head.id !in b.dominators) return null // single-entry: head dominates the body
+            if (b !== head && cleanPreds(b).any { it !in body }) return null // entered only from within the body
+        }
+        for (ex in exits) {
+            if (cleanPreds(ex).any { it !in body }) return null // the exit's cleanup is the body's own copy
+        }
+        return FinallyBody(body, exits)
+    }
+
+    /**
+     * Reconstruct `try { body } catch (E e) { cbody } finally { cleanup }` — jadx's factoring of javac's
+     * inlined-cleanup shape when the protected body carries BOTH an explicit `catch` (handler set size 2:
+     * one catch-all finally + one non-catch-all catch) AND the catch body is ITSELF protected by that
+     * catch-all. [reconstructMultiExitFinally] handles the pure-finally (single-handler) case; this narrow
+     * extension adds the single explicit catch the finally must also cover. Returns the built region, or
+     * null to bail honestly (rule 4).
+     *
+     * ## Why the catch body MUST be catch-all-protected
+     * A naive `catch(E){…} catch(Throwable){cleanup;throw}` is WRONG: sibling Java catches do not cover each
+     * other, so if the catch body throws the cleanup would be DROPPED. The real finally factoring is required —
+     * and it is only sound when the bytecode genuinely runs the cleanup on a throw from the catch body, i.e.
+     * the catch body is protected by the same catch-all. We gate on exactly that; otherwise we bail.
+     *
+     * ## Behaviour-preservation proof (cleanup runs EXACTLY once on every runtime path, no catch-body loss)
+     * Let the try body have inlined-cleanup exits {R_i}, the catch body an inlined-cleanup exit R_c, and the
+     * catch-all cleanup chain C. Every C-copy is proven instruction-identical ([cleanupsIdentical], SSA/local
+     * identity) and hidden; C is emitted ONCE in the `finally`. The five runtime paths:
+     *  1. body → normal exit R_i (return): finally runs C, then returns. Bytecode ran C once (the R_i copy).
+     *  2. body → other normal exit R_j: symmetric. Once.
+     *  3. body throws E: caught by `catch(E)` (tried BEFORE the finally catch-all — gated on handler priority),
+     *     cbody runs to R_c (return): finally runs C, then returns. Bytecode ran C once (the R_c copy).
+     *  4. body throws non-E Throwable: `catch(E)` does NOT match; finally runs C, propagates. Bytecode routed
+     *     it to the catch-all (C; throw). Once.
+     *  5. body throws E, cbody throws: cbody is catch-all-protected ⇒ finally runs C, propagates. Bytecode
+     *     routed the cbody throw to the same catch-all (C; throw). Once.
+     * No path runs C twice and none skips it; the catch body is emitted inside the try/catch (never dropped).
+     *
+     * ## Gate (ALL must hold, else null)
+     *  - handler set = exactly one catch-all finally + one non-catch-all explicit catch, the explicit catch of
+     *    HIGHER priority than the catch-all in the body's try-table order (so E is caught before the finally);
+     *  - the finally cleanup is a straight-line single-/multi-block `[move-exc; C…; throw]` ([finallyChain]);
+     *  - the try body ([growCleanupBody] over `{catch, catchall}`) has ≥1 inlined-cleanup return exit, no bare
+     *    transfer to exit, single-entry, each exit reached only from within it;
+     *  - the explicit catch entry is an unprotected `move-exception`, its body protected by ONLY the catch-all,
+     *    itself an inlined-cleanup body with ≥1 return exit;
+     *  - all four regions (body, catch body, their exits, the finally chain) are pairwise disjoint;
+     *  - every cleanup copy is instruction-identical to C and hiding it strands no value; no try-scoped value
+     *    escapes. Any violation ⇒ null (honest bail).
+     */
+    private fun reconstructTryCatchFinally(
+        head: BasicBlock,
+        handlerSet: Set<BasicBlock>,
+        loopCtx: LoopCtx?,
+    ): BuiltTry? {
+        exit ?: return null
+        if (handlerSet.size != 2) return null // exactly {one finally catch-all, one explicit catch}
+
+        // Partition into the catch-all finally and the explicit catch.
+        val catchall = handlerSet.singleOrNull { it[PipelineAttrs.EXC_HANDLER]?.catchAll == true } ?: return null
+        val explicit = handlerSet.single { it !== catchall }
+        val excHandler = explicit[PipelineAttrs.EXC_HANDLER] ?: return null
+        if (excHandler.catchAll) return null // both catch-all ⇒ not a catch+finally shape
+
+        // The explicit catch must be tried BEFORE the finally catch-all for the body (source semantics: the
+        // named `catch(E)` runs first). protectingHandlers is in try-table priority order.
+        val prio = protectingHandlers(head)
+        val iExplicit = prio.indexOf(explicit)
+        val iCatchall = prio.indexOf(catchall)
+        if (iExplicit < 0 || iCatchall < 0 || iExplicit >= iCatchall) return null
+
+        // The finally cleanup: a straight-line single-/multi-block catch-all `[move-exc; C…; throw]`.
+        val chain = finallyChain(catchall) ?: return null
+        val c = chain.cleanup
+
+        // The try body over clean flow, with its inlined-cleanup return exits (protected by BOTH handlers).
+        val main = growCleanupBody(head, handlerSet, c) ?: return null
+        if (main.exits.isEmpty()) return null
+
+        // The explicit catch: an unprotected `move-exception` entry, then a body protected by ONLY the
+        // catch-all (so the finally covers it — the semantic core), itself an inlined-cleanup body.
+        if (isProtected(explicit)) return null // nested try at the catch entry — out of scope (keep bailing)
+        val moveExc = explicit.instructions.firstOrNull() ?: return null
+        if (moveExc.opcode != IrOpcode.MOVE_EXCEPTION) return null
+        val catchHead = cleanSucc(explicit).singleOrNull() ?: return null
+        if (protectingHandlers(catchHead).toHashSet() != hashSetOf(catchall)) return null
+        val catchBody = growCleanupBody(catchHead, hashSetOf(catchall), c) ?: return null
+        if (catchBody.exits.isEmpty()) return null
+
+        // The four regions must be pairwise disjoint (a shared block would be placed/hidden twice).
+        val union = HashSet<BasicBlock>()
+        val partitions = listOf(main.body, main.exits, setOf(explicit), catchBody.body, catchBody.exits, chain.blocks.toSet())
+        for (part in partitions) for (b in part) if (!union.add(b)) return null
+
+        // Every cleanup copy is instruction-identical to C (already matched by isCleanupExit) and hiding it
+        // must not strand a value read outside the hidden copy.
+        val hiddenCleanupInsns = ArrayList<Instruction>()
+        for (ex in main.exits + catchBody.exits) {
+            val exitCleanup = ex.instructions.subList(0, c.size)
+            val hidden = exitCleanup.toHashSet()
+            for (insn in exitCleanup) {
+                val v = insn.result?.ssaValue ?: continue
+                if (v.uses.any { it.parent != null && it.parent !in hidden }) return null
+            }
+            hiddenCleanupInsns.addAll(exitCleanup)
+        }
+
+        // A try-scoped value read outside everything rendered inside the try/catch would need hoisting — bail.
+        val insideTry = HashSet<BasicBlock>()
+        insideTry.addAll(main.body); insideTry.addAll(main.exits)
+        insideTry.add(explicit); insideTry.addAll(catchBody.body); insideTry.addAll(catchBody.exits)
+        if (tryDefsEscape(insideTry)) return null
+
+        // Structure both bodies with NO normal follow: every path leaves via a terminal return pulled inside
+        // the try/catch, or (exceptionally) via the finally. Blocks stay open so no nested try re-triggers.
+        openTryBlocks.addAll(insideTry)
+        val tryRegion: Region
+        val catchRegion: Region
+        try {
+            tryRegion = makeRegion(head, chainFollow = null, loopCtx = loopCtx, bodyRootHeader = null)
+            moveExc.add(AttrFlag.DONT_GENERATE) // the catch-param binder (becomes `catch (E e)`)
+            catchRegion = makeRegion(explicit, chainFollow = null, loopCtx = loopCtx, bodyRootHeader = null)
+        } finally {
+            openTryBlocks.removeAll(insideTry)
+        }
+
+        // Coverage nets: exception edges from both bodies to their handlers; the finally chain's own edges.
+        for (b in main.body) { recordEdge(b, explicit); recordEdge(b, catchall) }
+        for (b in catchBody.body) recordEdge(b, catchall)
+        for (blk in chain.blocks) { placed.add(blk); for (s in blk.successors) recordEdge(blk, s) }
+
+        // Factor: hide the finally chain's move-exception + re-throw and every inlined cleanup copy; emit the
+        // cleanup ONCE in the finally (the chain blocks, in order — the joining gotos and re-throw are hidden).
+        chain.moveExc.add(AttrFlag.DONT_GENERATE)
+        chain.throwInsn.add(AttrFlag.DONT_GENERATE)
+        for (insn in hiddenCleanupInsns) insn.add(AttrFlag.DONT_GENERATE)
+        val finallyRegion = SequenceRegion().apply { for (blk in chain.blocks) add(blk) }
+        val catchClause = CatchClause(catchTypesFor(excHandler), moveExc.result, catchRegion)
+        return BuiltTry(
+            TryCatchRegion(tryRegion, catches = listOf(catchClause), finallyRegion = finallyRegion),
+            follow = null,
+        )
     }
 
     /**
