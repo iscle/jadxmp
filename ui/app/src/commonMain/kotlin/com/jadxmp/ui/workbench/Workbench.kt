@@ -136,6 +136,10 @@ fun Workbench(
             ShortcutAction.OpenFile -> { state.requestOpen(); true }
             ShortcutAction.FindInFile ->
                 if (ui.tabs.active != null) { state.toggleFind(); true } else false
+            // Ctrl/Cmd+G: toggle the Go-to-line input. Consume it with a tab open (opening is further
+            // gated on a loaded document in openGoToLine); otherwise fall through, exactly like Find.
+            ShortcutAction.GoToLine ->
+                if (ui.tabs.active != null) { state.toggleGoToLine(); true } else false
             ShortcutAction.GlobalSearch -> { openSearch(""); true }
             ShortcutAction.CloseTab -> {
                 val i = ui.tabs.activeIndex
@@ -157,6 +161,7 @@ fun Workbench(
             ShortcutAction.GoBack -> if (ui.history.canGoBack) { state.goBack(); true } else false
             ShortcutAction.GoForward -> if (ui.history.canGoForward) { state.goForward(); true } else false
             ShortcutAction.Escape -> when {
+                ui.goToLine != null -> { state.closeGoToLine(); true }
                 ui.find != null -> { state.closeFind(); true }
                 showSearch -> { showSearch = false; state.clearSearch(); true }
                 ui.history.canGoBack -> { state.goBack(); true }
@@ -173,7 +178,7 @@ fun Workbench(
     // search panel (which grab focus for their fields) close, so global shortcuts keep working without a
     // click. Keyed on the "no overlay open" state so it only fires on those transitions, not every click.
     val rootFocus = remember { FocusRequester() }
-    val noOverlayFocus = ui.find == null && !showSearch
+    val noOverlayFocus = ui.find == null && ui.goToLine == null && !showSearch
     LaunchedEffect(noOverlayFocus) {
         if (noOverlayFocus) runCatching { rootFocus.requestFocus() }
     }
@@ -488,22 +493,36 @@ private fun EditorArea(
                 else -> EmptyState(message = "Loading…", modifier = Modifier.fillMaxSize())
             }
 
-            // In-editor Find bar (Ctrl+F): a floating toolbar over the active document, top-right. It only
-            // applies to the code viewer, so it is suppressed while an image / hex viewer is showing.
+            // In-editor overlays over the active document, top-right: the Ctrl+F Find bar and the Ctrl+G
+            // Go-to-line input. Both apply only to the code viewer, so they are suppressed while an image /
+            // hex viewer is showing; they stack in a Column so opening both never overlaps them.
             val find = ui.find
-            if (find != null && resource == null) {
-                Box(
+            val goToLine = ui.goToLine
+            if (resource == null && (find != null || goToLine != null)) {
+                Column(
                     Modifier.fillMaxWidth().padding(JadxTheme.spacing.sm),
-                    contentAlignment = Alignment.TopEnd,
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(JadxTheme.spacing.sm),
                 ) {
-                    FindBar(
-                        state = find,
-                        onQueryChange = state::setFindQuery,
-                        onMatchCaseChange = state::setFindMatchCase,
-                        onNext = state::findNext,
-                        onPrev = state::findPrev,
-                        onClose = state::closeFind,
-                    )
+                    if (find != null) {
+                        FindBar(
+                            state = find,
+                            onQueryChange = state::setFindQuery,
+                            onMatchCaseChange = state::setFindMatchCase,
+                            onNext = state::findNext,
+                            onPrev = state::findPrev,
+                            onClose = state::closeFind,
+                        )
+                    }
+                    if (goToLine != null) {
+                        GoToLineBar(
+                            state = goToLine,
+                            lastLine = doc?.lineCount ?: 1,
+                            onQueryChange = state::setGoToLineQuery,
+                            onCommit = state::applyGoToLine,
+                            onClose = state::closeGoToLine,
+                        )
+                    }
                 }
             }
         }

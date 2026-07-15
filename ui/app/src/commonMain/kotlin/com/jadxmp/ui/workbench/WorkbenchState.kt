@@ -100,6 +100,8 @@ data class WorkbenchUiState(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /** In-editor Find bar state for the active document. Null = the Find bar is hidden. */
     val find: FindUiState? = null,
+    /** In-editor Go-to-line input state for the active document. Null = the input is hidden. */
+    val goToLine: GoToLineUiState? = null,
     /** Code-editor word-wrap toggle (P1#11). Persisted. */
     val wordWrap: Boolean = false,
     /** Code-editor font size in sp (P1#12 zoom); clamped to [MIN_CODE_FONT_SIZE_SP]..[MAX_CODE_FONT_SIZE_SP]. Persisted. */
@@ -984,6 +986,54 @@ class WorkbenchState(
             it.copy(
                 tabs = it.tabs.updateCaret(it.tabs.activeIndex, match.line),
                 codeNavNonce = it.codeNavNonce + 1,
+            )
+        }
+    }
+
+    // ── In-editor Go-to-line bar (Ctrl+G) ─────────────────────────────────────
+
+    /** Ctrl/Cmd+G: open the Go-to-line input, or close it if already open (mirrors [toggleFind]). */
+    fun toggleGoToLine() {
+        if (_ui.value.goToLine != null) closeGoToLine() else openGoToLine()
+    }
+
+    /**
+     * Show the Go-to-line input. A no-op when no document is loaded — there is nothing to jump within, so
+     * (unlike [openFind], which seeds a search) opening the bar over an absent document is pointless. The
+     * jump itself needs the active document's line count anyway (see [applyGoToLine]).
+     */
+    fun openGoToLine() {
+        if (_ui.value.activeDocument == null) return
+        _ui.update { it.copy(goToLine = GoToLineUiState()) }
+    }
+
+    /** Hide the Go-to-line input. */
+    fun closeGoToLine() {
+        _ui.update { it.copy(goToLine = null) }
+    }
+
+    /** Update the typed line number; no jump happens until the user commits with Enter ([applyGoToLine]). */
+    fun setGoToLineQuery(text: String) {
+        if (_ui.value.goToLine == null) return
+        _ui.update { it.copy(goToLine = it.goToLine?.copy(query = text)) }
+    }
+
+    /**
+     * Commit the Go-to-line entry (Enter): parse + clamp the typed number against the active document's
+     * line count and jump there, reusing the go-to-definition scroll exactly like [scrollToActiveFind] —
+     * pin the active tab's caret to the line and bump [WorkbenchUiState.codeNavNonce] so the viewer
+     * re-scrolls/centers even when the tab is already open. A blank/non-numeric entry does not jump
+     * (rule 4: never crash) and leaves the bar open so the user can correct it; a successful jump closes it.
+     */
+    fun applyGoToLine() {
+        val g = _ui.value.goToLine ?: return
+        val doc = _ui.value.activeDocument ?: return
+        val line = parseGoToLine(g.query, doc.lineCount) ?: return
+        _ui.update {
+            it.copy(
+                tabs = it.tabs.updateCaret(it.tabs.activeIndex, line),
+                codeNavNonce = it.codeNavNonce + 1,
+                goToLine = null,
             )
         }
     }

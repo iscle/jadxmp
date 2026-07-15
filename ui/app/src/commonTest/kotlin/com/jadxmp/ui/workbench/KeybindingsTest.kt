@@ -21,6 +21,16 @@ class KeybindingsTest {
     }
 
     @Test
+    fun goToLineIsPrimaryG() {
+        // Ctrl/Cmd+G opens Go-to-line; a bare "g" and modified variants are ordinary typing, and it must
+        // not collide with Find (⌘F) — different key, exact-modifier matched.
+        assertEquals(ShortcutAction.GoToLine, resolve(Key.G, primary = true))
+        assertNull(resolve(Key.G))
+        assertNull(resolve(Key.G, primary = true, shift = true))
+        assertNull(resolve(Key.G, primary = true, alt = true))
+    }
+
+    @Test
     fun globalSearchHasTwoBindings() {
         assertEquals(ShortcutAction.GlobalSearch, resolve(Key.F, primary = true, shift = true))
         assertEquals(ShortcutAction.GlobalSearch, resolve(Key.N, primary = true))

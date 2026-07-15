@@ -35,6 +35,9 @@ enum class ShortcutAction {
     /** Ctrl/Cmd+F — toggle the in-editor Find bar over the active document. */
     FindInFile,
 
+    /** Ctrl/Cmd+G — toggle the Go-to-line input over the active document. */
+    GoToLine,
+
     /** Ctrl/Cmd+Shift+F or Ctrl/Cmd+N — open/focus the global search panel. */
     GlobalSearch,
 
@@ -94,6 +97,7 @@ data class KeyStroke(
 val DefaultKeymap: Map<ShortcutAction, List<KeyStroke>> = mapOf(
     ShortcutAction.OpenFile to listOf(KeyStroke(Key.O, primary = true)),
     ShortcutAction.FindInFile to listOf(KeyStroke(Key.F, primary = true)),
+    ShortcutAction.GoToLine to listOf(KeyStroke(Key.G, primary = true)),
     ShortcutAction.GlobalSearch to listOf(
         KeyStroke(Key.F, primary = true, shift = true),
         KeyStroke(Key.N, primary = true),
