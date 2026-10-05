@@ -5,6 +5,9 @@ import com.jadxmp.input.CodeLoader
 import com.jadxmp.input.EncodedValue
 import com.jadxmp.input.EncodedValueType
 import com.jadxmp.input.MethodRef
+import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.attr.DecompileError
+import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrFieldConst
@@ -12,6 +15,8 @@ import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.pipeline.PipelineAttrs
+import com.jadxmp.pipeline.pass.CancellationSignal
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Builds the `core:ir` node model ([IrRoot] → [IrClass] → [IrMethod]/[IrField]) from the `core:input`
@@ -134,10 +139,22 @@ object ModelBuilder {
                 argTypes = ref.parameterTypes.map { Descriptors.parseType(it) },
                 accessFlags = m.accessFlags,
             )
-            val reader = m.codeReader
-            if (reader != null) {
-                method[PipelineAttrs.CODE_READER] = reader
-                method[PipelineAttrs.REGISTER_COUNT] = reader.registerCount
+            try {
+                val reader = m.codeReader
+                if (reader != null) {
+                    // Obtain both values before publishing either: a lazy parser can reject its
+                    // body or frame here, before the guarded per-method pipeline has started.
+                    val registerCount = reader.registerCount
+                    method[PipelineAttrs.CODE_READER] = reader
+                    method[PipelineAttrs.REGISTER_COUNT] = registerCount
+                }
+            } catch (cancelled: CancellationSignal) {
+                throw cancelled
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                method[IrAttrs.ERROR] = DecompileError("failed to load method body: ${failure.message ?: failure}", failure)
+                method.add(AttrFlag.HAS_ERROR)
             }
             cls.methods.add(method)
         }
