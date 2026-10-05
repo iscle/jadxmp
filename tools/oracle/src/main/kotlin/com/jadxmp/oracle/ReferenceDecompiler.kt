@@ -11,7 +11,7 @@ import java.nio.file.Files
  * against — "at least as accurate as jadx" is defined by these outputs.
  *
  * Uses jadx's public `JadxArgs` / `JadxDecompiler` API only; the `jadx-dex-input` plugin on the
- * classpath is auto-discovered to handle `.dex`/`.apk`. Bytes are staged to a short-lived temp file
+ * classpath is auto-discovered alongside the original `jadx-java-input` for `.class`/JAR input. Bytes are staged to a short-lived temp file
  * (jadx loads from files), named by content magic so jadx picks the right input plugin.
  */
 class ReferenceDecompiler : Decompiler {
@@ -43,6 +43,9 @@ class ReferenceDecompiler : Decompiler {
         // "dex\n" magic
         bytes.size >= 4 && bytes[0] == 0x64.toByte() && bytes[1] == 0x65.toByte() &&
             bytes[2] == 0x78.toByte() && bytes[3] == 0x0a.toByte() -> ".dex"
+        // JVM ClassFile magic; staging uses content, not a potentially misleading caller filename.
+        bytes.size >= 4 && bytes[0] == 0xca.toByte() && bytes[1] == 0xfe.toByte() &&
+            bytes[2] == 0xba.toByte() && bytes[3] == 0xbe.toByte() -> ".class"
         // "PK" zip magic (apk/jar/zip)
         bytes.size >= 2 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4b.toByte() -> ".apk"
         else -> ".bin"

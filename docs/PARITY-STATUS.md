@@ -8,7 +8,7 @@ The tracked Java differential gate now passes; substantial Kotlin and input-supp
 The original checkout was cloned at jadx commit
 `0e232fb3510ec86083af0055470163d3550957cd` (confirmed by its clone reflog).
 The former Maven 1.5.6 oracle did not represent that exact baseline. `tools:jadx-reference` now
-compiles the original core, ZIP, input API and DEX plugin sources in place. Git revision/cleanliness
+compiles the original core, ZIP, input API, DEX and Java-input plugin sources in place. Git revision/cleanliness
 checks and a loaded-version test prevent silent baseline drift. Upstream remains read-only and
 outside the clean-room multiplatform engine.
 
@@ -17,7 +17,7 @@ dependency was removed: shared source metadata belongs to `core:ir`, with identi
 compatibility keys for callers. JVM verification tools remain isolated: the built desktop distribution
 contains none of the oracle, reference, smali, D8, or Kotlin compiler tool jars.
 
-## Latest combined validation
+## Latest combined validation (commit `5c3df54`)
 
 | Check | Result |
 | --- | --- |
@@ -40,7 +40,16 @@ in its report: `TestLoopRestore3` and `TestInsnsBeforeThis`.
 Compared with commit `29e21c9`, the one Java regression is fixed, Kotlin compilation improves from
 72 to 75 inputs, and unflagged Kotlin compilation improves from 69 to 72. Hosted CI on the preceding
 commits ran JVM/JS/Wasm tests and correctly blocked packaging and web deployment on the then-unfixed
-Java regression. A hosted result for this final combined repair is still pending.
+Java regression. Hosted JVM/JS/Wasm and accuracy gates now pass for `5c3df54`; desktop packaging
+and the gated web build are running.
+
+## JVM-input reference preparation
+
+The isolated adapter now includes the original Java-input plugin and its pinned raung-disasm
+0.1.1 dependency. Both plugin service descriptors are merged deterministically. Three new reference
+tests verify discovery of both plugins and direct class/class-only-JAR compilation and execution,
+without D8 conversion. The existing DEX smoke test also passes. Candidate JVM parsing/lowering
+remains unimplemented; the combined-suite counts above precede these additional reference tests.
 
 ## Correctness repairs and execution evidence
 

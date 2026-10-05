@@ -81,9 +81,12 @@ Every module-owning agent (see `.claude/agents/`) is **test-first**:
 
 The canonical pin is `tools/jadx-reference/baseline.properties`. The reference adapter verifies
 both the exact Git HEAD and a clean working tree on every build, including cached builds. It compiles
-only the original core, zip, input API, and DEX plugin sources in place, with dependencies matching
+only the original core, zip, input API, DEX and Java-input plugin sources in place, with dependencies matching
 that commit, leaving the reference checkout read-only. A runtime test verifies the loaded jadx
 manifest version agrees with the pin. The former Maven 1.5.6 oracle was a different baseline.
+The adapter merges both input-plugin service descriptors so class/JAR support cannot silently hide
+the DEX provider. Direct javac class and class-only JAR round trips verify Java input without D8;
+this prepares the reference side and does not imply candidate JVM input is implemented.
 
 `smaliScoreboard` is an enforced differential gate: after printing the full report it fails the
 Gradle process for regressions, assembly/reference failures, or missing/incomplete input. CI runs it
