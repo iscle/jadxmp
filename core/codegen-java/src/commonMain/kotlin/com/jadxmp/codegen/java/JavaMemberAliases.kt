@@ -54,10 +54,10 @@ internal object JavaMemberAliases {
      * The identifier a *reference* to [ref] must render. Resolves the referenced [IrField] against the
      * loaded model so it renders the exact same disambiguated alias as that field's definition (including
      * any [aliasMap] override, which is keyed by the field's declaring identity so def and use agree);
-     * falls back to a plain sanitize when the field is not in the model (a library field is never renamed).
+     * preserves legal contextual names for members outside the model.
      */
     fun aliasForFieldRef(root: IrRoot?, ref: FieldRef, aliasMap: AliasMap = AliasMap.EMPTY): String {
-        val field = resolveField(root, ref) ?: return JavaIdentifiers.sanitize(ref.name)
+        val field = resolveField(root, ref) ?: return JavaIdentifiers.sanitizeExternalMember(ref.name)
         return aliasOf(field, aliasMap)
     }
 
@@ -109,12 +109,11 @@ internal object JavaMemberAliases {
      * The identifier a *call* of [ref] must render. Resolves the referenced [IrMethod] against the model
      * so an invoke renders the same disambiguated alias as the method's definition (including any
      * [aliasMap] override, keyed by the method's declaring identity so call and definition agree); falls
-     * back to a plain sanitize when the method is not in the model (a library/inherited method is never
-     * renamed here).
+     * back to a member-context spelling for library/inherited methods outside the model.
      */
     fun aliasForMethodRef(root: IrRoot?, ref: MethodRef, aliasMap: AliasMap = AliasMap.EMPTY): String {
         if (isSpecial(ref.name)) return JavaIdentifiers.sanitize(ref.name)
-        val method = resolveMethod(root, ref) ?: return JavaIdentifiers.sanitize(ref.name)
+        val method = resolveMethod(root, ref) ?: return JavaIdentifiers.sanitizeExternalMember(ref.name)
         return aliasOf(method, aliasMap)
     }
 

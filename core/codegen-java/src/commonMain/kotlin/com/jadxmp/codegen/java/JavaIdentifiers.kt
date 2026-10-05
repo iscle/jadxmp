@@ -35,6 +35,14 @@ internal object JavaIdentifiers {
         return result
     }
 
+    /**
+     * Qualified library members may use contextual type keywords (JLS 3.8). Their
+     * declarations are outside the model, so changing `Thread.yield` to `yieldWord`
+     * would call a nonexistent method. Callers must emit a qualifier for `yield`.
+     */
+    fun sanitizeExternalMember(name: String): String =
+        if (name in TYPE_KEYWORDS) name else sanitize(name)
+
     /** Sanitize each dot-separated segment of a qualified name (package path, nested class), keeping dots. */
     fun sanitizeQualified(qualifiedName: String): String {
         if (qualifiedName.isEmpty()) return qualifiedName
@@ -49,6 +57,8 @@ internal object JavaIdentifiers {
     // stable across calls.
     private const val SUFFIX = "Word"
 
+    private val TYPE_KEYWORDS = setOf("var", "record", "yield", "sealed", "permits")
+
     private val RESERVED: Set<String> = setOf(
         // JLS keywords
         "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
@@ -59,9 +69,7 @@ internal object JavaIdentifiers {
         "volatile", "while",
         // literals usable in identifier position that break as names
         "true", "false", "null",
-        // contextual keywords that break when used as a type or in declarations
-        "var", "record", "yield", "sealed", "permits", "non-sealed",
         // a lone underscore is a reserved keyword since Java 9
         "_",
-    )
+    ) + TYPE_KEYWORDS
 }
