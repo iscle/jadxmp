@@ -1,9 +1,11 @@
 # Native JVM input: lowering proposal
 
 The current `core:input-jvm` foundation parses class-file envelopes, constant pools, bounded Code
-attributes and raw JVM instructions. These are parsing foundations,
-not native JVM decompilation: the module is not registered with `core:api`. The frame analysis,
-register lowering, and remaining input-contract changes below are **proposed, not implemented**.
+attributes and raw JVM instructions. A separate frame-primitives batch adds typed stack/local
+storage and permutations, snapshots, and constructor alias transitions; it passed independent
+review. These are foundations, not native JVM decompilation: the module is not registered with
+`core:api`. Whole-method frame analysis, register lowering, and remaining input-contract changes
+below are **proposed, not implemented**.
 The fused-result prerequisite has landed separately.
 
 The engine remains clean-room and multiplatform. Format decisions follow the
@@ -38,6 +40,11 @@ Use logical operand-stack values with an explicit word width. Distinguish intege
 double, null, reference, uninitialized receiver, and an uninitialized allocation identified by its
 original `new` bytecode offset. Local storage must additionally represent unavailable slots and the
 second word of a category-two value.
+
+The future analyzer must reuse validated reference/type values by constant-pool index or through a
+per-method intern table. Reconstructing a reference value for every use would repeatedly rescan a
+shared long descriptor and undo the parser's work-amplification protection. Keep this cache scoped
+to the input/analysis operation, not mutable global state.
 
 Count `max_stack` in words, not values. Check every local access against `max_locals`; replacing one
 word of an overlapping long/double must invalidate the old two-word value. Stack merges must agree
@@ -94,6 +101,7 @@ inside later pipeline passes.
 | Call arguments | The decoder advances argument indexes by descriptor word width. | Document and expose word-indexed arguments, including the second entry for long/double. |
 | Switches | Switch payloads are separate pseudo-instructions; default is inferred as the next instruction. | Support inline payload data and an explicit default target. Do not manufacture a DEX payload or synthetic default jump. |
 | Instruction positions | SPI comments assume 16-bit code units. One JVM instruction may lower into several register instructions. | Give emitted instructions unique normalized positions and retain original bytecode/file offsets separately. |
+| Targeted NOPs | MethodDecoder drops NOPs; CfgBuilder resolves targets by exact remaining offsets. | Preserve targeted normalized NOPs or explicitly map raw NOP PCs to the next real emitted instruction. Never rely on implicit gap redirection. |
 | Exception endpoints | Shared `TryBlock` ends are inclusive; JVM Code ranges are half-open. | Map original boundaries deliberately through emitted positions, including the last expansion of the last protected instruction. |
 | Handler order | `CatchHandler` separates typed entries and appends catch-all last. | Represent ordered clauses without regrouping overlapping JVM regions or moving catch-all entries. Preserve DEX compatibility. |
 | Handler entry | JVM enters with an exception on the stack; normalized input uses MOVE_EXCEPTION. | Create an exceptional-entry adapter if the same raw handler PC is also normally reachable. A normal edge must retain its supplied stack value. |
@@ -118,7 +126,8 @@ exception types and identity, not only compiler acceptance.
    returns; mixed signatures such as `(IJI)J`; instance receiver mapping; load-before-iinc;
    wide values surviving local overwrite; NaN and negative-zero bit patterns.
 3. **Normal control flow:** stack-carrying diamonds, loops, back edges, incompatible joins,
-   dense/sparse switches with non-fallthrough defaults, and original-to-normalized offset mappings.
+   dense/sparse switches with non-fallthrough defaults, targets landing on raw NOPs, and
+   original-to-normalized offset mappings, including NOPs at protected-range boundaries.
 4. **References and calls:** field evaluation order, wide call arguments and return values,
    checkcast failure, arrays, repeated references, constructor aliases, constructor delegation,
    failed constructors, and allocation/call ordering. Keep dynamic call-site/bootstrap work explicit.
@@ -129,5 +138,6 @@ exception types and identity, not only compiler acceptance.
 6. **Integration:** method/class metadata, StackMapTable validation, archive loading, facade
    registration, native JVM corpus execution through both emitters, and the pinned differential gate.
 
-The first implementation should be the frame-primitives slice after the parser/decoder batch lands.
-Full native JVM support remains incomplete until the later stages and their runtime checks pass.
+The frame-primitives slice is implemented and independently reviewed; the whole-method analyzer and
+lowering remain future work. Full native JVM support remains incomplete until the later stages and
+their runtime checks pass.

@@ -20,6 +20,12 @@ reserved instruction bytes, payload lengths and switch key ordering. Constant-po
 frame/stack types, local bounds and version-specific instruction legality remain separate work;
 structurally decoded instructions are not yet normalized decompiler input.
 
+Frame primitives model typed logical stack values, wide local slots, stack permutations, independent
+snapshots, and constructor alias transitions. They validate local and stack bounds without depending
+on the IR or pipeline. A whole-method frame analyzer, type merges, StackMapTable checks and register
+lowering are still pending; these primitives do not constitute a bytecode verifier. The proposed
+stages and shared input-contract prerequisites are recorded in [docs/JVM-INPUT.md](../../docs/JVM-INPUT.md).
+
 All production code is `commonMain`; IO primitives come from `core:binary-io`. No ASM, D8 or
 upstream jadx implementation enters the engine. The original jadx commit remains the behavioral
 oracle in the separate JVM tooling modules.
