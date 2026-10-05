@@ -25,9 +25,10 @@ checks and a loaded-version test prevent silent baseline drift.
   remains incomplete. Nine previously failing fixtures in the targeted slice now compile.
 - Added CI engine tests on JVM, JS and Wasm, pinned-reference oracle tests, an enforced Java
   differential gate, and retained accuracy reports. Kotlin's broad scoreboard remains informational.
-  Hosted CI was not run locally; the corresponding Gradle tasks and workflow shell logic were tested.
+  Hosted CI confirms the known differential regression fails the build; the web workflow now also
+  depends on the test gates instead of deploying independently.
 
-## Latest measurements
+## Last full-corpus measurements (commit `29e21c9`)
 
 | Check | Result |
 | --- | --- |
@@ -48,18 +49,34 @@ For the targeted `arith,arrays,conditions` slice, Kotlin compilation improved fr
 and report no decompiler errors improved from **8/31** to **18/32**. The original small-slice Java
 measurement used the old release; the full Java numbers above use the original pinned commit.
 
+## Subsequent semantic gate
+
+The oracle now implements original-versus-rebuilt `check()` execution for Java and Kotlin using
+fresh JVM processes. All three original source fixtures pass no-error, recompile and execution checks
+against the pinned reference Java, candidate Java, and candidate Kotlin output. The cases cover
+integer overflow/division/remainder, loops, NaNs, infinities and signed zeros. New unit tests also
+ensure missing checks, false returns, compiler failures, timeouts and early `System.exit(0)` cannot
+be reported as passing execution. This is targeted coverage, not whole-corpus equivalence.
+
+Those round trips exposed and fixed Java assignment/comparison coercion for coalesced Boolean
+locals; Kotlin assignment/comparison/literal repairs and JVM-member projection are being validated
+in the same gate. `javaFixtureScoreboard` is required by CI. The full-corpus numbers above are
+historical and must be remeasured after the current catch-flow and Kotlin batches.
+
 ## Blocking work
 
 1. `trycatch/TestUnreachableCatch.smali`: the original reference passes both no-error and recompile;
-   jadxmp fails both. Its nested resource/exception flow reaches the unresolved-phi fallback. Fix
-   exception-aware SSA destruction and structuring with semantic tests; do not remove handlers or
-   suppress the regression. CI desktop packaging is now blocked by this actual gate failure.
+   jadxmp failed both in the measurement above. Investigation traced the fallback to shared-handler
+   structuring and catch rethrow aliases; the unresolved-phi diagnostic was misleading. A repair passes
+   the targeted try/catch gate but still requires full-corpus validation and independent review.
+   Preserve every potentially reachable handler and exception-path behavior.
 2. Kotlin still has 139 inputs with compiler errors or no output, plus three outputs that compile
    but carry decompiler error markers. Work remains on nullability, Java/Kotlin type projection,
    class/field reconstruction, and control-flow output. Factory casts added here are deliberately
    limited to exact known non-null factories, not a general nullable-wrapper solution.
-3. `AccuracySignals.executeCheck` is still a stub. The new targeted execution tests verify the
-   changes above, but the whole corpus does not yet have original-versus-rebuilt execution coverage.
+3. Whole-corpus original-versus-rebuilt execution coverage is still missing. The new execution
+   infrastructure and three source fixtures establish a working gate; most upstream Java checks
+   have not yet been extracted and integrated.
 4. `core:input-jvm` is planned but absent; full class/JAR input parity is not implemented.
 5. ktlint, detekt, ABI validation and Kover are documented goals, not configured gates. Production
    readiness also needs broader real-APK, performance and robustness evidence.
@@ -68,6 +85,7 @@ measurement used the old release; the full Java numbers above use the original p
 
 ```sh
 ./gradlew jvmTest :tools:oracle:test jsNodeTest wasmJsNodeTest
+./gradlew :tools:oracle:javaFixtureScoreboard
 # Intentionally exits nonzero until the remaining Java regression is fixed; continue prints Kotlin too.
 ./gradlew :tools:oracle:smaliScoreboard :tools:oracle:kotlinScoreboard --continue --console=plain
 ./gradlew :tools:oracle:smaliScoreboard -Djadxmp.smali.categories=trycatch -Djadxmp.smali.dump=TestUnreachableCatch

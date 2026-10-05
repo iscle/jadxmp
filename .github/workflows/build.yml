@@ -80,6 +80,13 @@ jobs:
           mkdir -p build/reports/oracle
           ./gradlew :tools:oracle:smaliScoreboard --console=plain --stacktrace 2>&1 | tee build/reports/oracle/smali.log
 
+      - name: Run Java and Kotlin semantic round-trip gate
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build/reports/oracle
+          ./gradlew :tools:oracle:javaFixtureScoreboard --console=plain --stacktrace 2>&1 | tee build/reports/oracle/semantics.log
+
       # Kotlin currently reports substantial unsupported output. Preserve its measurements without
       # confusing its informational compilation scoreboard with the Java differential regression gate.
       - name: Record Kotlin accuracy report (informational)
@@ -223,3 +230,13 @@ jobs:
           name: jadxmp-jvm-${{ matrix.name }}
           path: desktopApp/build/compose/jars/*.jar
           if-no-files-found: warn
+
+  web:
+    name: Verified web deployment
+    needs: [test, engine-node-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-web.yml

@@ -1,13 +1,12 @@
 name: Deploy Web to GitHub Pages
 
 # Publishes the Compose Multiplatform web app (wasmJs browser build) to GitHub Pages
-# on every push to main, so https://iscle.github.io/jadxmp/ always serves the latest build.
+# only after the calling build workflow passes its JVM, JS, Wasm and accuracy gates.
+# The local reusable-workflow call and checkout use the same commit as those tests.
 # The engine runs fully client-side in the browser (no backend) — this is just a static host.
 
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+  workflow_call:
 
 # Least-privilege token that can still publish to Pages: read the repo, write the Pages
 # deployment, and mint the OIDC token that actions/deploy-pages exchanges with the Pages service.
@@ -16,8 +15,8 @@ permissions:
   pages: write
   id-token: write
 
-# Serialize Pages deployments. Do NOT cancel an in-progress run: a half-cancelled deploy could
-# leave the live site partially published, and we prefer letting a running deploy finish.
+# Serialize Pages deployments. The caller may cancel an obsolete build when main advances;
+# Pages retains the previous deployment until a new artifact is published successfully.
 concurrency:
   group: "pages"
   cancel-in-progress: false

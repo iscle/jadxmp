@@ -42,6 +42,7 @@ Pure-KMP core (wasm in browser) · clean-room redesign (jadx = oracle) · **both
 # ktlint/detekt/ABI/Kover are planned; no tasks are currently configured
 ./gradlew :tools:oracle:smaliScoreboard  # enforced Java differential gate
 ./gradlew :tools:oracle:kotlinScoreboard # informational Kotlin compilation report
+./gradlew :tools:oracle:javaFixtureScoreboard # enforced Java + Kotlin source/check round trips
 ./gradlew :desktopApp:run                  # launch the desktop app
 ```
 (Some tasks land as their phase is implemented — see ROADMAP.)

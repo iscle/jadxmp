@@ -109,6 +109,23 @@ object KotlinAccuracySignals {
         return catchingUnavailable { compileWithEmbeddable(classes, additionalClasspath) }
     }
 
+    /** Execute a trusted Java fixture's check on its original and the rebuilt Kotlin class. */
+    fun executeCheck(classes: List<DecompiledClass>, original: JavaCheckFixture? = null): ExecuteCheckResult {
+        if (original == null) return ExecuteCheckResult.NotEvaluated
+        val originalStatus = runOriginalCheck(original)
+        if (originalStatus == CheckStatus.MISSING_CHECK) return ExecuteCheckResult.NotEvaluated
+        if (originalStatus != CheckStatus.PASSED || classes.isEmpty()) return ExecuteCheckResult.Evaluated(false)
+        var rebuiltStatus = CheckStatus.FAILED
+        val compile = catchingUnavailable {
+            compileWithEmbeddable(classes, original.classpath) { output, classpath ->
+                rebuiltStatus = CheckExecutor.run(
+                    original.checkClass, listOf(output) + classpath, original.timeoutMillis, kotlinCompanion = true,
+                )
+            }
+        }
+        return ExecuteCheckResult.Evaluated(compile.success && rebuiltStatus == CheckStatus.PASSED)
+    }
+
     /**
      * Run [compile], mapping ONLY a compiler-absent / linkage-mismatch failure to
      * [KotlinRecompileStatus.UNAVAILABLE] (a SKIP): [LinkageError] (`NoClassDefFoundError` if the embeddable
@@ -139,6 +156,7 @@ object KotlinAccuracySignals {
     private fun compileWithEmbeddable(
         classes: List<DecompiledClass>,
         additionalClasspath: List<File>,
+        onCompiled: (File, List<File>) -> Unit = { _, _ -> },
     ): KotlinRecompileResult {
         // SHOULD-FIX 3: if kotlin-stdlib is not a locatable jar (e.g. a classes-dir layout), compiling with
         // -no-stdlib would fabricate a mass "unresolved Int/String" failure across every sample. That is not
@@ -239,6 +257,9 @@ object KotlinAccuracySignals {
                 missing.isNotEmpty() -> KotlinRecompileStatus.NO_OUTPUT
                 warnings.isNotEmpty() -> KotlinRecompileStatus.WARNINGS
                 else -> KotlinRecompileStatus.CLEAN
+            }
+            if (status == KotlinRecompileStatus.CLEAN || status == KotlinRecompileStatus.WARNINGS) {
+                onCompiled(outDir, classpathEntries)
             }
             return KotlinRecompileResult(status, errors + exitMsgs + missingMsgs, warnings)
         } finally {

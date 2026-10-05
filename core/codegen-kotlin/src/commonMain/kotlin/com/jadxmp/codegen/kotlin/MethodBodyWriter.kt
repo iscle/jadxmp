@@ -10,6 +10,7 @@ import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
 import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.CompareInstruction
+import com.jadxmp.ir.insn.ConditionOp
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ArithOp
 import com.jadxmp.ir.insn.ConstStringInstruction
@@ -696,7 +697,7 @@ internal class MethodBodyWriter(
             code.variable(ref, declaration = false)
         }
         code.add(" = ")
-        emitInsnExpr(insn, KotlinPrec.LOWEST)
+        emitInsnExpr(insn, KotlinPrec.LOWEST, effectiveType(result))
     }
 
     private fun emitInstancePut(insn: Instruction) {
@@ -752,10 +753,22 @@ internal class MethodBodyWriter(
 
     /** DEX permits Boolean registers in numeric contexts; Kotlin requires an explicit 0/1 value. */
     private fun emitOperandAsType(op: Operand, target: IrType?, minPrec: Int) {
-        if (operandType(op) == IrType.BOOLEAN && target is IrType.Primitive &&
+        if (target == IrType.BOOLEAN && op is LiteralOperand && op.type == IrType.INT) {
+            code.add(if (op.value == 0L) "false" else "true")
+        } else if (operandType(op) == IrType.BOOLEAN && target is IrType.Primitive &&
             target != IrType.BOOLEAN && target != IrType.VOID
         ) {
             emitBooleanAsNumber(op, target, minPrec)
+        } else if (operandType(op) == IrType.CHAR && target is IrType.Primitive &&
+            target != IrType.CHAR && target != IrType.BOOLEAN && target != IrType.VOID
+        ) {
+            // JVM arithmetic promotes UTF-16 code units to numbers; Kotlin keeps Char distinct.
+            emitOperand(op, KotlinPrec.POSTFIX)
+            code.add(".code")
+            if (target != IrType.INT) code.add(".").add(numericConversion(target))
+        } else if ((operandType(op) == IrType.BYTE || operandType(op) == IrType.SHORT) && target == IrType.INT) {
+            emitOperand(op, KotlinPrec.POSTFIX)
+            code.add(".toInt()")
         } else if (op is InstructionOperand) {
             emitInsnExpr(op.instruction, minPrec, target)
         } else {
@@ -942,7 +955,7 @@ internal class MethodBodyWriter(
             // (the decoder guarantees both), so the else/`?:` arms are unreachable today. Fabricating `0` / `""`
             // would silently miscompile a broken insn, so BAIL honestly instead (rule 4).
             IrOpcode.CONST ->
-                if (insn.argCount > 0) emitOperand(insn.getArg(0), minPrec)
+                if (insn.argCount > 0) emitOperandAsType(insn.getArg(0), expectedType, minPrec)
                 else code.emitErrorMarker(method, "const without a literal operand")
             IrOpcode.CONST_STRING -> {
                 val value = (insn as? ConstStringInstruction)?.value
@@ -963,7 +976,7 @@ internal class MethodBodyWriter(
             }
             IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG ->
                 if (insn.argCount > 0) {
-                    emitOperand(insn.getArg(0), minPrec)
+                    emitOperandAsType(insn.getArg(0), expectedType, minPrec)
                 } else {
                     // A 0-arg move/one-arg has no source operand to forward: broken (uncompilable)
                     // placeholder output ⇒ flag the method so error accounting can't undercount it.
@@ -1150,11 +1163,31 @@ internal class MethodBodyWriter(
     }
 
     private fun emitIfExpr(insn: IfInstruction, minPrec: Int) {
-        val prec = insn.condition.kotlinPrecedence()
+        val left = insn.getArg(0)
+        val right = insn.args.getOrNull(1) ?: LiteralOperand(0, operandType(left))
+        emitComparison(insn.condition, left, right, minPrec)
+    }
+
+    private fun emitComparison(op: ConditionOp, left: Operand, right: Operand, minPrec: Int) {
+        val prec = op.kotlinPrecedence()
+        val leftType = operandType(left)
+        val rightType = operandType(right)
+        val comparisonType = when {
+            leftType == IrType.BOOLEAN && rightType is IrType.Primitive && rightType != IrType.BOOLEAN -> rightType
+            rightType == IrType.BOOLEAN && leftType is IrType.Primitive && leftType != IrType.BOOLEAN -> leftType
+            leftType == IrType.CHAR && rightType is IrType.Primitive && rightType != IrType.CHAR -> rightType
+            rightType == IrType.CHAR && leftType is IrType.Primitive && leftType != IrType.CHAR -> leftType
+            else -> null
+        }
+        // Comparisons promote narrow integral operands; coercing a Char to Byte would truncate it.
+        val promotedType = when (comparisonType) {
+            IrType.BYTE, IrType.SHORT, IrType.CHAR -> IrType.INT
+            else -> comparisonType
+        }
         wrapped(prec, minPrec) {
-            emitOperand(insn.getArg(0), prec)
-            code.add(" ").add(insn.condition.symbol).add(" ")
-            if (insn.argCount > 1) emitOperand(insn.getArg(1), prec + 1) else code.add("0")
+            emitOperandAsType(left, promotedType, prec)
+            code.add(" ").add(comparisonSymbol(op, left, right)).add(" ")
+            emitOperandAsType(right, promotedType, prec + 1)
         }
     }
 
@@ -1287,6 +1320,8 @@ internal class MethodBodyWriter(
             return
         }
 
+        if (emitProjectedInvoke(invoke)) return
+
         when {
             kind == InvokeKind.STATIC -> emitClassName(target.declaringType)
             kind == InvokeKind.SUPER -> code.add("super")
@@ -1301,6 +1336,64 @@ internal class MethodBodyWriter(
         // deobfuscation/user override); empty map ⇒ exactly `sanitize(target.name)`, byte-identical.
         code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
         emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1)
+    }
+
+    private fun emitProjectedInvoke(invoke: InvokeInstruction): Boolean {
+        val projection = KotlinJvmInvocationProjection.forInvoke(invoke) ?: return false
+        val target = invoke.methodRef
+        val receiver = invoke.getArg(0)
+        val receiverProjection = when {
+            projection == KotlinJvmInvocationProjection.JAVA_CLASS -> "kotlin.Any"
+            operandType(receiver) == target.declaringType -> null
+            target.declaringType == IrType.STRING -> "kotlin.String"
+            else -> "kotlin.CharSequence"
+        }
+        if (projection == KotlinJvmInvocationProjection.CHAR_AT && receiverProjection != null) {
+            emitProjectedIndex(invoke, receiverProjection)
+            return true
+        }
+        // Any's extension cannot be shadowed by a user member named javaClass; it also observes the
+        // wrapper class of Kotlin-mapped boxed values, rather than a primitive class literal.
+        if (receiverProjection != null) code.add("(")
+        emitOperand(receiver, if (receiverProjection != null) KotlinPrec.AS else KotlinPrec.POSTFIX)
+        if (receiverProjection != null) code.add(" as ").add(receiverProjection).add(")")
+        code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
+        when (projection) {
+            KotlinJvmInvocationProjection.JAVA_CLASS -> code.add(".javaClass")
+            KotlinJvmInvocationProjection.LENGTH -> code.add(".length")
+            KotlinJvmInvocationProjection.CHAR_AT -> {
+                code.add("[")
+                emitOperandAsType(invoke.getArg(1), IrType.INT, KotlinPrec.LOWEST)
+                code.add("]")
+            }
+        }
+        return true
+    }
+
+    private fun emitProjectedIndex(invoke: InvokeInstruction, receiverType: String) {
+        val receiverName = names.unique("receiver")
+        val indexName = names.unique("index")
+        // Restrict overload resolution to the bytecode's declaring interface: a concrete receiver
+        // may have an unrelated operator get(Int). Delay its null check until AFTER index evaluation,
+        // exactly as invoke-interface does. `when` supplies expression scope without a lambda receiver
+        // that could accidentally capture a `this` in the original index expression.
+        code.add("(when (val ").add(receiverName).add(" = ")
+        emitOperand(invoke.getArg(0), KotlinPrec.AS)
+        code.add(" as ").add(receiverType).add("?) ")
+        openBrace()
+        code.add("else -> ")
+        openBrace()
+        code.add("val ").add(indexName).add(" = ")
+        emitOperandAsType(invoke.getArg(1), IrType.INT, KotlinPrec.LOWEST)
+        code.newLine()
+        code.add(receiverName).add("!!")
+        val target = invoke.methodRef
+        code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
+        code.add("[").add(indexName).add("]").newLine()
+        closeBrace()
+        code.newLine()
+        closeBrace()
+        code.add(")")
     }
 
     /**
@@ -1458,18 +1551,23 @@ internal class MethodBodyWriter(
 
     private fun emitCondition(cond: Condition, minPrec: Int) {
         when (cond) {
-            is Condition.Compare -> {
-                val prec = cond.op.kotlinPrecedence()
-                wrapped(prec, minPrec) {
-                    emitOperand(cond.left, prec)
-                    code.add(" ").add(cond.op.symbol).add(" ")
-                    emitOperand(cond.right, prec + 1)
-                }
-            }
+            is Condition.Compare -> emitComparison(cond.op, cond.left, cond.right, minPrec)
             is Condition.BoolTest -> emitOperand(cond.operand, minPrec)
             is Condition.Not -> emitNot(cond.negated, minPrec)
             is Condition.And -> emitJunction(cond.terms, "&&", KotlinPrec.CONJUNCTION, minPrec)
             is Condition.Or -> emitJunction(cond.terms, "||", KotlinPrec.DISJUNCTION, minPrec)
+        }
+    }
+
+    private fun comparisonSymbol(op: ConditionOp, left: Operand, right: Operand?): String {
+        // IR EQ/NE compares references, unlike Kotlin ==/!= which dispatch to equals (and can recurse
+        // indefinitely when reconstructing an equals implementation's `this == other` fast path).
+        val references = isReferenceType(operandType(left)) &&
+            (right == null || isReferenceType(operandType(right)))
+        return when {
+            references && op == ConditionOp.EQ -> "==="
+            references && op == ConditionOp.NE -> "!=="
+            else -> op.symbol
         }
     }
 

@@ -35,7 +35,7 @@ fun regressedSignalNames(ref: SignalScore, cand: SignalScore): Set<String> = bui
 data class SignalScore(
     val noErrors: Boolean,
     val recompiles: Boolean,
-    /** `null` = signal not evaluated (e.g. execute-`check()` is still stubbed). */
+    /** `null` = signal not evaluated (e.g. a smali input has no original JVM fixture). */
     val executesCheck: Boolean?,
 ) {
     companion object {
@@ -52,10 +52,11 @@ data class SignalScore(
             result: DecompilationResult,
             markers: List<String>,
             recompileClasspath: List<java.io.File> = emptyList(),
+            original: JavaCheckFixture? = null,
         ): SignalScore = SignalScore(
             noErrors = AccuracySignals.noErrors(result, markers),
             recompiles = AccuracySignals.recompiles(result.classes, recompileClasspath).success,
-            executesCheck = when (val r = AccuracySignals.executeCheck(result.classes)) {
+            executesCheck = when (val r = AccuracySignals.executeCheck(result.classes, original)) {
                 is ExecuteCheckResult.Evaluated -> r.passed
                 ExecuteCheckResult.NotEvaluated -> null
             },
@@ -94,7 +95,7 @@ data class SampleResult(
     companion object {
         /**
          * Compare candidate to reference. Only signals **both** decompilers evaluated (non-null on
-         * each side) count, so a still-stubbed signal never fabricates a verdict.
+         * each side) count, so an unevaluated signal never fabricates a verdict.
          *
          * A REGRESSION (candidate worse on any signal) DOMINATES an IMPROVEMENT, so an IMPROVEMENT
          * verdict already guarantees the candidate is not worse on any other signal — e.g. a no-error
@@ -199,7 +200,7 @@ class Scoreboard {
         appendLine("  no-error   : ${countPass { it.noErrors }} / $n")
         appendLine("  recompiles : ${countPass { it.recompiles }} / $n")
         val evaluatedCheck = results.count { it.reference.executesCheck != null }
-        appendLine("  exec-check : ${countPass { it.executesCheck }} / $evaluatedCheck evaluated (stub)")
+        appendLine("  exec-check : ${countPass { it.executesCheck }} / $evaluatedCheck evaluated")
         appendLine()
 
         val haveCandidate = results.any { it.candidate != null }

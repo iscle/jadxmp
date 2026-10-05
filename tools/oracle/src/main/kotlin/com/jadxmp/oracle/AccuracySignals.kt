@@ -1,17 +1,13 @@
 package com.jadxmp.oracle
 
-import java.nio.file.Files
-import javax.tools.DiagnosticCollector
-import javax.tools.JavaFileObject
-import javax.tools.StandardLocation
-import javax.tools.ToolProvider
+import java.io.File
 
 /** Outcome of the in-process recompile signal, with diagnostics for failure triage. */
 data class RecompileResult(val success: Boolean, val diagnostics: List<String>)
 
-/** Outcome of the (currently stubbed) execute-`check()` round-trip signal. */
+/** Outcome of the execute-`check()` round-trip signal. */
 sealed interface ExecuteCheckResult {
-    /** The signal was not evaluated (no compiled original / no `check()` / not yet implemented). */
+    /** The signal was not evaluated (no compiled original / original has no `check()`). */
     data object NotEvaluated : ExecuteCheckResult
 
     /** `check()` ran on both original and decompiled-then-recompiled class with the given verdict. */
@@ -71,64 +67,41 @@ object AccuracySignals {
      * Requires a **JDK** at runtime (`ToolProvider.getSystemJavaCompiler()` is null on a JRE); the
      * module pins a JDK toolchain for exactly this reason.
      */
-    fun recompiles(classes: List<DecompiledClass>, additionalClasspath: List<java.io.File> = emptyList()): RecompileResult {
-        if (classes.isEmpty()) return RecompileResult(false, listOf("no classes to compile"))
-        val compiler = ToolProvider.getSystemJavaCompiler()
-            ?: return RecompileResult(false, listOf("No system Java compiler available (need a JDK, not a JRE)"))
-
-        val srcDir = Files.createTempDirectory("jadxmp-oracle-src").toFile()
-        val outDir = Files.createTempDirectory("jadxmp-oracle-out").toFile()
-        try {
-            val sourceFiles = classes.map { cls ->
-                val pkgPath = cls.fullName.substringBeforeLast('.', "").replace('.', '/')
-                val dir = if (pkgPath.isEmpty()) srcDir else srcDir.resolve(pkgPath).apply { mkdirs() }
-                dir.resolve("${cls.simpleName}.java").apply { writeText(cls.source) }
-            }
-
-            val diagnostics = DiagnosticCollector<JavaFileObject>()
-            compiler.getStandardFileManager(diagnostics, null, Charsets.UTF_8).use { fm ->
-                fm.setLocation(StandardLocation.CLASS_OUTPUT, listOf(outDir))
-                if (additionalClasspath.isNotEmpty()) {
-                    fm.setLocation(StandardLocation.CLASS_PATH, additionalClasspath)
-                }
-                val units = fm.getJavaFileObjectsFromFiles(sourceFiles)
-                val task = compiler.getTask(null, fm, diagnostics, listOf("-proc:none"), null, units)
-                val compiledOk = task.call()
-                val messages = diagnostics.diagnostics
-                    .filter { it.kind == javax.tools.Diagnostic.Kind.ERROR }
-                    .map { "${it.source?.name ?: "?"}:${it.lineNumber}: ${it.getMessage(null)}" }
-                    .toMutableList()
-
-                // F1: verify every expected top-level class actually produced a .class file. Guards
-                // against empty / comment-only sources that "compile" to nothing.
-                for (cls in classes) {
-                    val pkgPath = cls.fullName.substringBeforeLast('.', "").replace('.', '/')
-                    val classFile = if (pkgPath.isEmpty()) {
-                        outDir.resolve("${cls.simpleName}.class")
-                    } else {
-                        outDir.resolve(pkgPath).resolve("${cls.simpleName}.class")
-                    }
-                    if (!classFile.isFile) {
-                        messages += "no .class produced for ${cls.fullName} (empty or comment-only source?)"
-                    }
-                }
-                return RecompileResult(compiledOk && messages.isEmpty(), messages)
-            }
-        } finally {
-            srcDir.deleteRecursively()
-            outDir.deleteRecursively()
-        }
-    }
+    fun recompiles(classes: List<DecompiledClass>, additionalClasspath: List<File> = emptyList()): RecompileResult =
+        JavaCompilation.compile(classes, additionalClasspath).use { it.result }
 
     /**
-     * Signal 3 — STUB. Execute the sample's embedded `check()` on the original compiled class and on
-     * the decompiled-then-recompiled class; both must pass to prove semantic equivalence.
-     *
-     * Deferred because it needs the pre-compiled `check()`-bearing fixtures from `corpus/JAVA-SAMPLES.md`
-     * (120 samples), which require the JVM compile helper this module will host. Returns
-     * [ExecuteCheckResult.NotEvaluated] until then. When implemented, it must not throw on a failing
-     * `check()` — a failure is a *signal value*, not an error.
+     * Signal 3 requires an original source fixture: both its compiled check and the rebuilt check
+     * must pass in fresh JVMs. Smali-only samples have no original JVM artifact, so stay unevaluated.
+     * A missing rebuilt check, compilation error, crash or timeout is a failure, never a skipped pass.
      */
-    @Suppress("UNUSED_PARAMETER")
-    fun executeCheck(classes: List<DecompiledClass>): ExecuteCheckResult = ExecuteCheckResult.NotEvaluated
+    fun executeCheck(
+        classes: List<DecompiledClass>,
+        original: JavaCheckFixture? = null,
+    ): ExecuteCheckResult {
+        if (original == null) return ExecuteCheckResult.NotEvaluated
+        val originalCheck = runOriginalCheck(original)
+        if (originalCheck == CheckStatus.MISSING_CHECK) return ExecuteCheckResult.NotEvaluated
+        if (originalCheck != CheckStatus.PASSED) return ExecuteCheckResult.Evaluated(false)
+        JavaCompilation.compile(classes, original.classpath).use { rebuilt ->
+            if (!rebuilt.result.success) return ExecuteCheckResult.Evaluated(false)
+            return ExecuteCheckResult.Evaluated(
+                CheckExecutor.run(original.checkClass, listOf(rebuilt.output) + original.classpath, original.timeoutMillis) == CheckStatus.PASSED,
+            )
+        }
+    }
 }
+
+/** Source fixtures are trusted test inputs; execution is process-isolated, not sandboxed. */
+data class JavaCheckFixture(
+    val classes: List<DecompiledClass>,
+    val checkClass: String,
+    val classpath: List<File> = emptyList(),
+    val timeoutMillis: Long = 5_000,
+)
+
+internal fun runOriginalCheck(original: JavaCheckFixture): CheckStatus =
+    JavaCompilation.compile(original.classes, original.classpath, release = 11).use { compiled ->
+        if (!compiled.result.success) CheckStatus.FAILED
+        else CheckExecutor.run(original.checkClass, listOf(compiled.output) + original.classpath, original.timeoutMillis)
+    }

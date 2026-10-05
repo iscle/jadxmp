@@ -32,7 +32,7 @@ internal object KotlinLiterals {
             TypeKind.BOOLEAN -> if (v != 0L) "true" else "false"
             TypeKind.CHAR -> charLiteral(v.toInt())
             TypeKind.BYTE, TypeKind.SHORT, TypeKind.INT -> v.toInt().toString()
-            TypeKind.LONG -> v.toString() + "L"
+            TypeKind.LONG -> longLiteral(v)
             TypeKind.FLOAT -> floatLiteral(Float.fromBits(v.toInt()))
             TypeKind.DOUBLE -> doubleLiteral(Double.fromBits(v))
             else -> {
@@ -47,6 +47,9 @@ internal object KotlinLiterals {
             }
         }
     }
+
+    // Kotlin parses the sign separately: the positive magnitude of MIN_VALUE is out of Long range.
+    private fun longLiteral(value: Long): String = if (value == Long.MIN_VALUE) "Long.MIN_VALUE" else "${value}L"
 
     fun stringLiteral(value: String): String {
         val sb = StringBuilder(value.length + 2)
@@ -101,14 +104,14 @@ internal object KotlinLiterals {
 
     private fun doubleLiteral(d: Double): String {
         when {
-            d.isNaN() -> return if (d.toRawBits() == CANONICAL_DOUBLE_NAN) "Double.NaN" else "Double.fromBits(${d.toRawBits()}L)"
+            d.isNaN() -> return if (d.toRawBits() == CANONICAL_DOUBLE_NAN) "Double.NaN" else "Double.fromBits(${longLiteral(d.toRawBits())})"
             d == Double.POSITIVE_INFINITY -> return "Double.POSITIVE_INFINITY"
             d == Double.NEGATIVE_INFINITY -> return "Double.NEGATIVE_INFINITY"
         }
-        if (d == 0.0) return if (d.toRawBits() == 0L) "0.0" else "Double.fromBits(${d.toRawBits()}L)"
+        if (d == 0.0) return if (d.toRawBits() == 0L) "0.0" else "Double.fromBits(${longLiteral(d.toRawBits())})"
         val asLong = d.toLong()
         if (asLong in DOUBLE_EXACT_LONG_RANGE && asLong.toDouble() == d) return "$asLong.0"
-        return "Double.fromBits(${d.toRawBits()}L)"
+        return "Double.fromBits(${longLiteral(d.toRawBits())})"
     }
 
     private fun IrType.primitiveKind(): TypeKind? = (this as? IrType.Primitive)?.kind

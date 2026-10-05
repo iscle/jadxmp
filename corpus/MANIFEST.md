@@ -74,7 +74,6 @@ step before they can join the corpus as `.class`/`.dex` fixtures.
 - jadx's upstream count for smali is often cited as ~221; this checkout yields
   210 `.smali` files. Counts above reflect what is actually present in
   `reference/jadx` at import time — trust the numbers here, not the round figure.
-</content>
 
 ## jadxmp-authored regression fixtures
 
@@ -82,3 +81,8 @@ step before they can join the corpus as `.class`/`.dex` fixtures.
 It exercises all five DEX comparison opcodes, NaNs, signed zeros, long extrema, expression precedence,
 and evaluation order. The oracle tests compile and execute Java and Kotlin output against explicit
 DEX-semantic expectations.
+
+`java/semantics/Arithmetic.java`, `LoopSum.java`, and `FloatingComparisons.java` are original
+jadxmp fixtures. They cover integer overflow and division/remainder, loop accumulation, and IEEE
+ordering (NaN, signed zeros and infinities). The source-fixture gate runs their checks on original,
+reference Java, candidate Java and candidate Kotlin output.

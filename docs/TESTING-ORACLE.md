@@ -7,8 +7,8 @@ The project promise is **"at least as accurate as jadx."** Because we chose a *c
 jadx's own test suite validates output three ways. All three are independent of jadx internals, so we reuse them verbatim against jadxmp output:
 
 1. **No-error**: decompiled output contains no `JADX ERROR` / `inconsistent` markers and no error attributes on nodes. (Sanity — the decompiler didn't give up.)
-2. **Recompiles**: the decompiled Java is fed back to the JDK compiler (in-memory). If it doesn't compile, the decompilation is wrong. (Strong, semantic-adjacent.)
-3. **Executes identically**: for samples carrying an embedded `check()` method (119 in jadx), `check()` is run on both the *original* compiled class and the *decompiled-then-recompiled* class. Both must pass. (The gold standard — proves semantic equivalence, not just plausible text.)
+2. **Recompiles**: the decompiled Java is fed back to the JDK compiler in a temporary workspace. If it doesn't compile, the decompilation is wrong. (Strong, semantic-adjacent.)
+3. **Executes identically**: for samples carrying an embedded `check()` method (119 in jadx), `check()` is run on both the *original* compiled class and the *decompiled-then-recompiled* class. Both must pass. (Execution evidence for the cases asserted by each check, not a proof for all possible inputs.)
 
 For the **Kotlin** backend, signals (2)/(3) use the Kotlin compiler and the same `check()` execution, giving Kotlin output a real correctness gate too.
 
@@ -24,7 +24,7 @@ decompile(TestBreakInLoop::class).assertCode()
     .containsOne("break;")
     .countString(0, "else")
 ```
-Java-source samples are stored as small `.smali`/`.class`/`.dex` fixtures in `corpus/` (not embedded as compilable nested classes, since `commonTest` can't run javac). Where a Java sample is needed, it is pre-compiled once by `tools:oracle` and checked in as a `.class`/dex fixture.
+Multiplatform tests consume IR or precompiled bytecode because `commonTest` cannot run javac. Trusted source fixtures in `corpus/java` are compiled and converted to DEX at test time by the JVM-only oracle using D8 pinned to the original jadx baseline's version.
 
 ### Layer B — the differential oracle (`tools:oracle`, JVM-only)
 This is what makes "at least as accurate" enforceable. A JVM-only harness that, for every input in the shared corpus:
@@ -38,10 +38,11 @@ The gate: **zero REGRESSIONs** on the tracked corpus. A change that introduces a
 ## 3. The corpus
 
 Sources, all copied into a fenced `corpus/` tree (kept isolated for licensing clarity — see decisions):
-- **221 `.smali`** inputs from `jadx-core/src/test/smali/**` — language-neutral, drop-in.
+- **210 imported `.smali`** inputs from `jadx-core/src/test/smali/**` — language-neutral, drop-in.
 - **9 `.raung`** inputs.
 - Binary samples (`hello.dex`, sample APKs) from `jadx-core/src/test/resources/`.
-- The **~466 embedded Java `TestCls` samples** — extracted mechanically (each is a uniform `public static class TestCls` block) and pre-compiled by `tools:oracle` into `.class`/dex fixtures, preserving any `check()` method.
+- **Three original Java fixtures** under `corpus/java/semantics`: arithmetic, loops, and floating-point comparisons. Each has an executable `check()`.
+- Extraction of upstream embedded Java `TestCls` samples is still planned; these are not counted as measured coverage.
 
 Corpus growth: every bug we fix and every open-jadx-issue we address adds a new sample with an inline expectation, so the suite encodes our accuracy frontier, not just jadx's.
 
@@ -89,10 +90,20 @@ Gradle process for regressions, assembly/reference failures, or missing/incomple
 and retains the log even on failure. `kotlinScoreboard` remains an informational compilation report;
 its known failures are not suppressed or presented as production readiness.
 
-`AccuracySignals.executeCheck` remains a stub; the blanket three-signal promise above describes
-the intended contract, not current coverage.
-Targeted oracle tests now compile and execute both generated languages for comparison edge cases
-and Kotlin primitive coercions. These tests fail the build, but do not establish whole-corpus semantic
-parity. Missing whole-corpus execution/lint/ABI/coverage gates and remaining scoreboard failures must be resolved
-before claiming production readiness. Readiness measurements and remaining work are recorded in
-`docs/PARITY-STATUS.md`.
+`javaFixtureScoreboard` is an enforced source → javac → D8 → decompile → recompile →
+`check()` gate for both Java and Kotlin output. Each trusted `corpus/java` source must have a
+passing original check; failed compilation, a missing rebuilt check, process failure, timeout, or
+false return fails the gate. Checks run in fresh JVM processes with isolated class loaders, a memory
+limit and timeout. This is process isolation for trusted fixtures, not an OS sandbox for untrusted code.
+Java reference and candidate outputs are also compared against the exact pinned oracle.
+
+`AccuracySignals.executeCheck` and `KotlinAccuracySignals.executeCheck` accept an explicit original
+fixture. Inputs without an original check remain **not evaluated**, never counted as semantic passes.
+The smali scoreboard therefore still measures two signals. The three current source fixtures and
+targeted execution tests do not establish whole-corpus semantic parity.
+
+CI retains the reports and blocks desktop packaging and web deployment on the test and accuracy
+gates. Web deployment is a reusable workflow checked out at the tested commit; manual runs must
+start through the build workflow and pass the same gates. Remaining scoreboard failures and missing
+whole-corpus execution/lint/ABI/coverage gates must be resolved before claiming production readiness.
+Readiness measurements and remaining work are recorded in `docs/PARITY-STATUS.md`.

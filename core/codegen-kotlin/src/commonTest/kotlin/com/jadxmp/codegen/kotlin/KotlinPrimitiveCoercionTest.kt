@@ -2,11 +2,25 @@ package com.jadxmp.codegen.kotlin
 
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.ir.insn.ArithOp
+import com.jadxmp.ir.insn.ConditionOp
+import com.jadxmp.ir.insn.IfInstruction
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.testsupport.assertThatCode
 import kotlin.test.Test
 
 class KotlinPrimitiveCoercionTest {
+    @Test
+    fun numericComparisonUsesCoalescedBooleanAsOneOrZero() {
+        val cls = irClass("a.C")
+        val value = Local(1, IrType.INT, name = "value", isParam = true)
+        val flag = Local(2, IrType.BOOLEAN, name = "flag", isParam = true)
+        cls.method("m", returnType = IrType.BOOLEAN, argTypes = listOf(IrType.INT, IrType.BOOLEAN)) {
+            this[CodegenKeys.PARAM_NAMES] = listOf("value", "flag")
+            body(ret(expr(IfInstruction(ConditionOp.NE, listOf(value.ref(), flag.ref())))))
+        }
+        assertThatCode(generate(cls)).containsOne("return value != (if (flag) 1 else 0)")
+    }
+
     @Test
     fun booleanPassedToNumericParameterUsesOneOrZero() {
         val cls = irClass("a.C")

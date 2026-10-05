@@ -44,11 +44,14 @@ dependencies {
     // guava is pinned to the version smali expects (jadx does the same) to avoid a stale transitive one.
     implementation("com.android.tools.smali:smali:$smaliVersion")
     implementation("com.google.guava:guava:33.6.0-jre")
+    // Same D8 version as the pinned original jadx java-convert plugin; verification only.
+    implementation("com.android.tools:r8:9.1.31")
 
     // (d) Kotlin compiler for the kotlinc recompile signal (the Kotlin twin of the javax.tools Java signal).
     // In-process K2JVMCompiler → hermetic, version-pinned, structured diagnostics. JVM-only, tool-scope.
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinCompilerVersion")
 
+    testImplementation(projects.core.codegenKotlin)
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -93,8 +96,7 @@ tasks.register<JavaExec>("smaliScoreboard") {
 
 // Assemble corpus/smali/** to dex and run jadxmp's KOTLIN output through the kotlinc recompile signal.
 // SELF-measurement only (does jadxmp's Kotlin compile?) — NOT a differential vs jadx, which has no
-// production Kotlin backend. Dormant (logs a single SKIP) until core:api exposes OutputFormat.KOTLIN; see
-// KotlinScoreboardRunner / KotlinJadxmpDecompiler. Restrict to categories with:
+// production Kotlin backend. Restrict to categories with:
 //   ./gradlew :tools:oracle:kotlinScoreboard -Djadxmp.smali.categories=conditions,loops
 tasks.register<JavaExec>("kotlinScoreboard") {
     group = "verification"
@@ -106,4 +108,14 @@ tasks.register<JavaExec>("kotlinScoreboard") {
     // Same freshness discipline: always re-run against a freshly-built candidate.
     outputs.upToDateWhen { false }
     notCompatibleWithConfigurationCache("accuracy scoreboard must run against a freshly-built candidate")
+}
+
+// Full source → class → DEX → source → class → check() semantic round trips.
+tasks.register<JavaExec>("javaFixtureScoreboard") {
+    group = "verification"
+    description = "Compile trusted Java fixtures to DEX and enforce original/reference/rebuilt execution parity."
+    mainClass.set("com.jadxmp.oracle.JavaFixtureRunnerKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    outputs.upToDateWhen { false }
+    notCompatibleWithConfigurationCache("accuracy scoreboard must use freshly built decompilers")
 }
