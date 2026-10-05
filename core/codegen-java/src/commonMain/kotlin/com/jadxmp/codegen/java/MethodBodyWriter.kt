@@ -971,13 +971,9 @@ internal class MethodBodyWriter(
     }
 
     private fun emitIfExpr(insn: IfInstruction, minPrec: Int) {
-        val prec = insn.condition.precedence()
-        wrapped(prec, minPrec) {
-            emitOperand(insn.getArg(0), prec)
-            code.add(" ").add(insn.condition.symbol).add(" ")
-            // A one-operand IF is an implicit compare-to-zero (jadx: IF_EQZ/…); render the `0`.
-            if (insn.argCount > 1) emitOperand(insn.getArg(1), prec + 1) else code.add("0")
-        }
+        // A one-operand IF compares against the DEX integer zero.
+        emitComparison(insn.condition, insn.getArg(0),
+            if (insn.argCount > 1) insn.getArg(1) else LiteralOperand(0, IrType.INT), minPrec)
     }
 
     private fun emitNewArray(insn: Instruction) {
@@ -1408,18 +1404,30 @@ internal class MethodBodyWriter(
 
     private fun emitCondition(cond: Condition, minPrec: Int) {
         when (cond) {
-            is Condition.Compare -> {
-                val prec = cond.op.precedence()
-                wrapped(prec, minPrec) {
-                    emitOperand(cond.left, prec)
-                    code.add(" ").add(cond.op.symbol).add(" ")
-                    emitOperand(cond.right, prec + 1)
-                }
-            }
+            is Condition.Compare -> emitComparison(cond.op, cond.left, cond.right, minPrec)
             is Condition.BoolTest -> emitOperand(cond.operand, minPrec)
             is Condition.Not -> emitNot(cond.negated, minPrec)
             is Condition.And -> emitJunction(cond.terms, "&&", Prec.LOGIC_AND, minPrec)
             is Condition.Or -> emitJunction(cond.terms, "||", Prec.LOGIC_OR, minPrec)
+        }
+    }
+
+    private fun emitComparison(op: ConditionOp, left: Operand, right: Operand, minPrec: Int) {
+        val leftType = operandType(left)
+        val rightType = operandType(right)
+        val ordering = op != ConditionOp.EQ && op != ConditionOp.NE
+        // DEX compares register values numerically. Coalescing may give a 0/1 register a
+        // Boolean declaration; recover its numeric value without collapsing the other operand
+        // to truthiness (2 must not compare equal to true).
+        val numericLeft = leftType.isBooleanPrimitive() &&
+            (rightType.isNumericPrimitive() || ordering && rightType.isBooleanPrimitive())
+        val numericRight = rightType.isBooleanPrimitive() &&
+            (leftType.isNumericPrimitive() || ordering && leftType.isBooleanPrimitive())
+        val prec = op.precedence()
+        wrapped(prec, minPrec) {
+            emitCoerced(left, if (numericLeft) IrType.INT else null, prec)
+            code.add(" ").add(op.symbol).add(" ")
+            emitCoerced(right, if (numericRight) IrType.INT else null, prec + 1)
         }
     }
 
