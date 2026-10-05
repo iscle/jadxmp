@@ -2,6 +2,7 @@ package com.jadxmp.pipeline.decode
 
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.FillArrayDataPayload
+import com.jadxmp.input.InlineSwitchPayload
 import com.jadxmp.input.Instruction as InputInstruction
 import com.jadxmp.input.Opcode
 import com.jadxmp.input.SwitchPayload
@@ -116,7 +117,7 @@ class MethodDecoder(
             }
         }
 
-        resolveSwitches(decoded, switchPayloads)
+        resolveSwitches(decoded, switchPayloads, errors)
         resolveFillArrays(decoded, fillPayloads)
 
         val tries = decodeTries(code)
@@ -169,7 +170,22 @@ class MethodDecoder(
                 make(insn, fallsThrough = true, targets = intArrayOf(input.target))
             }
 
-            // ---- switch (targets resolved in a second pass via the payload) ----
+            // Inline switches carry all destinations directly, including a non-fallthrough default.
+            Opcode.SWITCH -> {
+                val payload = input.payload as? InlineSwitchPayload
+                if (payload == null || payload.keys.size != payload.targets.size ||
+                    payload.defaultTarget < 0 || payload.targets.any { it < 0 } ||
+                    payload.keys.toSet().size != payload.keys.size) {
+                    errors.add("invalid inline switch table at $offset")
+                    make(Instruction(IrOpcode.NOP), fallsThrough = false)
+                } else {
+                    val sw = SwitchInstruction(payload.keys.copyOf(), payload.targets.copyOf(),
+                        payload.defaultTarget, reg(0, IrType.NARROW_INTEGRAL))
+                    make(sw, fallsThrough = false, targets = sw.caseTargets + intArrayOf(sw.defaultTarget))
+                }
+            }
+
+            // ---- DEX switch (targets resolved in a second pass via the payload) ----
             Opcode.PACKED_SWITCH, Opcode.SPARSE_SWITCH -> {
                 // input.target = absolute offset of the payload table (recorded for the resolve pass).
                 val sw = SwitchInstruction(IntArray(0), IntArray(0), defaultTarget = -1, selector = reg(0, IrType.NARROW_INTEGRAL))
@@ -504,12 +520,24 @@ class MethodDecoder(
 
     // ---- second-pass resolution --------------------------------------------
 
-    private fun resolveSwitches(decoded: List<DecodedInstruction>, payloads: Map<Int, SwitchPayload>) {
+    private fun resolveSwitches(
+        decoded: List<DecodedInstruction>,
+        payloads: Map<Int, SwitchPayload>,
+        errors: MutableList<String>,
+    ) {
+        val retainedOffsets = decoded.mapTo(HashSet()) { it.offset }
         // default target = the offset of the instruction following the switch in program order.
         for (i in decoded.indices) {
             val di = decoded[i]
             val sw = di.insn as? SwitchInstruction ?: continue
-            val payloadOffset = sw[SWITCH_PAYLOAD_OFFSET] ?: continue
+            val payloadOffset = sw[SWITCH_PAYLOAD_OFFSET]
+            if (payloadOffset == null) {
+                // Never let CFG construction silently drop an unresolved inline destination.
+                for (target in di.targets) if (target !in retainedOffsets) {
+                    errors.add("unresolved inline switch target $target at ${di.offset}")
+                }
+                continue
+            }
             val default = decoded.getOrNull(i + 1)?.offset ?: -1
             sw.defaultTarget = default
             val payload = payloads[payloadOffset]

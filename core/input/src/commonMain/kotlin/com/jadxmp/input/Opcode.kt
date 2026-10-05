@@ -152,6 +152,8 @@ public enum class Opcode {
     IF_GEZ,
     IF_GTZ,
     IF_LEZ,
+    /** Inline case table with explicit absolute case/default destinations. */
+    SWITCH,
     PACKED_SWITCH,
     PACKED_SWITCH_PAYLOAD,
     SPARSE_SWITCH,

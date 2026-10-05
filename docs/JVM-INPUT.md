@@ -6,7 +6,7 @@ storage and permutations, snapshots, and constructor alias transitions; it passe
 review. These are foundations, not native JVM decompilation: the module is not registered with
 `core:api`. Whole-method frame analysis, register lowering, and remaining input-contract changes
 below are **proposed, not implemented**.
-The fused-result prerequisite has landed separately.
+The fused-result and explicit inline-switch prerequisites have landed separately.
 
 The engine remains clean-room and multiplatform. Format decisions follow the
 [JVMS class-file specification](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
@@ -99,7 +99,7 @@ inside later pipeline passes.
 | --- | --- | --- |
 | Fused results | Implemented: `MethodDecoder` honors `Instruction.resultRegister` for calls/custom calls and filled arrays. | Retains declared result types and DEX move-result behavior; invalid void/out-of-frame results carry diagnostics. |
 | Call arguments | The decoder advances argument indexes by descriptor word width. | Document and expose word-indexed arguments, including the second entry for long/double. |
-| Switches | Switch payloads are separate pseudo-instructions; default is inferred as the next instruction. | Support inline payload data and an explicit default target. Do not manufacture a DEX payload or synthetic default jump. |
+| Switches | Implemented: `Opcode.SWITCH` carries an `InlineSwitchPayload` with explicit absolute case/default positions. The legacy DEX payload path remains supported. | No synthetic payload or default jump is needed; unresolved inline destinations produce visible diagnostics. |
 | Instruction positions | SPI comments assume 16-bit code units. One JVM instruction may lower into several register instructions. | Give emitted instructions unique normalized positions and retain original bytecode/file offsets separately. |
 | Targeted NOPs | MethodDecoder drops NOPs; CfgBuilder resolves targets by exact remaining offsets. | Preserve targeted normalized NOPs or explicitly map raw NOP PCs to the next real emitted instruction. Never rely on implicit gap redirection. |
 | Exception endpoints | Shared `TryBlock` ends are inclusive; JVM Code ranges are half-open. | Map original boundaries deliberately through emitted positions, including the last expansion of the last protected instruction. |

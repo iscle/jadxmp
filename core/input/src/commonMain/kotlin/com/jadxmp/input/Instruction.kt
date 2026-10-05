@@ -39,6 +39,19 @@ public class SwitchPayload(
 }
 
 /**
+ * A format-neutral switch table attached directly to [Opcode.SWITCH]. Case destinations and
+ * [defaultTarget] are absolute positions in the same coordinate system as [Instruction.offset].
+ * The default is explicit and need not be the next instruction. Keys must be distinct; several
+ * keys may share one target. Unlike the DEX [SwitchPayload], no separate payload instruction or
+ * relative offset arithmetic is required. The consumer copies arrays before retaining the table.
+ */
+public class InlineSwitchPayload(
+    public val keys: IntArray,
+    public val targets: IntArray,
+    public val defaultTarget: Int,
+) : InstructionPayload
+
+/**
  * The initializer blob of a `fill-array-data`. [data] is one of `ByteArray`/`ShortArray`/`IntArray`/
  * `LongArray` depending on [elementSize] (1/2/4/8), or an empty `ByteArray` when there are no elements.
  *
