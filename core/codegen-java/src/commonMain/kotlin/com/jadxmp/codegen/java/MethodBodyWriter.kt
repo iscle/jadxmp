@@ -523,7 +523,9 @@ internal class MethodBodyWriter(
             code.variable(ref, declaration = false)
         }
         code.add(" = ")
-        emitInsnExpr(insn, Prec.LOWEST)
+        // SSA versions can share a Boolean local while retaining an integer-typed CONST result.
+        // Match the declared local just as return, field and argument boundaries already do.
+        emitCoerced(InstructionOperand(insn), effectiveType(result), Prec.LOWEST)
     }
 
     private fun emitInstancePut(insn: Instruction) {
