@@ -161,8 +161,30 @@ The pinned Java comparison remains reproducible with:
     -Djadxmp.smali.dump=TestTryCatchMultiException2
 ```
 
-With correct exception SSA, this row currently fails `no-error` and `recompiles`:
-jadxmp reports the proven invalid reference-to-primitive return instead of silently
-using a later register assignment. The enforced gate remains red. Resolving how
-verifier-invalid corpus inputs should be assessed is a separate, explicit oracle
-policy decision; this evidence does not authorize suppressing that failure.
+With correct exception SSA, this row fails `no-error` and `recompiles`: jadxmp
+reports the proven invalid reference-to-primitive return instead of silently using
+a later register assignment. These measured failures remain in the report.
+
+## Approved diagnostic policy
+
+The user explicitly selected **“Require the invalid-input diagnostic”** after reviewing
+the escalation supported by this evidence. Only this exact sample is classified as
+`EXPECTED_DIAGNOSTIC`, separate from parity and the two existing documented divergences.
+`ExpectedInvalidInput` requires the original SHA-256, exactly one reported error,
+the original single class, and exactly this diagnostic line with no other hard failure marker:
+
+```text
+// JADXMP ERROR: invalid register type: reference value reaches primitive return at 28
+```
+
+The reference must still pass `no-error` and `recompiles`; the candidate must fail both,
+with execution checks unevaluated on both sides. Compilation still runs and is printed
+as `recompiles=FAIL`. A missing diagnostic (even with apparently clean compilable output),
+changed fixture, empty output, crash, extra error, or changed signal profile is a regression.
+This is a required diagnostic for proven invalid bytecode, not a claim that the generated
+source is executable or semantically equivalent. The source remains best-effort output.
+
+`InvalidInputPolicyTest` checks these failure modes and assembles the original fixture
+through both decompilers and javac. Extending this policy to another fixture requires
+new verifier evidence and an explicit policy decision; it must not become a generic
+exception for decompilation failures.

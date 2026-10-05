@@ -50,7 +50,7 @@ class OutOfSsaEscapeHoistTest {
     @Test
     fun tryDefinedValueUsedAfterIsHoistedAndStructures() {
         // v0 = compute();            (inside try)
-        // } catch (Exception e) {}
+        // } catch (Exception e) { throw e; }
         // use(v0);                   (after the try — v0 escapes)
         val reader = FakeCodeReader(
             2,
@@ -60,7 +60,7 @@ class OutOfSsaEscapeHoistTest {
                 Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = use), // use(v0) — after
                 Insn(Opcode.RETURN_VOID, 3),
                 Insn(Opcode.MOVE_EXCEPTION, 4, intArrayOf(1)), // handler
-                Insn(Opcode.GOTO, 5, target = 2), // catch continues to the follow
+                Insn(Opcode.THROW, 5, intArrayOf(1)), // failure exits; v0 is only read after a successful assignment
             ),
             tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(4), -1))),
         )
@@ -92,19 +92,21 @@ class OutOfSsaEscapeHoistTest {
 
     @Test
     fun tryDefinedValueUsedInCatchIsHoisted() {
-        // v0 = compute();            (inside try)          <- defined in try body
-        // } catch (Exception e) { use(v0); }               <- read on the EXCEPTIONAL path (highest risk)
+        // v0 has a real initial value: a failure of compute() must not expose its uncommitted result.
+        // A later call can throw after the successful assignment, so the catch merges both states.
         val reader = FakeCodeReader(
             2,
             listOf(
-                Insn(Opcode.INVOKE_STATIC, 0, intArrayOf(), indexType = IndexType.METHOD_REF, methodRef = compute), // try_start
-                Insn(Opcode.MOVE_RESULT, 1, intArrayOf(0)), // v0 = compute()  (try_end covers this)
-                Insn(Opcode.RETURN_VOID, 2), // normal exit
-                Insn(Opcode.MOVE_EXCEPTION, 3, intArrayOf(1)), // handler
-                Insn(Opcode.INVOKE_STATIC, 4, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = use), // use(v0) in catch
-                Insn(Opcode.RETURN_VOID, 5),
+                Insn(Opcode.CONST, 0, intArrayOf(0), literal = 7),
+                Insn(Opcode.INVOKE_STATIC, 1, methodRef = compute),
+                Insn(Opcode.MOVE_RESULT, 2, intArrayOf(0)),
+                Insn(Opcode.INVOKE_STATIC, 3, methodRef = FakeMethodRef("Lc/F;", "after", "V", emptyList())),
+                Insn(Opcode.RETURN_VOID, 4),
+                Insn(Opcode.MOVE_EXCEPTION, 5, intArrayOf(1)),
+                Insn(Opcode.INVOKE_STATIC, 6, intArrayOf(0), methodRef = use),
+                Insn(Opcode.RETURN_VOID, 7),
             ),
-            tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(3), -1))),
+            tries = listOf(FakeTryBlock(1, 3, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(5), -1))),
         )
         val method = TestPipeline.buildMethod(reader, methodName = "m")
         process(method)
@@ -134,7 +136,7 @@ class OutOfSsaEscapeHoistTest {
                     Insn(Opcode.INVOKE_STATIC, 2, intArrayOf(0), indexType = IndexType.METHOD_REF, methodRef = us),
                     Insn(Opcode.RETURN_VOID, 3),
                     Insn(Opcode.MOVE_EXCEPTION, 4, intArrayOf(1)),
-                    Insn(Opcode.GOTO, 5, target = 2),
+                    Insn(Opcode.THROW, 5, intArrayOf(1)),
                 ),
                 tries = listOf(FakeTryBlock(0, 1, FakeCatchHandler(listOf("Ljava/lang/Exception;"), listOf(4), -1))),
             )

@@ -9,8 +9,10 @@ package com.jadxmp.oracle
  *   sample where jadx is the *buggy* side and jadxmp is faithfully correct. Excluded from the gate but
  *   shown as its own visible category with a written rationale — never silently hidden. Scored ONLY when
  *   the jadx-passes/jadxmp-fails signals match the allowlist entry EXACTLY (see [SampleResult.classify]).
+ * - [EXPECTED_DIAGNOSTIC] — the exact ART-verified invalid input satisfies its mandatory diagnostic
+ *   contract. Its compilation failure remains visible; this is not output parity.
  */
-enum class Verdict { PARITY, REGRESSION, IMPROVEMENT, EXPECTED_DIVERGENCE }
+enum class Verdict { PARITY, REGRESSION, IMPROVEMENT, EXPECTED_DIVERGENCE, EXPECTED_DIAGNOSTIC }
 
 /** Canonical accuracy-signal names, as printed in the scoreboard's `fails:` list and matched by the allowlist. */
 object SignalNames {
@@ -80,8 +82,15 @@ data class SampleResult(
     val candidate: SignalScore?,
     /** Optional grouping key (smali construct category); null for the flat binary run. */
     val category: String? = null,
+    /** Hash-checked invalid-input evidence; never inferred merely from a failing signal. */
+    val invalidInputEvidence: InvalidInputEvidence? = null,
 ) {
-    val verdict: Verdict? get() = candidate?.let { classify(sample, reference, it) }
+    val verdict: Verdict? get() = candidate?.let {
+        if (sample == ExpectedInvalidInput.SAMPLE) {
+            if (invalidInputEvidence?.accepts(sample, reference, it) == true) Verdict.EXPECTED_DIAGNOSTIC
+            else Verdict.REGRESSION
+        } else classify(sample, reference, it)
+    }
 
     /**
      * True when this PARITY is backed by a shared PASS (real evidence), false for a *tied-fail* parity
@@ -132,6 +141,8 @@ data class SampleResult(
          * scored PARITY/IMPROVEMENT (and the runner then flags the entry stale).
          */
         fun classify(sample: String, ref: SignalScore, cand: SignalScore): Verdict {
+            // A signal-only comparison cannot prove the mandatory invalid-input diagnostic.
+            if (sample == ExpectedInvalidInput.SAMPLE) return Verdict.REGRESSION
             val mechanical = classify(ref, cand)
             if (mechanical != Verdict.REGRESSION) return mechanical
             val entry = DocumentedDivergences.forSample(sample) ?: return Verdict.REGRESSION
@@ -171,6 +182,9 @@ class Scoreboard {
      */
     fun expectedDivergences(): List<SampleResult> =
         results.filter { it.verdict == Verdict.EXPECTED_DIVERGENCE }
+
+    fun expectedDiagnostics(): List<SampleResult> =
+        results.filter { it.verdict == Verdict.EXPECTED_DIAGNOSTIC }
 
     /**
      * Allowlist entries that no longer apply: the sample was scored but jadxmp now PASSES at least one of
@@ -214,6 +228,7 @@ class Scoreboard {
             }
             appendLine()
             appendLine(if (hasRegression()) "GATE: FAIL (regressions present)" else "GATE: PASS (zero regressions)")
+            append(expectedDiagnosticReport())
             val divergences = expectedDivergences()
             if (divergences.isNotEmpty()) {
                 appendLine()
@@ -237,4 +252,20 @@ class Scoreboard {
 
     private fun mark(b: Boolean): String = if (b) "PASS" else "FAIL"
     private fun markN(b: Boolean?): String = b?.let { mark(it) } ?: "n/a "
+
+    internal fun expectedDiagnosticReport(): String = buildString {
+        for (row in results.filter { it.sample == ExpectedInvalidInput.SAMPLE }) {
+            appendLine()
+            appendLine("INVALID INPUT (ART-verified; required diagnostic, not successful decompilation):")
+            appendLine("  ${row.sample}: ${row.verdict ?: "NOT EVALUATED"}")
+            appendLine("    required: ${ExpectedInvalidInput.DIAGNOSTIC}")
+            appendLine("    SHA-256: ${ExpectedInvalidInput.SHA256}; evidence: docs/INVALID-BYTECODE.md")
+            row.candidate?.let {
+                appendLine("    candidate: no-error=${mark(it.noErrors)} recompiles=${mark(it.recompiles)} exec-check=${markN(it.executesCheck)}")
+            }
+            val evidence = row.invalidInputEvidence
+            if (evidence == null) appendLine("    diagnostic evidence: MISSING")
+            else evidence.problems.forEach { appendLine("    diagnostic evidence FAIL: $it") }
+        }
+    }
 }

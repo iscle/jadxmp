@@ -15,17 +15,11 @@ import com.jadxmp.pipeline.support.TestPipeline
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-/**
- * Documents the **known** try-catch SSA imprecision (see the `TODO(before inlining)` in [SsaBuilder]).
- * A register reassigned inside a protected block, with a throwing instruction between the two assigns,
- * makes the handler read the *later* SSA version though runtime would see the earlier one. This is
- * harmless in Phase 2 (all versions collapse to one source variable) but must be fixed before any pass
- * trusts SSA def-identity. This test pins the current behaviour so a future fix visibly changes it.
- */
+/** Exception handlers observe register state before the instruction that throws. */
 class SsaTryCatchTest {
 
     @Test
-    fun handlerReadsLastAssignWithinProtectedBlock() {
+    fun handlerReadsValueBeforeThrowingInstruction() {
         val bar = FakeMethodRef("Lcom/example/Foo;", "bar", "V", emptyList())
         val reader = FakeCodeReader(
             2,
@@ -45,9 +39,39 @@ class SsaTryCatchTest {
         val handler = TestPipeline.blockAt(method, 5)
         val ret = handler.instructions.first { it.opcode == IrOpcode.RETURN && it.offset == 5 }
         val def = (ret.getArg(0) as RegisterOperand).ssaValue!!.assign.parent!!
-        // CURRENT (documented) behaviour: handler observes the block's end-state definition `v0 = 2`.
-        // The runtime-correct value on the exception path is `v0 = 1`; fixing that is the TODO.
         assertEquals(IrOpcode.CONST, def.opcode)
-        assertEquals(2L, (def.getArg(0) as LiteralOperand).value)
+        assertEquals(1L, (def.getArg(0) as LiteralOperand).value)
     }
+    @Test
+    fun throwingResultDoesNotOverwritePreviousRegisterOnExceptionalEdge() {
+        val reader = FakeCodeReader(3, listOf(
+            Insn(Opcode.CONST, 0, intArrayOf(0), literal = 7),
+            Insn(Opcode.ARRAY_LENGTH, 1, intArrayOf(0, 2)),
+            Insn(Opcode.RETURN, 2, intArrayOf(0)),
+            Insn(Opcode.MOVE_EXCEPTION, 3, intArrayOf(1)),
+            Insn(Opcode.RETURN, 4, intArrayOf(0)),
+        ), tries = listOf(FakeTryBlock(1, 1, FakeCatchHandler(listOf("Ljava/lang/NullPointerException;"), listOf(3), -1))))
+        val method = TestPipeline.buildMethod(reader, returnType = IrType.INT, argTypes = listOf(IrType.array(IrType.INT)))
+        TestPipeline.ssa(method)
+        val caughtReturn = TestPipeline.blockAt(method, 4).instructions.single { it.offset == 4 }
+        val before = (caughtReturn.getArg(0) as RegisterOperand).ssaValue!!.assign.parent!!
+        assertEquals(IrOpcode.CONST, before.opcode)
+        assertEquals(7L, (before.getArg(0) as LiteralOperand).value)
+        val normalReturn = TestPipeline.blockAt(method, 2).instructions.single { it.offset == 2 }
+        val normal = (normalReturn.getArg(0) as RegisterOperand).ssaValue!!.assign.parent!!
+        val normalValue = if (normal.opcode == IrOpcode.MOVE)
+            (normal.getArg(0) as RegisterOperand).ssaValue!!.assign.parent!! else normal
+        assertEquals(IrOpcode.ARRAY_LENGTH, normalValue.opcode)
+    }
+
+    @Test
+    fun unusedStringResolutionRemainsObservable() {
+        val method = TestPipeline.buildMethod(FakeCodeReader(1, listOf(
+            Insn(Opcode.CONST_STRING, 0, intArrayOf(0), stringValue = "unused"),
+            Insn(Opcode.RETURN_VOID, 1),
+        )))
+        TestPipeline.ssa(method)
+        assertEquals(1, method.blocks.flatMap { it.instructions }.count { it.opcode == IrOpcode.CONST_STRING })
+    }
+
 }

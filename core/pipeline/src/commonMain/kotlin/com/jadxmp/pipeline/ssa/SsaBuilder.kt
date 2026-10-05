@@ -160,17 +160,8 @@ class SsaBuilder(
             }
             insn.result?.let { defineResult(it, cur) }
         }
-        // Bind this block's contribution to each successor φ.
-        //
-        // TODO(before inlining): try-catch φ imprecision. When the predecessor is a protected block that
-        // reassigns `reg` and can throw *between* the two assignments, `cur[reg]` here is the later
-        // version, but at runtime a handler entered mid-block sees the earlier one — so the handler φ can
-        // bind the wrong SSA version. This is harmless in Phase 2 because every version of a register
-        // still collapses to one source CodeVar (so `catch { use(reg) }` reads a correct value), but it
-        // becomes wrong once a pass trusts SSA def-identity (inlining / type-splitting). The real fix is
-        // jadx's approach: drop the try-leaving last-assign from handler φ args, or split each protected
-        // block at every definition so exception edges leave from the exact program point. See
-        // SsaTryCatchTest.handlerPhiBindsLastAssignWithinProtectedBlock for the documented current behaviour.
+        // ExceptionProgramPoints ensures throwing definitions commit only on the normal continuation;
+        // every outgoing edge therefore observes exactly this block's completed register state.
         for (succ in block.successors) {
             val phis = succ[PipelineAttrs.PHI_LIST] ?: continue
             for (phi in phis) {
@@ -307,10 +298,10 @@ class SsaBuilder(
     }
 
     /** A provably side-effect-free, non-throwing def whose dead result makes the whole instruction dead. */
-    private fun isRemovableDeadDef(def: Instruction): Boolean = when (def.opcode) {
-        // NB: CONST_CLASS and INSTANCE_OF are deliberately EXCLUDED — both can raise a linkage error on an
-        // unresolvable/inaccessible type, so they are kept (falling through to `else`).
-        IrOpcode.CONST, IrOpcode.CONST_STRING,
+    private fun isRemovableDeadDef(def: Instruction): Boolean = !com.jadxmp.pipeline.InstructionEffects.mayThrow(def) && when (def.opcode) {
+        // String/class resolution and instance-of are deliberately excluded: even an unused value can
+        // raise allocation/linkage errors. Only primitive constants are unconditionally removable.
+        IrOpcode.CONST,
         IrOpcode.MOVE, IrOpcode.NEG, IrOpcode.NOT,
         IrOpcode.CAST, IrOpcode.CMP,
         -> true

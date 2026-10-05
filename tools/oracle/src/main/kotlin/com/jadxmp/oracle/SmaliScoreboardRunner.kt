@@ -77,7 +77,13 @@ fun main() {
             dumpSample(sample, refResult, refScore, candResult, candScore, recompileClasspath)
         }
 
-        board.add(SampleResult(sample = sample, reference = refScore, candidate = candScore, category = category))
+        board.add(SampleResult(
+            sample = sample,
+            reference = refScore,
+            candidate = candScore,
+            category = category,
+            invalidInputEvidence = ExpectedInvalidInput.assess(sample, smali.readBytes(), candResult),
+        ))
     }
 
     print(renderSmaliReport(board, inputs.size, assemblyFailed, referenceFailed))
@@ -121,7 +127,7 @@ private fun improvedSignals(ref: SignalScore, cand: SignalScore): List<String> =
     if (ref.executesCheck == false && cand.executesCheck == true) add(SignalNames.EXEC_CHECK)
 }
 
-private fun renderSmaliReport(
+internal fun renderSmaliReport(
     board: Scoreboard,
     totalDiscovered: Int,
     assemblyFailed: List<String>,
@@ -145,18 +151,20 @@ private fun renderSmaliReport(
     appendLine("  regression     : ${verdicts[Verdict.REGRESSION] ?: 0}")
     appendLine("  improvement    : ${verdicts[Verdict.IMPROVEMENT] ?: 0}")
     appendLine("  exp-divergence : ${verdicts[Verdict.EXPECTED_DIVERGENCE] ?: 0}   (allowlisted jadx-bugs; excluded from gate)")
+    appendLine("  exp-diagnostic: ${verdicts[Verdict.EXPECTED_DIAGNOSTIC] ?: 0}   (verified invalid input; diagnostic required; compilation failure retained)")
     appendLine()
 
     // Per-category table: parity split into evidenced (P!) and tied-fail (P?); xdiv = expected divergences.
-    appendLine("per-category (evidenced-parity / tied-parity / regression / improvement / expected-divergence):")
-    appendLine("  %-14s %6s %6s %7s %7s %7s".format("category", "par!", "par?", "regr", "impr", "xdiv"))
+    appendLine("per-category (evidenced-parity / tied-parity / regression / improvement / expected-divergence / expected-diagnostic):")
+    appendLine("  %-14s %6s %6s %7s %7s %7s %7s".format("category", "par!", "par?", "regr", "impr", "xdiv", "xdiag"))
     scored.groupBy { it.category ?: "?" }.toSortedMap().forEach { (cat, rows) ->
         val pe = rows.count { it.isEvidencedParity }
         val pt = rows.count { it.verdict == Verdict.PARITY && !it.isEvidencedParity }
         val r = rows.count { it.verdict == Verdict.REGRESSION }
         val i = rows.count { it.verdict == Verdict.IMPROVEMENT }
         val x = rows.count { it.verdict == Verdict.EXPECTED_DIVERGENCE }
-        appendLine("  %-14s %6d %6d %7d %7d %7d".format(cat, pe, pt, r, i, x))
+        val d = rows.count { it.verdict == Verdict.EXPECTED_DIAGNOSTIC }
+        appendLine("  %-14s %6d %6d %7d %7d %7d %7d".format(cat, pe, pt, r, i, x, d))
     }
     appendLine()
 
@@ -168,6 +176,8 @@ private fun renderSmaliReport(
         else -> "GATE: PASS — zero regressions"
     })
     appendLine()
+
+    append(board.expectedDiagnosticReport())
 
     if (regressions.isNotEmpty()) {
         appendLine("REGRESSIONS (jadx passes a signal jadxmp fails) — the accuracy-gap worklist:")

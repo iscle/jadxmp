@@ -188,8 +188,8 @@ class RegionMakerTryCatchTest {
         )
         val method = TestPipeline.buildMethod(reader)
         TestPipeline.structured(method)
-        // Three protected blocks (the if, the then, the else) each get a marked exception edge.
-        assertEquals(3, method[PipelineAttrs.EXCEPTION_EDGES]?.size, "each protected block → handler is marked")
+        // The pure conditional retains try membership but only the two calls can enter the handler.
+        assertEquals(2, method[PipelineAttrs.EXCEPTION_EDGES]?.size, "only throwing program points reach the handler")
         assertNoPhi(method)
         assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED], "branchy try must be fully structured")
 

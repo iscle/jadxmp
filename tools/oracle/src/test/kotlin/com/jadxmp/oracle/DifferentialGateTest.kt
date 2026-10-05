@@ -33,4 +33,15 @@ class DifferentialGateTest {
             requireDifferentialParity(Scoreboard(), 1, emptyList(), listOf("reference crashed"))
         }
     }
+
+    @Test
+    fun referenceOnlyRowsCannotPassDifferentialGate() {
+        for (sample in listOf("ordinary.smali", ExpectedInvalidInput.SAMPLE)) {
+            val board = Scoreboard().apply { add(SampleResult(sample, passing, null)) }
+            val failure = assertThrows(IllegalStateException::class.java) {
+                requireDifferentialParity(board, 1, emptyList(), emptyList())
+            }
+            assertTrue(failure.message.orEmpty().contains("missing candidate"))
+        }
+    }
 }

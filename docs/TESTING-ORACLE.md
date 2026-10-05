@@ -35,6 +35,12 @@ This is what makes "at least as accurate" enforceable. A JVM-only harness that, 
 
 The gate: **zero REGRESSIONs** on the tracked corpus. A change that introduces a regression fails CI. IMPROVEMENTs are celebrated and, once stable, promoted into Layer A as new expectations. Textual diffs are advisory (formatting differs by design); the *signals* are the gate.
 
+One explicitly approved, ART-verified invalid fixture has a separate **EXPECTED_DIAGNOSTIC**
+contract: an exact source hash and invalid-return diagnostic are mandatory, while its failed
+compilation remains visible. Missing evidence, extra failures, changed signals or silently
+"successful" output fail the gate. This is neither parity nor an extension of the two existing
+documented divergences. See [INVALID-BYTECODE.md](INVALID-BYTECODE.md) for the evidence and policy.
+
 ## 3. The corpus
 
 Sources, all copied into a fenced `corpus/` tree (kept isolated for licensing clarity — see decisions):

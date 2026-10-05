@@ -66,7 +66,10 @@ object PipelineAttrs {
     /** The input-model [CodeReader] for a method body, attached at model-build time for the decode pass. */
     val CODE_READER: AttrKey<CodeReader> = AttrKey("CODE_READER")
 
-    /** The method frame's register count, captured at model-build time (needed by SSA construction). */
+    /** Marks a success-only result commit whose copied producer type must survive type inference. */
+    val EXCEPTION_RESULT_COMMIT: AttrKey<Boolean> = AttrKey("EXCEPTION_RESULT_COMMIT")
+
+    /** Current IR frame size; synthetic slots preserve the incoming parameters at its high end. */
     val REGISTER_COUNT: AttrKey<Int> = AttrKey("REGISTER_COUNT")
 
     /**

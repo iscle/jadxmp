@@ -754,36 +754,7 @@ internal class RegionMaker(
      * arithmetic (all but integer div/rem), comparisons/casts that never throw, and control transfer. Anything
      * that touches memory, calls a method, allocates, casts a reference (`check-cast`), or divides may throw.
      */
-    private fun mayThrow(insn: Instruction): Boolean {
-        // The instruction's OWN opcode may throw, OR any wrapped sub-expression does. ExpressionShaping runs
-        // immediately before structuring and inlines "pure" (= reorderable, NOT non-throwing) defs into a
-        // single later use in the same block — so a whitelisted top-level opcode can WRAP a throwing op:
-        // `return (a / b)` (RETURN wrapping DIV), `x = arr.length + 5` (ARITH wrapping ARRAY_LENGTH),
-        // `z = x instanceof T` folded into a use. Inspecting only `insn.opcode` would miss those (same
-        // wrapped-operand blindness fixed in readsSsaValue/tryDefsEscape). Recurse through the operand tree.
-        val opcodeThrows = when (insn.opcode) {
-            IrOpcode.CONST,
-            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.MOVE_EXCEPTION, IrOpcode.ONE_ARG,
-            IrOpcode.NEG, IrOpcode.NOT, IrOpcode.CAST, IrOpcode.CMP,
-            IrOpcode.GOTO, IrOpcode.NOP, IrOpcode.RETURN, IrOpcode.IF, IrOpcode.SWITCH,
-            -> false
-            // Integer div/rem throw on a zero divisor.
-            IrOpcode.ARITH -> {
-                val op = (insn as? com.jadxmp.ir.insn.ArithInstruction)?.op
-                op == com.jadxmp.ir.insn.ArithOp.DIV || op == com.jadxmp.ir.insn.ArithOp.REM
-            }
-            // CONST_STRING can fail during string resolution/allocation; it is not exception-free.
-            // INSTANCE_OF (like CONST_CLASS, check-cast, new-*) resolves a class reference → a linkage error
-            // (NoClassDefFoundError / IncompatibleClassChangeError, JVM §5.4.3.1) — throwing.
-            else -> true // invoke, field/array access, check-cast, const-class, instance-of, new-*, monitor, throw…
-        }
-        if (opcodeThrows) return true
-        for (k in 0 until insn.argCount) {
-            val arg = insn.getArg(k)
-            if (arg is InstructionOperand && mayThrow(arg.instruction)) return true
-        }
-        return false
-    }
+    private fun mayThrow(insn: Instruction): Boolean = com.jadxmp.pipeline.InstructionEffects.mayThrow(insn)
 
     private enum class BranchKind { NONE, TWO_WAY, SWITCH, UNSUPPORTED }
 

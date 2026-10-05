@@ -42,7 +42,21 @@ Compared with commit `29e21c9`, the one Java regression is fixed, Kotlin compila
 commits ran JVM/JS/Wasm tests and correctly blocked packaging and web deployment on the then-unfixed
 Java regression. Hosted CI for `5c3df54` and `70659c1` completed successfully, including JVM/JS/Wasm and accuracy
 gates, all four desktop platforms, and the gated web deployment. The JVM/JS/Wasm and accuracy
-gates also passed for `8e82fcd`; its packaging and web jobs are still running.
+gates, packaging and web deployment also passed for `8e82fcd`.
+
+## Exception-state validation after the combined snapshot
+
+The protected-instruction SSA repair passes the full original-reference Java gate: **211 scored,
+203 parity (202 evidenced, one tied failure), five improvements, zero regressions, two existing
+divergences and one required invalid-input diagnostic**. The last category is explicitly approved
+and hash-bound to the ART-rejected `TestTryCatchMultiException2` fixture; its failed compilation
+remains visible. See [INVALID-BYTECODE.md](INVALID-BYTECODE.md). It is not output parity.
+
+Protected throwing writes now commit their destination only on normal completion, so catch handlers
+observe the pre-instruction definition. Execution tests cover failed array/call/wide writes, checked
+casts, incoming parameters, loops, nested handlers and protected returns. Pipeline tests pass on
+JVM, JS and Wasm; the targeted Java exception-state and result-type oracle tests pass. These checks
+supplement the older combined snapshot above rather than replacing it with unrun suite totals.
 
 ## JVM-input reference preparation
 
@@ -81,9 +95,9 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 
 ## Remaining production blockers
 
-1. Exception SSA still has a known program-point bug: a handler can receive the block-end definition
-   of a register assigned after a throwing instruction. `SsaTryCatchTest` documents the wrong current
-   behavior. Correct exceptional transfer and dead-definition safety before trusting all SSA rewrites.
+1. The known exception-SSA program-point bug is repaired and execution-tested. Broader transformation
+   safety still needs work: expression motion must preserve potentially throwing operations and
+   their order relative to observable effects. The current tests are not a general semantic proof.
 2. Kotlin has 136 inputs with compiler errors or no output, plus three compilable outputs carrying
    error markers. Nullable signatures, boxed wrappers, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.

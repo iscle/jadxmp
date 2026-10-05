@@ -6,6 +6,7 @@ import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.pipeline.cfg.CfgBuilder
 import com.jadxmp.pipeline.cfg.Dominators
+import com.jadxmp.pipeline.cfg.ExceptionProgramPoints
 import com.jadxmp.pipeline.cfg.ExceptionEdgePruner
 import com.jadxmp.pipeline.cfg.NullMonitorLowering
 import com.jadxmp.pipeline.cfg.FixMultiEntryLoops
@@ -31,6 +32,7 @@ object PassNames {
     const val LOWER_NULL_MONITORS = "LowerNullMonitors"
     const val PRUNE_EXCEPTION_EDGES = "PruneExceptionEdges"
     const val FIX_MULTI_ENTRY_LOOPS = "FixMultiEntryLoops"
+    const val EXCEPTION_PROGRAM_POINTS = "ExceptionProgramPoints"
     const val DOMINATORS = "Dominators"
     const val SSA = "Ssa"
     const val TYPE_INFERENCE = "TypeInference"
@@ -118,6 +120,17 @@ class FixMultiEntryLoopsPass : MethodPass {
     override fun run(method: IrMethod, context: PassContext) {
         if (method.entryBlock == null) return
         FixMultiEntryLoops(method, context.cancellation).process()
+    }
+}
+
+/** Model exception transfer and successful result commits before ordinary CFG analysis. */
+class ExceptionProgramPointsPass : MethodPass {
+    override val name: String get() = PassNames.EXCEPTION_PROGRAM_POINTS
+    override val runAfter: List<String> get() = listOf(PassNames.PRUNE_EXCEPTION_EDGES, PassNames.FIX_MULTI_ENTRY_LOOPS)
+    override val runBefore: List<String> get() = listOf(PassNames.DOMINATORS)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        ExceptionProgramPoints(method, context.cancellation).run()
     }
 }
 
@@ -255,6 +268,7 @@ object AnalysisPipeline {
         LowerNullMonitorsPass(),
         PruneExceptionEdgesPass(),
         FixMultiEntryLoopsPass(),
+        ExceptionProgramPointsPass(),
         DominatorsPass(),
         SsaPass(),
         TypeInferencePass(),

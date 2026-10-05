@@ -12,6 +12,8 @@ internal fun requireDifferentialParity(
         if (assemblyFailures.isNotEmpty()) add("${assemblyFailures.size} assembly failure(s)")
         if (referenceFailures.isNotEmpty()) add("${referenceFailures.size} reference failure(s)")
         if (board.samples.size != discovered) add("only ${board.samples.size}/$discovered samples scored")
+        val missingCandidates = board.samples.filter { it.candidate == null }
+        if (missingCandidates.isNotEmpty()) add("missing candidate scores: ${missingCandidates.joinToString { it.sample }}")
         if (board.hasRegression()) add("regressions: ${board.regressions().joinToString { it.sample }}")
     }
     check(problems.isEmpty()) { "Differential accuracy gate failed: ${problems.joinToString("; ")}" }

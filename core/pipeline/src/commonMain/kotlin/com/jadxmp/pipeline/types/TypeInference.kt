@@ -48,12 +48,14 @@ class TypeInference(
         if (values.isEmpty()) return
         applyContextBounds()
         seedFixedTypes()
+        preserveResultCommitTypes()
         propagate()
         refineBitwiseBooleans()
         backtrackAmbiguous()
         repairRemaining()
         writeBack()
         retypeConstantOperands()
+        ReturnTypeValidation(method, cancellation).run()
     }
 
     /**
@@ -245,6 +247,16 @@ class TypeInference(
             if (produced.isTypeKnown && produced != IrType.UNKNOWN_OBJECT && produced != IrType.OBJECT) {
                 v.typeCell.fix(produced)
             }
+        }
+    }
+
+    /** A success-only commit copies exactly the producer's value and must retain its intrinsic type. */
+    private fun preserveResultCommitTypes() {
+        for (value in values) {
+            val def = value.assign.parent ?: continue
+            if (def[com.jadxmp.pipeline.PipelineAttrs.EXCEPTION_RESULT_COMMIT] != true) continue
+            val source = (def.getArg(0) as? RegisterOperand)?.ssaValue ?: continue
+            if (source.typeCell.immutable) value.typeCell.fix(source.type)
         }
     }
 

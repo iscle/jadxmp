@@ -15,6 +15,11 @@ Kotlin Multiplatform + Jetpack Compose **clean-room rewrite of the [jadx](https:
 3. **jadx is an oracle, not a source.** `reference/jadx` is cloned read-only at **`0e232fb3510ec86083af0055470163d3550957cd`**, the original project baseline. `tools:jadx-reference` verifies the clean checkout and builds the JVM oracle directly from that commit. The pin lives in `tools/jadx-reference/baseline.properties`; do not substitute a Maven release or advance it without an explicit baseline migration. Do **not** copy its code into `com.jadxmp.*`. "Correct output" = "what makes the corpus pass".
 4. **Fault isolation & no silent code loss.** One bad method must never crash a file; a transform that can't stay correct must bail to uglier-but-correct output.
 
+The single user-approved invalid-input policy is documented in [docs/INVALID-BYTECODE.md](docs/INVALID-BYTECODE.md).
+`trycatch/TestTryCatchMultiException2.smali` must match its verified SHA-256 and produce its exact invalid-return
+diagnostic. Its compilation failure remains visible as `EXPECTED_DIAGNOSTIC`, never parity. Missing diagnostics,
+changed input, crashes, extra errors or changed signal profiles fail the gate. Do not extend this policy implicitly.
+
 ## Layout at a glance
 ```
 core:binary-io   bytes, LEB128, MUTF8, inflate, zip, FileSystem (kotlinx-io) — the only IO module

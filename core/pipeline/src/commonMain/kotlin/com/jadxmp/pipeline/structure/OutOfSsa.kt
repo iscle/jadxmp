@@ -476,9 +476,9 @@ internal class OutOfSsa(
         }
     }
 
-    /** A block is protected (inside a `try`) if it has an exception edge to a handler entry. */
+    /** Source scope follows range membership, even on a nonthrowing result-commit block. */
     private fun isProtected(block: BasicBlock): Boolean =
-        block.successors.any { it.contains(PipelineAttrs.EXC_HANDLER) }
+        !block[PipelineAttrs.PROTECTING_HANDLERS].isNullOrEmpty()
 
     /** The handler blocks a block is protected by (its try membership), for scope comparison. */
     private fun protectingHandlers(block: BasicBlock): List<BasicBlock> =
