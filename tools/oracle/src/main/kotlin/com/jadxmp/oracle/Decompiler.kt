@@ -28,7 +28,7 @@ data class DecompilationResult(
  * temp file; [decompileFile] is a convenience for the on-disk corpus binaries.
  */
 interface Decompiler {
-    /** Human-readable identifier for scoreboard output, e.g. `"jadx-1.5.6"` or `"jadxmp"`. */
+    /** Human-readable identifier for scoreboard output, e.g. `"jadx-<commit>"` or `"jadxmp"`. */
     val name: String
 
     /**

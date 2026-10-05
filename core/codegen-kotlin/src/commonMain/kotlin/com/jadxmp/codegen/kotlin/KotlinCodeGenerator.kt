@@ -49,8 +49,8 @@ import com.jadxmp.ir.type.IrType
  * ### Deferred (documented TODOs — not attempted here)
  * coroutine state-machine → `suspend`; lambda/SAM reconstruction; exhaustive
  * null-safety (every reference is emitted non-null `T`); getter/setter → property fusion; extension
- * functions; and a **kotlinc-recompile oracle** (the Kotlin analogue of the javac recompile signal) so
- * this backend's accuracy can be measured against the corpus — currently there is none.
+ * functions. `tools:oracle:kotlinScoreboard` measures kotlinc acceptance; targeted oracle execution
+ * tests cover selected semantics. Neither establishes whole-corpus Kotlin correctness.
  */
 class KotlinCodeGenerator {
 

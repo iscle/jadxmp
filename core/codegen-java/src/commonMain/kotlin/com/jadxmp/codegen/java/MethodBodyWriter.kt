@@ -9,6 +9,7 @@ import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
 import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.CompareInstruction
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ArithOp
 import com.jadxmp.ir.insn.ConditionOp
@@ -669,7 +670,7 @@ internal class MethodBodyWriter(
                 code.add(" instanceof ")
                 emitTypeRef(referencedType(insn) ?: IrType.OBJECT)
             }
-            IrOpcode.CMP -> emitCompare(insn)
+            IrOpcode.CMP -> emitCompare(insn, minPrec)
             IrOpcode.IF -> emitIfExpr(insn as IfInstruction, minPrec)
             IrOpcode.TERNARY -> wrapped(Prec.TERNARY, minPrec) {
                 emitOperand(insn.getArg(0), Prec.TERNARY + 1)
@@ -933,21 +934,38 @@ internal class MethodBodyWriter(
     private fun IrType.isNumericPrimitive(): Boolean =
         this is IrType.Primitive && kind != TypeKind.BOOLEAN && kind != TypeKind.VOID
 
-    private fun emitCompare(insn: Instruction) {
-        // CMP produces -1/0/1; standalone it is rare (structuring folds it into an IF). Render via the
-        // matching boxed comparator so the fallback still compiles.
-        val a = insn.getArg(0)
-        val cls = when ((a.type as? IrType.Primitive)?.kind) {
-            com.jadxmp.ir.type.TypeKind.LONG -> "Long"
-            com.jadxmp.ir.type.TypeKind.FLOAT -> "Float"
-            com.jadxmp.ir.type.TypeKind.DOUBLE -> "Double"
-            else -> "Integer"
+    private fun emitCompare(insn: Instruction, minPrec: Int) {
+        val kind = (insn as? CompareInstruction)?.kind
+        if (kind == null || insn.argCount != 2) {
+            code.emitErrorMarker(method, "comparison without operand kind / NaN bias")
+            return
         }
-        code.add(cls).add(".compare(")
-        emitOperand(a, Prec.LOWEST)
-        code.add(", ")
-        emitOperand(insn.getArg(1), Prec.LOWEST)
-        code.add(")")
+        // ExpressionShaping keeps these inputs materialized. Refuse a malformed expression tree
+        // rather than duplicating a call, volatile read, or exception while expanding the comparison.
+        if (kind.nanResult != null && insn.args.any { it is InstructionOperand }) {
+            code.emitErrorMarker(method, "floating comparison requires materialized operands")
+            return
+        }
+        if (kind.nanResult == null) {
+            code.add("java.lang.Long.compare(")
+            emitOperand(insn.getArg(0), Prec.LOWEST)
+            code.add(", ")
+            emitOperand(insn.getArg(1), Prec.LOWEST)
+            code.add(")")
+            return
+        }
+        // IEEE comparisons deliberately consider signed zero equal; Float/Double.compare do not.
+        val low = kind.nanResult == -1
+        wrapped(Prec.TERNARY, minPrec) {
+            emitOperand(insn.getArg(0), Prec.RELATIONAL)
+            code.add(if (low) " > " else " < ")
+            emitOperand(insn.getArg(1), Prec.RELATIONAL + 1)
+            code.add(if (low) " ? 1 : " else " ? -1 : ")
+            emitOperand(insn.getArg(0), Prec.EQUALITY)
+            code.add(" == ")
+            emitOperand(insn.getArg(1), Prec.EQUALITY + 1)
+            code.add(if (low) " ? 0 : -1" else " ? 0 : 1")
+        }
     }
 
     private fun emitIfExpr(insn: IfInstruction, minPrec: Int) {

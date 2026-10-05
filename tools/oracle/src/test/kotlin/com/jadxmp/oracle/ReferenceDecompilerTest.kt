@@ -7,6 +7,14 @@ import org.junit.jupiter.api.Test
 
 class ReferenceDecompilerTest {
 
+    @Test
+    fun oracleActuallyLoadsOriginalCommitInsteadOfMavenRelease() {
+        assertEquals("0e232fb3510ec86083af0055470163d3550957cd", ReferenceDecompiler.DEFAULT_JADX_VERSION)
+        assertEquals(ReferenceDecompiler.DEFAULT_JADX_VERSION, jadx.api.JadxDecompiler.getVersion())
+        assertEquals("jadx-${ReferenceDecompiler.DEFAULT_JADX_VERSION}", ReferenceDecompiler().name)
+    }
+
+
     /**
      * End-to-end smoke test of the reference oracle plus two of the three accuracy signals:
      * jadx must decompile `corpus/binary/hello.dex` into a single `HelloWorld` class whose source

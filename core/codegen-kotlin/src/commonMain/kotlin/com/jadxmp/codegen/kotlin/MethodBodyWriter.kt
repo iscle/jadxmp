@@ -9,6 +9,7 @@ import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
 import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.CompareInstruction
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ArithOp
 import com.jadxmp.ir.insn.ConstStringInstruction
@@ -604,7 +605,7 @@ internal class MethodBodyWriter(
                     ) {
                         code.add("null")
                     } else {
-                        emitOperand(arg, KotlinPrec.LOWEST)
+                        emitOperandAsType(arg, method.returnType, KotlinPrec.LOWEST)
                     }
                 }
             }
@@ -638,7 +639,7 @@ internal class MethodBodyWriter(
                 code.add("[")
                 emitOperand(index, KotlinPrec.LOWEST)
                 code.add("] = ")
-                emitOperand(value, KotlinPrec.LOWEST)
+                emitOperandAsType(value, operandType(array).arrayElement, KotlinPrec.LOWEST)
             }
             else -> {
                 val result = insn.result
@@ -704,7 +705,7 @@ internal class MethodBodyWriter(
         code.add(".")
         emitFieldName(field)
         code.add(" = ")
-        emitOperand(insn.getArg(insn.argCount - 1), KotlinPrec.LOWEST)
+        emitOperandAsType(insn.getArg(insn.argCount - 1), field?.type, KotlinPrec.LOWEST)
     }
 
     private fun emitStaticPut(insn: Instruction) {
@@ -715,7 +716,7 @@ internal class MethodBodyWriter(
         }
         emitFieldName(field)
         code.add(" = ")
-        emitOperand(insn.getArg(insn.argCount - 1), KotlinPrec.LOWEST)
+        emitOperandAsType(insn.getArg(insn.argCount - 1), field?.type, KotlinPrec.LOWEST)
     }
 
     private fun emitFieldName(field: FieldRef?) {
@@ -746,6 +747,38 @@ internal class MethodBodyWriter(
             }
             is LiteralOperand -> code.add(KotlinLiterals.format(op))
             is InstructionOperand -> emitInsnExpr(op.instruction, minPrec)
+        }
+    }
+
+    /** DEX permits Boolean registers in numeric contexts; Kotlin requires an explicit 0/1 value. */
+    private fun emitOperandAsType(op: Operand, target: IrType?, minPrec: Int) {
+        if (operandType(op) == IrType.BOOLEAN && target is IrType.Primitive &&
+            target != IrType.BOOLEAN && target != IrType.VOID
+        ) {
+            emitBooleanAsNumber(op, target, minPrec)
+        } else if (op is InstructionOperand) {
+            emitInsnExpr(op.instruction, minPrec, target)
+        } else {
+            emitOperand(op, minPrec)
+        }
+    }
+
+    private fun emitBooleanAsNumber(op: Operand, target: IrType.Primitive, minPrec: Int) {
+        // Emit the operand once: field reads and calls can have observable side effects.
+        val needsConversion = target.kind == TypeKind.BYTE || target.kind == TypeKind.SHORT
+        wrapped(if (needsConversion) KotlinPrec.POSTFIX else KotlinPrec.LOWEST, minPrec) {
+            if (needsConversion) code.add("(")
+            code.add("if (")
+            emitOperand(op, KotlinPrec.LOWEST)
+            code.add(") ")
+            code.add(when (target.kind) {
+                TypeKind.LONG -> "1L else 0L"
+                TypeKind.FLOAT -> "1.0f else 0.0f"
+                TypeKind.DOUBLE -> "1.0 else 0.0"
+                TypeKind.CHAR -> "'\\u0001' else '\\u0000'"
+                else -> "1 else 0"
+            })
+            if (needsConversion) code.add(").").add(numericConversion(target))
         }
     }
 
@@ -897,7 +930,7 @@ internal class MethodBodyWriter(
         if (paren) code.add(")")
     }
 
-    private fun emitInsnExpr(insn: Instruction, minPrec: Int) {
+    private fun emitInsnExpr(insn: Instruction, minPrec: Int, expectedType: IrType? = null) {
         // Rule-4 F2 depth guard (see [MAX_EXPR_DEPTH]). Throwing past the cap lets the per-member backstop
         // convert the whole method to one honest marker instead of recursing into a StackOverflowError.
         // Increment/decrement are balanced on the normal path; a throw abandons this per-method writer, so
@@ -923,7 +956,7 @@ internal class MethodBodyWriter(
                     code.add("::class.java")
                 }
             }
-            IrOpcode.ARITH, IrOpcode.NEG -> emitArith(insn, minPrec)
+            IrOpcode.ARITH, IrOpcode.NEG -> emitArith(insn, minPrec, expectedType)
             IrOpcode.NOT -> wrapped(KotlinPrec.POSTFIX, minPrec) {
                 emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
                 code.add(".inv()")
@@ -949,7 +982,7 @@ internal class MethodBodyWriter(
                 code.add(" is ")
                 emitTypeRef(referencedType(insn) ?: IrType.OBJECT)
             }
-            IrOpcode.CMP -> emitCompare(insn)
+            IrOpcode.CMP -> emitCompare(insn, minPrec)
             IrOpcode.IF -> emitIfExpr(insn as IfInstruction, minPrec)
             IrOpcode.TERNARY -> wrapped(KotlinPrec.LOWEST, minPrec) {
                 // Kotlin has no ternary; `a ? b : c` is an `if` expression.
@@ -994,13 +1027,13 @@ internal class MethodBodyWriter(
             }
             IrOpcode.INSTANCE_GET -> emitInstanceGet(insn)
             IrOpcode.STATIC_GET -> emitStaticGet(insn)
-            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvoke(insn)
+            IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvokeExpression(insn)
             else -> emitUnknownExpr(insn)
         }
         exprDepth--
     }
 
-    private fun emitArith(insn: Instruction, minPrec: Int) {
+    private fun emitArith(insn: Instruction, minPrec: Int, expectedType: IrType?) {
         val op = (insn as? ArithInstruction)?.op
         if (op == null || op == ArithOp.NEGATE || insn.argCount < 2) {
             wrapped(KotlinPrec.PREFIX, minPrec) {
@@ -1018,11 +1051,29 @@ internal class MethodBodyWriter(
             return
         }
         val prec = op.kotlinPrecedence()
+        val resultType = insn.result?.type ?: expectedType
+        val booleanContext = (expectedType ?: resultType) == IrType.BOOLEAN
+        val booleanBitwise = (op == ArithOp.AND || op == ArithOp.OR || op == ArithOp.XOR) &&
+            (resultType == null || booleanContext) &&
+            (operandType(insn.getArg(0)) == IrType.BOOLEAN || operandType(insn.getArg(1)) == IrType.BOOLEAN) &&
+            (0..1).all { index ->
+                val arg = insn.getArg(index)
+                operandType(arg) == IrType.BOOLEAN ||
+                    (arg is LiteralOperand && arg.type == IrType.INT && arg.value in 0L..1L)
+            }
         wrapped(prec, minPrec) {
-            emitOperand(insn.getArg(0), prec)
+            emitArithmeticOperand(insn.getArg(0), booleanBitwise, resultType, prec)
             code.add(" ").add(op.kotlinSymbol()).add(" ")
-            emitOperand(insn.getArg(1), prec + 1)
+            // JVM/DEX shifts always consume an Int distance, including shifts of Long values.
+            val rightType = if (op == ArithOp.SHL || op == ArithOp.SHR || op == ArithOp.USHR) IrType.INT else resultType
+            emitArithmeticOperand(insn.getArg(1), booleanBitwise, rightType, prec + 1)
         }
+    }
+
+    private fun emitArithmeticOperand(arg: Operand, booleanBitwise: Boolean, resultType: IrType?, minPrec: Int) {
+        if (booleanBitwise && arg is LiteralOperand) code.add(if (arg.value == 0L) "false" else "true")
+        else if (booleanBitwise) emitOperand(arg, minPrec)
+        else emitOperandAsType(arg, resultType, minPrec)
     }
 
     private fun operandStartsWithMinus(op: Operand): Boolean = when (op) {
@@ -1041,6 +1092,12 @@ internal class MethodBodyWriter(
 
     private fun emitPrimitiveCast(insn: Instruction, minPrec: Int) {
         val target = insn.result?.type ?: IrType.INT
+        if (operandType(insn.getArg(0)) == IrType.BOOLEAN && target is IrType.Primitive &&
+            target != IrType.BOOLEAN && target != IrType.VOID
+        ) {
+            emitBooleanAsNumber(insn.getArg(0), target, minPrec)
+            return
+        }
         // Kotlin uses conversion functions (`x.toLong()`), not a `(T)` cast, for numeric conversions.
         wrapped(KotlinPrec.POSTFIX, minPrec) {
             emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
@@ -1058,12 +1115,38 @@ internal class MethodBodyWriter(
         else -> "toInt()"
     }
 
-    private fun emitCompare(insn: Instruction) {
-        // CMP (-1/0/1) is rare standalone (structuring folds it into an IF). Kotlin's `compareTo` matches.
-        emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
-        code.add(".compareTo(")
-        emitOperand(insn.getArg(1), KotlinPrec.LOWEST)
-        code.add(")")
+    private fun emitCompare(insn: Instruction, minPrec: Int) {
+        val kind = (insn as? CompareInstruction)?.kind
+        if (kind == null || insn.argCount != 2) {
+            code.emitErrorMarker(method, "comparison without operand kind / NaN bias")
+            return
+        }
+        // ExpressionShaping keeps these inputs materialized. Refuse a malformed expression tree
+        // rather than duplicating a call, volatile read, or exception while expanding the comparison.
+        if (kind.nanResult != null && insn.args.any { it is InstructionOperand }) {
+            code.emitErrorMarker(method, "floating comparison requires materialized operands")
+            return
+        }
+        if (kind.nanResult == null) {
+            emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
+            code.add(".compareTo(")
+            emitOperand(insn.getArg(1), KotlinPrec.LOWEST)
+            code.add(")")
+            return
+        }
+        // Statically typed IEEE comparisons preserve signed-zero equality and the DEX NaN bias.
+        val low = kind.nanResult == -1
+        wrapped(KotlinPrec.LOWEST, minPrec) {
+            code.add("if (")
+            emitOperand(insn.getArg(0), KotlinPrec.LOWEST)
+            code.add(if (low) " > " else " < ")
+            emitOperand(insn.getArg(1), KotlinPrec.LOWEST)
+            code.add(if (low) ") 1 else if (" else ") -1 else if (")
+            emitOperand(insn.getArg(0), KotlinPrec.LOWEST)
+            code.add(" == ")
+            emitOperand(insn.getArg(1), KotlinPrec.LOWEST)
+            code.add(if (low) ") 0 else -1" else ") 0 else 1")
+        }
     }
 
     private fun emitIfExpr(insn: IfInstruction, minPrec: Int) {
@@ -1120,7 +1203,7 @@ internal class MethodBodyWriter(
         code.add(factory).add("(")
         for (i in 0 until insn.argCount) {
             if (i > 0) code.add(", ")
-            emitOperand(insn.getArg(i), KotlinPrec.LOWEST)
+            emitOperandAsType(insn.getArg(i), element, KotlinPrec.LOWEST)
         }
         code.add(")")
     }
@@ -1313,10 +1396,31 @@ internal class MethodBodyWriter(
         var emitted = 0
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
-            emitOperand(insn.getArg(i), KotlinPrec.LOWEST)
+            val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
+            emitOperandAsType(insn.getArg(i), expectedType, KotlinPrec.LOWEST)
             emitted++
         }
         code.add(")")
+    }
+
+    private fun emitInvokeExpression(insn: Instruction) {
+        val invoke = insn as? InvokeInstruction
+        val ref = invoke?.methodRef
+        // Kotlin projects these Java factory results to Int!/Char!, while source declarations still
+        // retain Integer/Character. A reference cast reconciles the spelling without unboxing/reboxing
+        // (which could change identity). Only these non-null factories qualify; arbitrary wrapper
+        // returns may be null and must not acquire a throwing non-null cast.
+        val boxedFactory = invoke?.invokeKind == InvokeKind.STATIC && ref?.name == "valueOf" &&
+            ref.returnType == ref.declaringType &&
+            (ref.declaringType == IrType.objectType("java.lang.Integer") ||
+                ref.declaringType == IrType.objectType("java.lang.Character"))
+        if (boxedFactory) code.add("(")
+        emitInvoke(insn)
+        if (boxedFactory) {
+            code.add(" as ")
+            emitTypeRef(ref.returnType)
+            code.add(")")
+        }
     }
 
     private fun emitUnknownExpr(insn: Instruction) {

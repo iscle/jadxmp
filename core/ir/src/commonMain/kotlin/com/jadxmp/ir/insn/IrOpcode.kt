@@ -27,7 +27,6 @@ enum class IrOpcode {
     INSTANCE_OF,
 
     // --- comparisons ---
-    // TODO(cmp): add CompareInstruction carrying the fcmpl/fcmpg (and dcmpl/dcmpg) NaN bias when CMP is implemented.
     CMP, // long/float/double compare producing -1/0/1
     IF, // two-way conditional branch (operator on IfInstruction)
 

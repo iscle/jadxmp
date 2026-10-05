@@ -6,7 +6,7 @@ package com.jadxmp.oracle
  * recompiles with [KotlinAccuracySignals] (kotlinc via `kotlin-compiler-embeddable`).
  *
  * ## This is SELF-measurement, NOT a differential vs jadx
- * Unlike [SmaliScoreboardRunner] (jadx-1.5.6 vs jadxmp, scored PARITY/REGRESSION/IMPROVEMENT), there is no
+ * Unlike [SmaliScoreboardRunner] (pinned original jadx vs jadxmp, scored PARITY/REGRESSION/IMPROVEMENT), there is no
  * reference side here: jadx has no production Kotlin backend to diff against. The only question this board
  * answers is *does jadxmp's Kotlin output compile?* — reported as raw compiles-clean / compiles-with-warnings
  * / errors counts. No verdict is computed against jadx.
@@ -100,6 +100,11 @@ fun main() {
         val result = runCatching { jadxmpKotlin.decompileKotlin(sample, asm.dex!!) }
             .getOrElse { DecompilationResult(inputName = sample, classes = emptyList(), reportedErrors = 1) }
         val recompile = KotlinAccuracySignals.recompiles(result.classes, recompileClasspath)
+        if (System.getProperty("jadxmp.kotlin.diagnostics").toBoolean() && !recompile.success) {
+            println("\n--- Kotlin failure: $sample (${recompile.status}) ---")
+            result.classes.forEach { println("// ${it.fullName}\n${it.source}") }
+            recompile.errors.forEach(::println)
+        }
         byStatus.getValue(recompile.status) += sample
         // Cross-check the recompile PASS against jadxmp's own no-error signal: a sample that compiles but
         // carries jadxmp-reported errors is compile-but-flagged, never an evidenced Kotlin win.

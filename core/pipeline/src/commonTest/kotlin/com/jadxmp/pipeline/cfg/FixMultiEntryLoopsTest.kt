@@ -3,6 +3,10 @@ package com.jadxmp.pipeline.cfg
 import com.jadxmp.input.IndexType
 import com.jadxmp.input.Opcode
 import com.jadxmp.ir.attr.AttrFlag
+import com.jadxmp.ir.insn.CompareInstruction
+import com.jadxmp.ir.insn.CompareKind
+import com.jadxmp.ir.insn.RegisterOperand
+import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.insn.IfInstruction
 import com.jadxmp.ir.insn.SwitchInstruction
 import com.jadxmp.ir.node.IrMethod
@@ -76,6 +80,23 @@ class FixMultiEntryLoopsTest {
             method.blocks.size,
             "exactly one straight-line block is duplicated (bounded node-splitting)",
         )
+    }
+
+    @Test
+    fun duplicatedComparisonRetainsNanBias() {
+        val method = TestPipeline.buildMethod(multiEntryLoop(), methodName = "m")
+        TestPipeline.cfg(method)
+        // C is the shared body block. Add a comparison before its call so splitting must clone it.
+        val body = method.blocks.first { b -> b.instructions.any { it.offset == 3 } }
+        body.instructions.add(0, CompareInstruction(
+            CompareKind.DOUBLE_LESS,
+            RegisterOperand(1, IrType.INT),
+            listOf(RegisterOperand(2, IrType.DOUBLE), RegisterOperand(4, IrType.DOUBLE)),
+        ))
+        FixMultiEntryLoops(method).process()
+        val comparisons = method.blocks.flatMap { it.instructions }.filter { it.opcode == com.jadxmp.ir.insn.IrOpcode.CMP }
+        assertEquals(2, comparisons.size, "the shared comparison must be duplicated")
+        assertTrue(comparisons.all { it is CompareInstruction && it.kind == CompareKind.DOUBLE_LESS })
     }
 
     @Test

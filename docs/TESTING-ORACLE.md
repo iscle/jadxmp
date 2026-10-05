@@ -28,7 +28,7 @@ Java-source samples are stored as small `.smali`/`.class`/`.dex` fixtures in `co
 
 ### Layer B — the differential oracle (`tools:oracle`, JVM-only)
 This is what makes "at least as accurate" enforceable. A JVM-only harness that, for every input in the shared corpus:
-1. Runs **reference jadx** (`reference/jadx` as a library) → reference output + which of the 3 signals it passes.
+1. Runs **reference jadx** (original commit `0e232fb3510ec86083af0055470163d3550957cd`, built from `reference/jadx` by the isolated JVM-only `tools:jadx-reference` module) → reference output + which of the 3 signals it passes.
 2. Runs **jadxmp** (`core:api`) → our output + which signals it passes.
 3. Compares, and classifies each sample as: **PARITY** (we pass every signal jadx passes), **REGRESSION** (jadx passed a signal we fail), or **IMPROVEMENT** (we pass a signal jadx fails).
 4. Produces a scoreboard (counts per category, plus per-sample diffs).
@@ -72,6 +72,27 @@ Every module-owning agent (see `.claude/agents/`) is **test-first**:
 
 ## 5. Coverage & CI
 
-- **Kover** measures per-module coverage; the analysis "brains" (`core:pipeline` type-inference and region-structuring) carry the highest bars.
+- **Kover** coverage and enforced coverage thresholds are planned, not yet configured.
 - CI matrix builds and runs `commonTest` on jvm + wasmJs + js for every `core:*` module (proving portability *and* correctness on all targets), then runs `tools:oracle` on JVM as the regression gate.
 - The oracle scoreboard is published as a build artifact so accuracy trends are visible over time.
+
+## Original baseline and current limits
+
+The canonical pin is `tools/jadx-reference/baseline.properties`. The reference adapter verifies
+both the exact Git HEAD and a clean working tree on every build, including cached builds. It compiles
+only the original core, zip, input API, and DEX plugin sources in place, with dependencies matching
+that commit, leaving the reference checkout read-only. A runtime test verifies the loaded jadx
+manifest version agrees with the pin. The former Maven 1.5.6 oracle was a different baseline.
+
+`smaliScoreboard` is an enforced differential gate: after printing the full report it fails the
+Gradle process for regressions, assembly/reference failures, or missing/incomplete input. CI runs it
+and retains the log even on failure. `kotlinScoreboard` remains an informational compilation report;
+its known failures are not suppressed or presented as production readiness.
+
+`AccuracySignals.executeCheck` remains a stub; the blanket three-signal promise above describes
+the intended contract, not current coverage.
+Targeted oracle tests now compile and execute both generated languages for comparison edge cases
+and Kotlin primitive coercions. These tests fail the build, but do not establish whole-corpus semantic
+parity. Missing whole-corpus execution/lint/ABI/coverage gates and remaining scoreboard failures must be resolved
+before claiming production readiness. Readiness measurements and remaining work are recorded in
+`docs/PARITY-STATUS.md`.

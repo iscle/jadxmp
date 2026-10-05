@@ -1,6 +1,6 @@
 package com.jadxmp.pipeline.throwsinfer
 
-import com.jadxmp.codegen.CodegenKeys
+import com.jadxmp.ir.attr.SourceAttributes
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.IndexType
 import com.jadxmp.input.Opcode
@@ -56,7 +56,7 @@ class ThrowsInferenceTest {
     private fun infer(m: IrMethod) = ThrowsInference(root, ClassHierarchy(root)).apply(m)
 
     private fun throwsOf(m: IrMethod): List<String> =
-        (m[CodegenKeys.THROWS] ?: emptyList()).map { (it as IrType.Object).className }
+        (m[SourceAttributes.THROWS] ?: emptyList()).map { (it as IrType.Object).className }
 
     @Test
     fun checkedThrowIsDeclared() {
@@ -71,7 +71,7 @@ class ThrowsInferenceTest {
         setup()
         val m = method("boom", throwOf("Ljava/lang/IllegalStateException;"))
         infer(m)
-        assertNull(m[CodegenKeys.THROWS], "unchecked (RuntimeException family) must not be declared")
+        assertNull(m[SourceAttributes.THROWS], "unchecked (RuntimeException family) must not be declared")
     }
 
     @Test
@@ -130,7 +130,7 @@ class ThrowsInferenceTest {
         )
         val m = method("guarded", reader)
         infer(m)
-        assertNull(m[CodegenKeys.THROWS], "an exception caught by an enclosing catch must not be declared")
+        assertNull(m[SourceAttributes.THROWS], "an exception caught by an enclosing catch must not be declared")
     }
 
     @Test
@@ -150,7 +150,7 @@ class ThrowsInferenceTest {
         )
         val m = method("finallyRethrow", reader)
         infer(m)
-        assertNull(m[CodegenKeys.THROWS], "a `finally` catch-all re-throw must not declare `throws Throwable`")
+        assertNull(m[SourceAttributes.THROWS], "a `finally` catch-all re-throw must not declare `throws Throwable`")
     }
 
     @Test
@@ -215,6 +215,6 @@ class ThrowsInferenceTest {
             )),
         )
         infer(m)
-        assertNull(m[CodegenKeys.THROWS])
+        assertNull(m[SourceAttributes.THROWS])
     }
 }

@@ -36,9 +36,6 @@ kotlin {
         commonMain.dependencies {
             api(projects.core.ir)
             api(projects.core.input)
-            // For the shared codegen-facing attribute keys (CodegenKeys.THROWS) the analysis passes
-            // populate. core:codegen depends only on core:ir, so this stays acyclic.
-            implementation(projects.core.codegen)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

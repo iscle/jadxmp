@@ -147,7 +147,7 @@ class ConstructorReconstructionPass : MethodPass {
 
 /**
  * Infer each method's checked-exception `throws` clause (whole-program, via the call graph). Sets
- * [com.jadxmp.codegen.CodegenKeys.THROWS] for codegen. Independent of CFG/SSA (works off a lightweight
+ * [com.jadxmp.ir.attr.SourceAttributes.THROWS] for codegen. Independent of CFG/SSA (works off a lightweight
  * re-decode), so it may run any time after the model is built.
  */
 class ThrowsInferencePass : MethodPass {

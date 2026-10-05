@@ -2,7 +2,7 @@ package com.jadxmp.oracle
 
 /**
  * The **branchy differential scoreboard**: assembles the jadx-derived `corpus/smali` tree to dex and
- * runs the jadx-1.5.6 reference vs jadxmp (`core:api`) over every sample, scoring the three accuracy
+ * runs the pinned original jadx reference vs jadxmp (`core:api`) over every sample, scoring the three accuracy
  * signals and classifying each as PARITY / REGRESSION / IMPROVEMENT. This is where Phase-3 control-flow
  * structuring is actually measured against jadx.
  *
@@ -42,8 +42,7 @@ fun main() {
 
     val inputs = Corpus.smaliInputs(categories)
     if (inputs.isEmpty()) {
-        println("No smali inputs found under ${Corpus.smaliDir()} (categories=${categories.ifEmpty { "ALL" }})")
-        return
+        error("No smali inputs found under ${Corpus.smaliDir()} (categories=${categories.ifEmpty { "ALL" }})")
     }
 
     val board = Scoreboard()
@@ -82,6 +81,7 @@ fun main() {
     }
 
     print(renderSmaliReport(board, inputs.size, assemblyFailed, referenceFailed))
+    requireDifferentialParity(board, inputs.size, assemblyFailed, referenceFailed)
 }
 
 private fun dumpSample(
@@ -128,7 +128,7 @@ private fun renderSmaliReport(
     referenceFailed: List<String>,
 ): String = buildString {
     val scored = board.samples
-    appendLine("=== jadxmp smali differential scoreboard (jadx-1.5.6 vs jadxmp core:api) ===")
+    appendLine("=== jadxmp smali differential scoreboard (jadx-${ReferenceDecompiler.DEFAULT_JADX_VERSION} vs jadxmp core:api) ===")
     appendLine("smali files discovered : $totalDiscovered")
     appendLine("assembled + scored     : ${scored.size}")
     appendLine("assembly failures      : ${assemblyFailed.size}")
@@ -161,7 +161,12 @@ private fun renderSmaliReport(
     appendLine()
 
     val regressions = board.regressions()
-    appendLine(if (board.hasRegression()) "GATE: FAIL — ${regressions.size} regression(s)" else "GATE: PASS — zero regressions")
+    val complete = assemblyFailed.isEmpty() && referenceFailed.isEmpty() && scored.size == totalDiscovered
+    appendLine(when {
+        !complete -> "GATE: FAIL — incomplete corpus measurement"
+        board.hasRegression() -> "GATE: FAIL — ${regressions.size} regression(s)"
+        else -> "GATE: PASS — zero regressions"
+    })
     appendLine()
 
     if (regressions.isNotEmpty()) {

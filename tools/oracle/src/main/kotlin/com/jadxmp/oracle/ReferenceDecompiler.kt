@@ -2,11 +2,11 @@ package com.jadxmp.oracle
 
 import jadx.api.JadxArgs
 import jadx.api.JadxDecompiler
-import java.io.File
+import java.util.Properties
 import java.nio.file.Files
 
 /**
- * The **reference oracle**: runs upstream jadx (from Maven Central, see build.gradle.kts) over a
+ * The **reference oracle**: runs the original jadx commit (see tools/jadx-reference/baseline.properties) over a
  * dex/apk/jar and returns the decompiled Java per class. This is the yardstick jadxmp is measured
  * against — "at least as accurate as jadx" is defined by these outputs.
  *
@@ -14,9 +14,9 @@ import java.nio.file.Files
  * classpath is auto-discovered to handle `.dex`/`.apk`. Bytes are staged to a short-lived temp file
  * (jadx loads from files), named by content magic so jadx picks the right input plugin.
  */
-class ReferenceDecompiler(jadxVersion: String = DEFAULT_JADX_VERSION) : Decompiler {
+class ReferenceDecompiler : Decompiler {
 
-    override val name: String = "jadx-$jadxVersion"
+    override val name: String = "jadx-$DEFAULT_JADX_VERSION"
 
     override val errorMarkers: List<String> = ErrorMarkers.JADX
 
@@ -49,7 +49,13 @@ class ReferenceDecompiler(jadxVersion: String = DEFAULT_JADX_VERSION) : Decompil
     }
 
     companion object {
-        /** Kept in sync with the jadx coordinates pinned in build.gradle.kts. */
-        const val DEFAULT_JADX_VERSION: String = "1.5.6"
+        /** Loaded from the same pin that builds the oracle; a release cannot silently replace it. */
+        val DEFAULT_JADX_VERSION: String = Properties().run {
+            val resource = requireNotNull(
+                ReferenceDecompiler::class.java.getResourceAsStream("/jadxmp-reference/baseline.properties"),
+            ) { "Missing pinned jadx baseline metadata" }
+            resource.use { load(it) }
+            getProperty("revision")
+        }
     }
 }

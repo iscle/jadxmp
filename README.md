@@ -50,13 +50,20 @@ Requires a recent JDK and the Android SDK (used by the DEX-parsing test tooling;
 # Web app — JS (slower, older browsers)
 ./gradlew :webApp:jsBrowserDevelopmentRun
 
-# Run the engine tests
-./gradlew allTests
+# Run the engine tests (JVM and Node-hosted JS/Wasm)
+./gradlew jvmTest jsNodeTest wasmJsNodeTest
+
+# Set up the exact oracle reference (first time only)
+git clone https://github.com/skylot/jadx.git reference/jadx
+git -C reference/jadx checkout --detach 0e232fb3510ec86083af0055470163d3550957cd
+
+# Oracle tests and accuracy reports
+./gradlew :tools:oracle:test :tools:oracle:smaliScoreboard :tools:oracle:kotlinScoreboard --continue
 ```
 
 ## Status & accuracy
 
-jadxmp performs an end-to-end decompile today and is graded continuously by a differential oracle against **jadx 1.5.6** over a branchy smali corpus. Many programs decompile to compilable, jadx-parity output; a long tail of harder control-flow structuring and code-reconstruction cases is still being closed. It is **not** yet a drop-in jadx replacement.
+jadxmp performs an end-to-end decompile today and is graded continuously by a differential oracle against **the original jadx commit `0e232fb3510ec86083af0055470163d3550957cd`** over a branchy smali corpus. Many programs decompile to compilable, jadx-parity output; a long tail of harder control-flow structuring and code-reconstruction cases is still being closed. It is **not** yet a drop-in jadx replacement.
 
 ## Credits & license
 

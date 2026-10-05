@@ -8,6 +8,8 @@ import com.jadxmp.input.SwitchPayload
 import com.jadxmp.ir.attr.AttrKey
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ArithOp
+import com.jadxmp.ir.insn.CompareInstruction
+import com.jadxmp.ir.insn.CompareKind
 import com.jadxmp.ir.insn.ConditionOp
 import com.jadxmp.ir.insn.ConstStringInstruction
 import com.jadxmp.ir.insn.FieldInstruction
@@ -163,9 +165,17 @@ class MethodDecoder(
             }
 
             // ---- comparisons producing -1/0/1 ----
-            Opcode.CMP_LONG -> make(cmp(reg(0, IrType.INT), reg(1, IrType.LONG), reg(2, IrType.LONG)))
-            Opcode.CMPL_FLOAT, Opcode.CMPG_FLOAT -> make(cmp(reg(0, IrType.INT), reg(1, IrType.FLOAT), reg(2, IrType.FLOAT)))
-            Opcode.CMPL_DOUBLE, Opcode.CMPG_DOUBLE -> make(cmp(reg(0, IrType.INT), reg(1, IrType.DOUBLE), reg(2, IrType.DOUBLE)))
+            Opcode.CMP_LONG, Opcode.CMPL_FLOAT, Opcode.CMPG_FLOAT,
+            Opcode.CMPL_DOUBLE, Opcode.CMPG_DOUBLE -> {
+                val kind = when (opcode) {
+                    Opcode.CMP_LONG -> CompareKind.LONG
+                    Opcode.CMPL_FLOAT -> CompareKind.FLOAT_LESS
+                    Opcode.CMPG_FLOAT -> CompareKind.FLOAT_GREATER
+                    Opcode.CMPL_DOUBLE -> CompareKind.DOUBLE_LESS
+                    else -> CompareKind.DOUBLE_GREATER
+                }
+                make(CompareInstruction(kind, reg(0, IrType.INT), listOf(reg(1, kind.operandType), reg(2, kind.operandType))))
+            }
 
             // ---- monitors ----
             Opcode.MONITOR_ENTER -> make(Instruction(IrOpcode.MONITOR_ENTER, result = null, args = listOf(reg(0, IrType.UNKNOWN_OBJECT))))
@@ -327,8 +337,6 @@ class MethodDecoder(
     private fun cast(result: RegisterOperand, arg: RegisterOperand) =
         Instruction(IrOpcode.CAST, result, listOf(arg))
 
-    private fun cmp(result: RegisterOperand, a: RegisterOperand, b: RegisterOperand) =
-        Instruction(IrOpcode.CMP, result, listOf(a, b))
 
     private fun aget(result: RegisterOperand, input: InputInstruction): Instruction {
         val array = RegisterOperand(input.register(1), IrType.array(result.type))

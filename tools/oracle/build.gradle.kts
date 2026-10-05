@@ -1,6 +1,6 @@
 // tools:oracle — the differential accuracy harness (JVM-only, never shipped to an app).
 //
-// Runs reference jadx (from Maven Central) as the accuracy oracle over the shared corpus,
+// Runs reference jadx (from the pinned original commit) as the accuracy oracle over the shared corpus,
 // scores the three accuracy signals (no-error / recompiles / executes-check), and — once
 // core:api exists — diffs jadxmp output against it as PARITY / REGRESSION / IMPROVEMENT.
 //
@@ -19,11 +19,7 @@ kotlin {
     jvmToolchain(21)
 }
 
-// jadx reference oracle — pinned to the latest stable release on Maven Central.
-// Declared directly here (not in the shared multiplatform version catalog) because these are
-// JVM-only libraries that never participate in a wasm/js build; keeping them out of libs keeps
-// the engine catalog wasm-clean.
-val jadxVersion = "1.5.6"
+// Original jadx commit is compiled by the isolated JVM-only reference adapter.
 val smaliVersion = "3.0.9"
 // The kotlinc recompile signal is invoked in-process via kotlin-compiler-embeddable, pinned to the SAME
 // Kotlin version the engine targets (libs.versions.kotlin) so the signal measures the language jadxmp
@@ -38,8 +34,7 @@ val kotlinCompilerVersion =
 
 dependencies {
     // (a) reference decompiler + (its) dex/apk front-end.
-    implementation("io.github.skylot:jadx-core:$jadxVersion")
-    implementation("io.github.skylot:jadx-dex-input:$jadxVersion")
+    implementation(project(":tools:jadx-reference"))
 
     // (b) the jadxmp candidate under test — the whole point of the differential harness.
     implementation(projects.core.api)
@@ -105,6 +100,7 @@ tasks.register<JavaExec>("kotlinScoreboard") {
     group = "verification"
     description = "Assemble corpus/smali to dex and print the jadxmp Kotlin-output kotlinc-recompile self-scoreboard."
     mainClass.set("com.jadxmp.oracle.KotlinScoreboardRunnerKt")
+    System.getProperty("jadxmp.kotlin.diagnostics")?.let { systemProperty("jadxmp.kotlin.diagnostics", it) }
     classpath = sourceSets["main"].runtimeClasspath
     System.getProperty("jadxmp.smali.categories")?.let { systemProperty("jadxmp.smali.categories", it) }
     // Same freshness discipline: always re-run against a freshly-built candidate.

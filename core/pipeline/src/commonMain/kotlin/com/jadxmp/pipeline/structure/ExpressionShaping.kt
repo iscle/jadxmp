@@ -86,6 +86,9 @@ internal class ExpressionShaping(
         if (useIndex <= defIndex) return false
         // Do not inline into a φ (should already be gone) or into another already-wrapped position.
         if (useInsn.opcode == IrOpcode.PHI) return false
+        // Floating CMP expands to ordered tests that read each operand more than once. Keep its
+        // inputs materialized so calls, field reads and throwing expressions execute exactly once.
+        if (useInsn.opcode == IrOpcode.CMP) return false
 
         // Order-preservation (rule 4): a memory READ, a CALL, or a CHECK_CAST observes/mutates memory or
         // throws, so sinking it to its use may only cross INERT instructions — non-throwing, memory-

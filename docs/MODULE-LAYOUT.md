@@ -22,6 +22,11 @@ Naming: Gradle path `core:xxx`, package root `com.jadxmp.xxx`. Type-safe project
 
 If `core:pipeline` exceeds ~15k LOC, split along stage boundaries — the pass framework interface (`Pass`, `PassContext`, ordering) lives in `core:ir` or a tiny `core:pass-api` so sub-modules can register passes without a cycle. Decide at that point, not before.
 
+Shared source metadata (parameter names, checked exceptions, and loop-header instructions) belongs
+to `core:ir`'s `SourceAttributes`. Analysis writes these canonical identity-based keys and emitters
+read them; `core:codegen`'s `CodegenKeys` remains a compatibility facade using the same instances.
+The pipeline must not depend on codegen merely to communicate analysis results.
+
 ## Application & UI modules
 
 | Module | Type | Notes |
@@ -41,7 +46,7 @@ If `core:pipeline` exceeds ~15k LOC, split along stage boundaries — the pass f
 
 ## Dependency rules (enforced, not aspirational)
 
-1. Engine modules (`core:*`) must configure and compile for **wasmJs**. CI builds `:core:xxx:compileKotlinWasmJs` for each. A dependency that breaks wasm is rejected.
+1. Engine modules (`core:*`) must configure and compile for **wasmJs**. CI runs `jsNodeTest` and `wasmJsNodeTest` across all core modules, compiling their production code and executing their common tests. A dependency that breaks wasm is rejected.
 2. No `core:*` module depends on a `ui:*` or `*App` module. Dependencies point **down** the table only.
 3. `ui:*` depends on the engine **only through `core:api`** — never on `core:pipeline`/`core:ir` internals.
 4. JVM-only capabilities (metadata decode, mapping formats, apksig) enter through interfaces defined in `core:api`, implemented in JVM-only modules injected by `desktopApp`/`androidApp`. The common core degrades gracefully without them.

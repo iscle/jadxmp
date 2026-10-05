@@ -75,3 +75,10 @@ step before they can join the corpus as `.class`/`.dex` fixtures.
   210 `.smali` files. Counts above reflect what is actually present in
   `reference/jadx` at import time — trust the numbers here, not the round figure.
 </content>
+
+## jadxmp-authored regression fixtures
+
+`smali/arith/CompareSemantics.smali` is an original jadxmp fixture, not an imported upstream test.
+It exercises all five DEX comparison opcodes, NaNs, signed zeros, long extrema, expression precedence,
+and evaluation order. The oracle tests compile and execute Java and Kotlin output against explicit
+DEX-semantic expectations.

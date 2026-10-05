@@ -7,6 +7,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,6 +20,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Read original jadx baseline
+        id: jadx-baseline
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          properties = dict(
+              line.split('=', 1)
+              for line in Path('tools/jadx-reference/baseline.properties').read_text().splitlines()
+              if line and not line.startswith('#')
+          )
+          revision = properties['revision']
+          repository = re.fullmatch(r'https://github.com/([\w.-]+/[\w.-]+)\.git', properties['repository'])
+          if not re.fullmatch(r'[0-9a-f]{40}', revision) or repository is None:
+              raise SystemExit('The jadx baseline must specify a full commit and a GitHub repository')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\nrepository={repository[1]}\n')
+          PY
+
+      - name: Check out original jadx oracle
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.jadx-baseline.outputs.repository }}
+          ref: ${{ steps.jadx-baseline.outputs.revision }}
+          path: reference/jadx
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -35,23 +68,82 @@ jobs:
       - name: Compile (all common + JVM)
         run: ./gradlew compileKotlinJvm --stacktrace
 
-      - name: Wasm-safety check (engine must compile for wasmJs)
-        run: ./gradlew :core:pipeline:compileKotlinWasmJs :core:ir:compileKotlinWasmJs :core:api:compileKotlinWasmJs --stacktrace
+      # jvmTest selects KMP tests; the plain-JVM oracle's test task must be requested separately.
+      # The oracle adapter verifies the reference commit and clean checkout before compilation.
+      - name: Run JVM unit and oracle harness tests
+        run: ./gradlew jvmTest :tools:oracle:test --stacktrace
 
-      - name: Run JVM unit tests
-        run: ./gradlew jvmTest --stacktrace
+      - name: Run differential accuracy gate
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build/reports/oracle
+          ./gradlew :tools:oracle:smaliScoreboard --console=plain --stacktrace 2>&1 | tee build/reports/oracle/smali.log
+
+      # Kotlin currently reports substantial unsupported output. Preserve its measurements without
+      # confusing its informational compilation scoreboard with the Java differential regression gate.
+      - name: Record Kotlin accuracy report (informational)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build/reports/oracle
+          ./gradlew :tools:oracle:kotlinScoreboard --console=plain --stacktrace 2>&1 | tee build/reports/oracle/kotlin.log
+
+      - name: Upload accuracy reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: accuracy-reports
+          path: 'build/reports/oracle/*.log'
+          if-no-files-found: ignore
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-reports
+          name: test-reports-jvm
           path: '**/build/reports/tests/**'
+          if-no-files-found: ignore
+
+  engine-node-tests:
+    name: Engine tests (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [js, wasmJs]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # Every core module enables nodejs(); the root selector runs all of those commonTest suites
+      # and compiles their production code. Browser-only UI tests remain outside this engine gate.
+      - name: Run engine common tests in Node
+        run: ./gradlew ${{ matrix.target }}NodeTest --stacktrace
+
+      - name: Upload engine test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.target }}
+          path: 'core/**/build/reports/tests/**'
           if-no-files-found: ignore
 
   desktop:
     name: Desktop artifact (${{ matrix.name }})
-    needs: test
+    needs: [test, engine-node-tests]
     strategy:
       fail-fast: false
       matrix:

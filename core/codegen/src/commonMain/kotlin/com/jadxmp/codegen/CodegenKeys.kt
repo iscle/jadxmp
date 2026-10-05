@@ -1,6 +1,7 @@
 package com.jadxmp.codegen
 
 import com.jadxmp.ir.attr.AttrKey
+import com.jadxmp.ir.attr.SourceAttributes
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.type.IrType
 
@@ -14,6 +15,9 @@ import com.jadxmp.ir.type.IrType
  * [com.jadxmp.ir.insn.ConstStringInstruction], [com.jadxmp.ir.insn.TypeInstruction], …), which
  * producer (pipeline) and consumers (both codegen backends) share directly. Only the keys below,
  * which describe an `IrMethod` or a `LoopRegion` rather than an instruction, remain as attributes.
+ *
+ * Compatibility facade for [SourceAttributes]. The IR owns the canonical keys so pipeline analysis
+ * does not depend on code generation. These aliases must retain the exact same key instances.
  */
 object CodegenKeys {
     /**
@@ -21,10 +25,10 @@ object CodegenKeys {
      * absent the backend generates stable type-based names. The pipeline's debug-info / naming pass
      * populates this.
      */
-    val PARAM_NAMES: AttrKey<List<String>> = AttrKey("codegen.paramNames")
+    val PARAM_NAMES: AttrKey<List<String>> = SourceAttributes.PARAM_NAMES
 
     /** On an `IrMethod`: the declared checked exception types, rendered in a `throws` clause. */
-    val THROWS: AttrKey<List<IrType>> = AttrKey("codegen.throws")
+    val THROWS: AttrKey<List<IrType>> = SourceAttributes.THROWS
 
     /**
      * On a `LoopRegion` of kind `FOR`: the init and update clauses of the classic three-part `for`
@@ -32,6 +36,6 @@ object CodegenKeys {
      * the loop degrades to a `while`-style header. Structuring populates these when it recognises a
      * counting loop.
      */
-    val LOOP_INIT: AttrKey<Instruction> = AttrKey("codegen.loopInit")
-    val LOOP_UPDATE: AttrKey<Instruction> = AttrKey("codegen.loopUpdate")
+    val LOOP_INIT: AttrKey<Instruction> = SourceAttributes.LOOP_INIT
+    val LOOP_UPDATE: AttrKey<Instruction> = SourceAttributes.LOOP_UPDATE
 }

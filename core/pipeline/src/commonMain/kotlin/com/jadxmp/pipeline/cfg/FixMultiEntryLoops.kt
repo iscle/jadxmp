@@ -1,5 +1,6 @@
 package com.jadxmp.pipeline.cfg
 
+import com.jadxmp.ir.insn.CompareInstruction
 import com.jadxmp.ir.insn.ArithInstruction
 import com.jadxmp.ir.insn.ConstStringInstruction
 import com.jadxmp.ir.insn.FieldInstruction
@@ -314,6 +315,7 @@ internal class FixMultiEntryLoops(
             is PhiInstruction -> return null
             is SwitchInstruction -> return null // never straight-line; refuse rather than guess
             is ArithInstruction -> ArithInstruction(insn.op, res, args)
+            is CompareInstruction -> CompareInstruction(insn.kind, res, args)
             is IfInstruction -> IfInstruction(insn.condition, args)
             is InvokeCustomInstruction -> InvokeCustomInstruction(
                 insn.bootstrapMethod, insn.bootstrapKind, insn.callSiteName,

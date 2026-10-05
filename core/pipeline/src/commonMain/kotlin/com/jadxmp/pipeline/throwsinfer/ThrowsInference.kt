@@ -1,6 +1,6 @@
 package com.jadxmp.pipeline.throwsinfer
 
-import com.jadxmp.codegen.CodegenKeys
+import com.jadxmp.ir.attr.SourceAttributes
 import com.jadxmp.ir.insn.FieldInstruction
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.insn.InvokeInstruction
@@ -20,7 +20,7 @@ import com.jadxmp.pipeline.types.ClassHierarchy
  *
  * A Java method that can propagate a **checked** exception must declare it. This computes, for one
  * method, the set of checked exception types it can throw — from its own uncaught `throw`s and,
- * transitively, from the methods it calls — and stores it on [CodegenKeys.THROWS] for codegen's
+ * transitively, from the methods it calls — and stores it on [SourceAttributes.THROWS] for codegen's
  * `throws` clause.
  *
  * ## Soundness
@@ -49,7 +49,7 @@ class ThrowsInference(
     fun apply(method: IrMethod) {
         val throwsSet = throwsOf(method, HashSet())
         if (throwsSet.isNotEmpty()) {
-            method[CodegenKeys.THROWS] = throwsSet.sortedBy { it.toString() }
+            method[SourceAttributes.THROWS] = throwsSet.sortedBy { it.toString() }
         }
     }
 

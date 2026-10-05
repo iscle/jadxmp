@@ -1,16 +1,16 @@
 # jadxmp — Coding Conventions
 
 ## Language & style
-- Kotlin, `kotlin.code.style=official`. **ktlint** formats; **detekt** lints. Both run in CI and must be green. Don't hand-fight the formatter — run it.
+- Kotlin, `kotlin.code.style=official`. **ktlint** formatting and **detekt** linting are planned quality gates; their plugins and CI tasks are not configured yet. Follow official style and do not report these checks as passing until they exist and have run.
 - Prefer immutable data (`val`, `data class`, read-only collections) especially in `core:ir`. The IR is mutated by passes, but mutation points are explicit and documented.
 - Nullability is expressed in the type system — no `!!` in engine code except where an invariant is truly guaranteed and commented with *why*.
-- Public API of `core:*` modules is deliberate and small; the **binary-compatibility-validator** tracks it. Internal types are `internal`.
+- Public API of `core:*` modules is deliberate and small. The planned **binary-compatibility-validator** is not configured yet; review API changes explicitly. Internal types are `internal`.
 
 ## Multiplatform discipline (the cardinal rule)
 - Engine modules (`core:*`) are authored in **`commonMain`**. Before using any API, confirm it exists on wasmJs/js — not just JVM. When in doubt, check the Kotlin stdlib common surface.
 - **Forbidden in `commonMain`:** `java.*`, `javax.*`, `kotlinx.coroutines` blocking APIs, `ServiceLoader`, reflection, `System.*`, threads/`synchronized`. Use `expect/actual` or an injected interface instead, and put the actual in `jvmMain`/`wasmJsMain`.
 - All filesystem/byte-source access goes through `core:binary-io` interfaces. No other module imports kotlinx-io directly.
-- CI compiles every `core:*` module for wasmJs; a wasm-incompatible dependency or API is a build break, caught early.
+- CI runs every `core:*` module's common tests on JVM, JS Node, and Wasm Node, compiling the production code for each target. A wasm-incompatible dependency or API is a build break. Browser UI behavior still needs separate validation.
 
 ## Concurrency
 - Coroutines only. No `Thread`, `ExecutorService`, or `synchronized`. Use `Mutex`/`Semaphore` from kotlinx.coroutines and structured concurrency.
