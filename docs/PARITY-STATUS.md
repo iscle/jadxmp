@@ -40,16 +40,19 @@ in its report: `TestLoopRestore3` and `TestInsnsBeforeThis`.
 Compared with commit `29e21c9`, the one Java regression is fixed, Kotlin compilation improves from
 72 to 75 inputs, and unflagged Kotlin compilation improves from 69 to 72. Hosted CI on the preceding
 commits ran JVM/JS/Wasm tests and correctly blocked packaging and web deployment on the then-unfixed
-Java regression. Hosted JVM/JS/Wasm and accuracy gates now pass for `5c3df54`; desktop packaging
-and the gated web build are running.
+Java regression. Hosted CI for `5c3df54` and `70659c1` completed successfully, including JVM/JS/Wasm and accuracy
+gates, all four desktop platforms, and the gated web deployment. The JVM/JS/Wasm and accuracy
+gates also passed for `8e82fcd`; its packaging and web jobs are still running.
 
 ## JVM-input reference preparation
 
 The isolated adapter now includes the original Java-input plugin and its pinned raung-disasm
 0.1.1 dependency. Both plugin service descriptors are merged deterministically. Three new reference
 tests verify discovery of both plugins and direct class/class-only-JAR compilation and execution,
-without D8 conversion. The existing DEX smoke test also passes. Candidate JVM parsing/lowering
-remains unimplemented; the combined-suite counts above precede these additional reference tests.
+without D8 conversion. The existing DEX smoke test also passes. The new `core:input-jvm` foundation parses class envelopes, constant pools and raw attributes,
+with common malformed-input tests and javac interoperability tests. It is not registered as an input
+plugin yet: bytecode lowering and class/JAR decompilation remain unimplemented. The combined-suite
+counts above precede these additional reference and parser tests.
 
 ## Correctness repairs and execution evidence
 
@@ -86,7 +89,8 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
    execution coverage is missing; the smali gate still measures no-error and recompilation only.
-4. `core:input-jvm` is absent; full class/JAR input parity is not implemented.
+4. `core:input-jvm` has only its parser foundation; bytecode lowering, metadata and archive integration
+   are still required for class/JAR input support.
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
 

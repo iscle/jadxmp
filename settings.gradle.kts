@@ -45,6 +45,7 @@ include(":core:binary-io")
 include(":core:ir")
 include(":core:input")
 include(":core:input-dex")
+include(":core:input-jvm")
 
 include(":core:pipeline")
 include(":core:codegen")

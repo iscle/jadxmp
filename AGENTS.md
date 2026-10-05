@@ -18,7 +18,8 @@ Kotlin Multiplatform + Jetpack Compose **clean-room rewrite of the [jadx](https:
 ## Layout at a glance
 ```
 core:binary-io   bytes, LEB128, MUTF8, inflate, zip, FileSystem (kotlinx-io) — the only IO module
-core:input(-dex)  parse DEX/APK → normalized input model (JVM input is planned)
+core:input(-dex)  parse DEX/APK → normalized input model
+core:input-jvm    class-file parser foundation; JVM lowering/integration pending
 core:ir          IR: InsnNode, ArgType lattice, node model, region tree
 core:pipeline    pass framework + CFG/SSA/type-inference/structuring/naming (the engine)
 core:codegen(-java/-kotlin)  CodeWriter + metadata; Java & Kotlin backends
