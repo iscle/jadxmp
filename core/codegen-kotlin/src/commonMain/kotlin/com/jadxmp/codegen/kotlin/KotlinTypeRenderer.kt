@@ -2,7 +2,6 @@ package com.jadxmp.codegen.kotlin
 
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.ClassNodeRef
-import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.type.TypeKind
@@ -27,7 +26,7 @@ import com.jadxmp.ir.type.WildcardBound
  * representative so output is stable.
  */
 internal class KotlinTypeRenderer(
-    private val imports: ImportCollector,
+    private val imports: KotlinImports,
     // Deobfuscation/user rename overrides. [AliasMap.EMPTY] (the default) ⇒ the byte-identical
     // no-deobfuscation path: [aliasedClassName] returns every name verbatim, untouched.
     private val aliasMap: AliasMap = AliasMap.EMPTY,
@@ -81,11 +80,11 @@ internal class KotlinTypeRenderer(
     }
 
     /**
-     * Rewrite a binary class name to its deobfuscation/rename alias BEFORE it reaches [ImportCollector], so
+     * Rewrite a binary class name to its deobfuscation/rename alias BEFORE it reaches [KotlinImports], so
      * a renamed class reference gets the same import / short-vs-qualified treatment as any other name and —
      * via [KotlinSourceName.sourceSimpleName] — spells the *identical* simple name the class's definition
      * uses (never a half-rename). Only a class we actually renamed is rewritten; every kept/library class is
-     * returned verbatim, so the string handed to [ImportCollector] is unchanged and its decision is identical
+     * returned verbatim, so the string handed to [KotlinImports] is unchanged and its decision is identical
      * to the no-deobfuscation path. The empty-map fast path makes that guarantee free. Mirrors
      * `JavaTypeRenderer.aliasedClassName`.
      *

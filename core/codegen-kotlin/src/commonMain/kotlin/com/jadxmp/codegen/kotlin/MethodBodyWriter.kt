@@ -1,10 +1,10 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
-import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
@@ -77,7 +77,7 @@ private class ExpressionTooDeepException :
  */
 internal class MethodBodyWriter(
     private val code: CodeWriter,
-    imports: ImportCollector,
+    private val imports: KotlinImports,
     private val method: IrMethod,
     private val names: NameGenerator,
     paramNames: List<String>,
@@ -135,6 +135,7 @@ internal class MethodBodyWriter(
     private var exprDepth = 0
 
     init {
+        imports.reserveStaticAliases(names)
         for (p in paramNames) names.reserve(p)
     }
 
@@ -1325,8 +1326,14 @@ internal class MethodBodyWriter(
 
         if (emitProjectedInvoke(invoke)) return
 
+        val staticProjection = KotlinJvmStaticInvocationProjection.forInvoke(invoke)
         when {
-            kind == InvokeKind.STATIC -> emitClassName(target.declaringType)
+            kind == InvokeKind.STATIC -> {
+                if (staticProjection != null) {
+                    code.attachReference(ClassNodeRef(staticProjection.ownerName))
+                    code.add(imports.staticOwner(staticProjection.ownerName))
+                } else emitClassName(target.declaringType)
+            }
             kind == InvokeKind.SUPER -> code.add("super")
             else -> {
                 val receiver = invoke.instanceArg
@@ -1338,7 +1345,11 @@ internal class MethodBodyWriter(
         // Reference display resolves to the called method's alias (matching its definition, including any
         // deobfuscation/user override); empty map ⇒ exactly `sanitize(target.name)`, byte-identical.
         code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
-        emitArgList(invoke, if (kind == InvokeKind.STATIC) 0 else 1)
+        emitArgList(
+            invoke,
+            if (kind == InvokeKind.STATIC) 0 else 1,
+            preserveReferenceTypes = staticProjection?.preserveReferenceArgumentTypes == true,
+        )
     }
 
     private fun emitProjectedInvoke(invoke: InvokeInstruction): Boolean {
@@ -1487,17 +1498,20 @@ internal class MethodBodyWriter(
         },
     )
 
-    private fun emitArgList(insn: Instruction, firstArgIndex: Int) {
+    private fun emitArgList(insn: Instruction, firstArgIndex: Int, preserveReferenceTypes: Boolean = false) {
         code.add("(")
         var emitted = 0
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
             val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
             val argument = insn.getArg(i)
-            if (expectedType != null && isReferenceType(expectedType) && isNullOperand(argument)) {
-                // Untyped null can select a more specific overload or make unrelated overloads
-                // ambiguous. Retain the bytecode descriptor without rejecting the null value.
-                code.add("null as ")
+            if (expectedType != null && isReferenceType(expectedType) &&
+                (preserveReferenceTypes || isNullOperand(argument))
+            ) {
+                // Bind the descriptor where overload selection requires it; the nullable cast
+                // preserves null instead of inserting a check before the Java callee receives it.
+                emitOperand(argument, KotlinPrec.AS)
+                code.add(" as ")
                 emitTypeRef(expectedType)
                 code.add("?")
             } else {

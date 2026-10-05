@@ -7,7 +7,6 @@ import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
-import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.CodegenKeys
@@ -33,7 +32,7 @@ import com.jadxmp.ir.type.IrType
  * **jadx: ClassGen + CodeGen (Kotlin projection)**
  *
  * It shares the region-tree walk shape with the Java backend and the same two-pass import strategy
- * (pass 1 populates a shared [ImportCollector]; pass 2 emits the header then the identically-generated
+ * (pass 1 populates a shared [KotlinImports]; pass 2 emits the header then the identically-generated
  * body), but every *leaf* differs: Kotlin keywords, `val`/`var` properties, `companion object` for
  * static members, `fun` signatures with the return type after the parameters, `Unit` returns omitted,
  * and no semicolons.
@@ -68,11 +67,12 @@ class KotlinCodeGenerator {
         commentMap: CommentMap = CommentMap.EMPTY,
     ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
-        val imports = ImportCollector(packageName)
+        val imports = KotlinImports(packageName, cls, aliasMap)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
         ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
+        imports.finishDiscovery()
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -82,7 +82,11 @@ class KotlinCodeGenerator {
         }
         val importList = imports.imports()
         if (importList.isNotEmpty()) {
-            for (imp in importList) code.add("import ").add(KotlinIdentifiers.sanitizeQualified(imp)).newLine()
+            for ((target, alias) in importList) {
+                code.add("import ").add(KotlinIdentifiers.sanitizeQualified(target))
+                if (alias != null) code.add(" as ").add(alias)
+                code.newLine()
+            }
             code.newLine()
         }
         ClassEmitter(code, imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
@@ -95,7 +99,7 @@ class KotlinCodeGenerator {
     /** Writes a class declaration, its members, and nested classes into [code]. */
     private class ClassEmitter(
         private val code: CodeWriter,
-        private val imports: ImportCollector,
+        private val imports: KotlinImports,
         private val aliasMap: AliasMap = AliasMap.EMPTY,
         private val root: IrRoot? = null,
         private val commentMap: CommentMap = CommentMap.EMPTY,
@@ -705,6 +709,7 @@ class KotlinCodeGenerator {
             }
 
             val methodNames = NameGenerator()
+            imports.reserveStaticAliases(methodNames)
             val paramNames = resolveParamNames(method, methodNames)
             // `equals(Object)` must be rendered `equals(other: Any?)` to actually override
             // `Any.equals(other: Any?)`; a non-null `Any` parameter overrides nothing and won't compile.
