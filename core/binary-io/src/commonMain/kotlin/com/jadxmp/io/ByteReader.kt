@@ -128,8 +128,12 @@ public class ByteReader(
         var result = 0L
         var shift = 0
         while (true) {
-            if (shift > 35) throw ByteReaderException("uleb128 too long at $position")
             val byte = readU8()
+            // DEX LEB128 holds exactly a 32-bit quantity, at most five bytes. Check
+            // before accumulating so malformed sizes cannot wrap when converted to Int.
+            if (shift == 28 && byte > 0x0F) {
+                throw ByteReaderException("uleb128 exceeds 32 bits at $position")
+            }
             result = result or ((byte.toLong() and 0x7F) shl shift)
             if (byte and 0x80 == 0) break
             shift += 7
@@ -149,8 +153,12 @@ public class ByteReader(
         var shift = 0
         var byte: Int
         do {
-            if (shift > 31) throw ByteReaderException("sleb128 too long at $position")
             byte = readU8()
+            // The fifth payload has four value bits; its upper bits must extend bit 31's
+            // sign. It must also terminate, without consuming a byte from the next field.
+            if (shift == 28 && byte !in 0x00..0x07 && byte !in 0x78..0x7F) {
+                throw ByteReaderException("sleb128 exceeds 32 bits at $position")
+            }
             result = result or ((byte and 0x7F) shl shift)
             shift += 7
         } while (byte and 0x80 != 0)
