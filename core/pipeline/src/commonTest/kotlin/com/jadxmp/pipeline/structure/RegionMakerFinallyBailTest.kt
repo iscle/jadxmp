@@ -5,6 +5,8 @@ import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.type.IrType
+import com.jadxmp.ir.region.SequenceRegion
+import com.jadxmp.ir.region.TryCatchRegion
 import com.jadxmp.pipeline.PipelineAttrs
 import com.jadxmp.pipeline.support.FakeCatchHandler
 import com.jadxmp.pipeline.support.FakeCodeReader
@@ -154,14 +156,9 @@ class RegionMakerFinallyBailTest {
         assertHonestBail(reader, IrType.VOID, listOf(IrType.INT))
     }
 
-    // ---- TestNestedTryCatch4 / TestUnreachableCatch essence: a nested try INSIDE a handler ----
-    // Bail: "nested try in handler not supported yet".
-    // Both corpus methods desugar resource-closing / finally into catch handlers whose own bodies are
-    // protected by a further try (try-with-resources `addSuppressed` chains, nested try/catch/finally).
-    // finishTry bails on `isProtected(h)` for such a handler. Structuring it needs to open a nested try
-    // from the move-exception catch entry — a cross-cutting change, not a bounded placement fix.
+    // A handler entry can itself begin a protected range, including its MOVE_EXCEPTION binder.
     @Test
-    fun nestedTryInsideHandlerBails() {
+    fun nestedTryInsideHandlerPreservesBothCatchBodies() {
         val reader = FakeCodeReader(
             3,
             listOf(
@@ -178,6 +175,14 @@ class RegionMakerFinallyBailTest {
                 FakeTryBlock(2, 3, FakeCatchHandler(listOf("Ljava/lang/RuntimeException;"), listOf(5), -1)), // try2 in handler
             ),
         )
-        assertHonestBail(reader, IrType.VOID, emptyList())
+        val method = TestPipeline.buildMethod(reader, returnType = IrType.VOID)
+        TestPipeline.structured(method)
+        assertEquals(true, method[PipelineAttrs.FULLY_STRUCTURED])
+        val outer = (method.region as SequenceRegion).children.filterIsInstance<TryCatchRegion>().single()
+        val nested = (outer.catches.single().body as SequenceRegion).children.filterIsInstance<TryCatchRegion>().single()
+        assertEquals(listOf(IrType.objectType("java.lang.Exception")), outer.catches.single().exceptionTypes)
+        assertEquals(listOf(IrType.objectType("java.lang.RuntimeException")), nested.catches.single().exceptionTypes)
+        assertTrue(method.blocks.flatMap { it.instructions }.filterIsInstance<InvokeInstruction>()
+            .any { it.methodRef.name == "cleanup" && !it.contains(AttrFlag.DONT_GENERATE) })
     }
 }

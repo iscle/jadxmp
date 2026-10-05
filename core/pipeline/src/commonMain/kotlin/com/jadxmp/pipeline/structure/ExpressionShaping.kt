@@ -38,10 +38,51 @@ internal class ExpressionShaping(
     private val cancellation: CancellationCheck = CancellationCheck.None,
 ) {
     fun run() {
+        propagateCatchAliases()
         for (block in method.blocks) {
             cancellation.ensureActive()
             shapeBlock(block)
         }
+    }
+
+    /**
+     * Keep an immutable caught exception as the source of its plain copies, including cross-block
+     * rethrows. Java's precise-rethrow rule applies to the catch binding, but not to a fresh Throwable
+     * local initialized from it. Coalesced locals are excluded: they can be reassigned after a copy,
+     * in which case replacing that snapshot with a later read would change the thrown object.
+     */
+    private fun propagateCatchAliases() {
+        var changed: Boolean
+        do {
+            changed = false
+            for (block in method.blocks) {
+                cancellation.ensureActive()
+                val instructions = block.instructions.iterator()
+                while (instructions.hasNext()) {
+                    val move = instructions.next()
+                    if (move.opcode != IrOpcode.MOVE || move.argCount != 1) continue
+                    val sourceArg = move.getArg(0) as? RegisterOperand ?: continue
+                    val source = sourceArg.ssaValue ?: continue
+                    val value = move.result?.ssaValue ?: continue
+                    if (source.assign.parent?.opcode != IrOpcode.MOVE_EXCEPTION) continue
+                    if (source.localVar?.ssaValues?.size?.let { it > 1 } == true) continue
+                    if (value.localVar?.ssaValues?.size?.let { it > 1 } == true) continue
+                    if (source.type != value.type) continue
+                    val uses = value.uses.toList()
+                    if (uses.any { use -> use.parent?.args?.none { it === use } != false }) continue
+                    for (use in uses) {
+                        val replacement = RegisterOperand(source.regNum, use.type)
+                        use.parent!!.replaceArg(use, replacement) // the preflight above proves ownership
+                        value.removeUse(use)
+                        source.addUse(replacement)
+                    }
+                    source.removeUse(sourceArg)
+                    method.ssaValues.remove(value)
+                    instructions.remove()
+                    changed = true
+                }
+            }
+        } while (changed)
     }
 
     private fun shapeBlock(block: BasicBlock) {

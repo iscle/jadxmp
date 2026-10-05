@@ -240,6 +240,7 @@ internal class RegionMaker(
             verifyNoLeakedBranches()
             seq
         } catch (b: Bail) {
+            flagUnrenderable("unstructured control flow (${b.message})")
             return // discard: leave region null, method flagged unstructured
         }
         method.region = tree
@@ -749,7 +750,7 @@ internal class RegionMaker(
 
     /**
      * Whether [insn] can raise an exception at runtime. Only provably-safe operations return false: register
-     * moves/copies, constant loads (except `const-class`, which can raise a linkage error), non-throwing
+     * moves/copies, primitive constant loads, non-throwing
      * arithmetic (all but integer div/rem), comparisons/casts that never throw, and control transfer. Anything
      * that touches memory, calls a method, allocates, casts a reference (`check-cast`), or divides may throw.
      */
@@ -761,8 +762,8 @@ internal class RegionMaker(
         // `z = x instanceof T` folded into a use. Inspecting only `insn.opcode` would miss those (same
         // wrapped-operand blindness fixed in readsSsaValue/tryDefsEscape). Recurse through the operand tree.
         val opcodeThrows = when (insn.opcode) {
-            IrOpcode.CONST, IrOpcode.CONST_STRING,
-            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG,
+            IrOpcode.CONST,
+            IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.MOVE_EXCEPTION, IrOpcode.ONE_ARG,
             IrOpcode.NEG, IrOpcode.NOT, IrOpcode.CAST, IrOpcode.CMP,
             IrOpcode.GOTO, IrOpcode.NOP, IrOpcode.RETURN, IrOpcode.IF, IrOpcode.SWITCH,
             -> false
@@ -771,6 +772,7 @@ internal class RegionMaker(
                 val op = (insn as? com.jadxmp.ir.insn.ArithInstruction)?.op
                 op == com.jadxmp.ir.insn.ArithOp.DIV || op == com.jadxmp.ir.insn.ArithOp.REM
             }
+            // CONST_STRING can fail during string resolution/allocation; it is not exception-free.
             // INSTANCE_OF (like CONST_CLASS, check-cast, new-*) resolves a class reference → a linkage error
             // (NoClassDefFoundError / IncompatibleClassChangeError, JVM §5.4.3.1) — throwing.
             else -> true // invoke, field/array access, check-cast, const-class, instance-of, new-*, monitor, throw…
@@ -828,8 +830,14 @@ internal class RegionMaker(
         // holding any potentially-throwing instruction must NOT duplicate — a copy's exception could escape
         // the try's protection (rule 4). A pure block (moves/consts/non-div arithmetic) that merely sits in
         // the try range is such a vacuously-protected shared tail.
-        if (isProtected(block) && block.instructions.any { mayThrow(it) }) return false
-        if (cleanSucc(block).size != 1) return false // straight-line / forwarding / single-exit only
+        val cleanSuccessors = cleanSucc(block)
+        // A caught throw has only exceptional successors, hence no clean successor at all. Within
+        // its already-open handlers it is still a terminal tail, just like a return to the exit block.
+        val caughtThrow = cleanSuccessors.isEmpty() && block.instructions.lastOrNull()?.opcode == IrOpcode.THROW
+        val protectedRethrow = caughtThrow && !hasUnopenedHandler(block) &&
+            block.instructions.filter { isEmittable(it) }.all { it.opcode == IrOpcode.THROW }
+        if (isProtected(block) && block.instructions.any { mayThrow(it) } && !protectedRethrow) return false
+        if (cleanSuccessors.size != 1 && !caughtThrow) return false
         // An intra-block temp (a value defined then read again inside this block) used to forbid
         // duplication: codegen declares a variable once, so the second copy's use would be out of scope.
         // That is now safe **provided every such temp is a block-local temp** (marked BLOCK_LOCAL_TEMP —
@@ -850,6 +858,8 @@ internal class RegionMaker(
 
     /** A result whose value has no uses AND is not a coalesced (multi-version) local — i.e. truly dead. */
     private fun isGenuinelyDeadResult(insn: Instruction): Boolean {
+        // MOVE_EXCEPTION becomes a catch parameter, independently declared in every handler copy.
+        if (insn.opcode == IrOpcode.MOVE_EXCEPTION && !isEmittable(insn)) return false
         val v = insn.result?.ssaValue ?: return false
         if (v.useCount != 0) return false
         val lv = v.localVar
@@ -1552,14 +1562,14 @@ internal class RegionMaker(
      * or absent normal exits, or a try-scoped value that escapes and would need declaration hoisting.
      */
     private fun makeTry(head: BasicBlock, loopCtx: LoopCtx?): BuiltTry {
-        val allHandlers = protectingHandlers(head).toHashSet()
+        val allHandlers = protectingHandlers(head).toSet()
         if (allHandlers.isEmpty()) throw Bail("protected head without a handler")
         // Phase B nesting: some protecting handlers may already be open (emitted by an enclosing try — e.g. a
         // `finally` catch-all covering this catch body). Build a try over ONLY the still-unopened handlers; the
         // open ones' exception edges are recorded by that enclosing try. With nothing open (the common case)
         // this is exactly the full handler set, so every existing path is byte-for-byte unchanged.
         val openHere: Set<BasicBlock> = openHandlers[head] ?: emptySet()
-        val handlerSet = if (openHere.isEmpty()) allHandlers else allHandlers.filterTo(HashSet()) { it !in openHere }
+        val handlerSet = if (openHere.isEmpty()) allHandlers else allHandlers.filterTo(LinkedHashSet()) { it !in openHere }
         if (handlerSet.isEmpty()) throw Bail("protected head with all handlers already open")
 
         // javac's inlined-cleanup try/finally — including the SPLIT-RANGE form, where the finally body spans
@@ -1587,6 +1597,8 @@ internal class RegionMaker(
         // BRANCHY/nested cleanup the dedup finally-factoring paths above decline. Fires only for the genuine
         // {explicit catch + re-throwing branchy catch-all} shape; returns null otherwise (falls through).
         reconstructFaithfulCatchFinally(head, handlerSet, loopCtx)?.let { return it }
+
+        reconstructClosedSplitTry(head, handlerSet, openHere, loopCtx)?.let { return it }
 
         val protectedBlocks = collectProtectedRegion(head, handlerSet, openHere)
 
@@ -1708,6 +1720,83 @@ internal class RegionMaker(
     private fun computeExits(body: Set<BasicBlock>, out: LinkedHashSet<BasicBlock>) {
         out.clear()
         for (b in body) for (s in cleanSucc(b)) if (s !in body && s !== exit) out.add(s)
+    }
+
+    /**
+     * Reunite split ranges without changing which handler observes a thrown exception. The handler
+     * continuation fixes the region's follow. Every added throwing block must already be completely
+     * caught by a contained catch-all; its handler is checked by the same rule. Thus no exception from
+     * an unprotected gap can newly reach these outer catches. Unlike finally extraction, this keeps
+     * every cleanup, suppression call and rethrow at its original position.
+     */
+    private fun reconstructClosedSplitTry(
+        head: BasicBlock,
+        handlers: Set<BasicBlock>,
+        openHere: Set<BasicBlock>,
+        loopCtx: LoopCtx?,
+    ): BuiltTry? {
+        val singleRange = collectProtectedRegion(head, handlers, openHere)
+        if (method.blocks.none { b -> b !in singleRange && protectingHandlers(b).any { it in handlers } }) return null
+
+        val follows = LinkedHashSet<BasicBlock>()
+        for (handler in handlers) {
+            val ownRegion = handlerRegionBlocks(handler)
+            for (block in ownRegion) for (successor in cleanSucc(block)) {
+                if (successor !== exit && successor !in ownRegion) follows.add(successor)
+            }
+        }
+        val follow = follows.singleOrNull() ?: return null
+        if (follow === head || follow in handlers) return null
+
+        val body = LinkedHashSet<BasicBlock>()
+        val work = ArrayDeque<BasicBlock>()
+        work.add(head)
+        while (work.isNotEmpty()) {
+            cancellation.ensureActive()
+            val block = work.removeLast()
+            if (block === follow || block === exit || block in handlers) continue
+            if (!body.add(block)) continue
+            if (block !== head && head.id !in block.dominators) return null
+            if (block in loopHeaders || block.instructions.any {
+                    it.opcode == IrOpcode.MONITOR_ENTER || it.opcode == IrOpcode.MONITOR_EXIT
+                }) return null
+            for (successor in block.successors) {
+                // An already-open enclosing handler is outside this region, not a body block.
+                val isException = edgeKey(block, successor) in exceptionEdges
+                if (isException && successor in openHandlers[block].orEmpty()) continue
+                work.add(successor)
+            }
+        }
+        if (body.size <= singleRange.size) return null
+        val orderedHandlers = handlers.toList()
+        for (block in body) {
+            if (block !== head && block.predecessors.any { it !in body }) return null
+            val remainingHandlers = protectingHandlers(block).filter { it !in openHandlers[block].orEmpty() }
+            if (remainingHandlers.any { it in handlers }) {
+                // Existing earlier handlers stay nested inside these catches; catch priority is exact.
+                if (remainingHandlers.takeLast(handlers.size) != orderedHandlers) return null
+            } else if (block.instructions.any { isEmittable(it) && mayThrow(it) }) {
+                if (remainingHandlers.none { it in body && it[PipelineAttrs.EXC_HANDLER]?.catchAll == true }) return null
+            }
+            for (successor in cleanSucc(block)) {
+                if (successor !in body && successor !== follow && successor !== exit) return null
+            }
+        }
+        // A remaining shared range would force a later second placement of these same handlers.
+        if (method.blocks.any { b -> b !in body && protectingHandlers(b).any { it in handlers } }) return null
+        if (tryDefsEscape(body)) return null
+
+        val protectedBody = body.filter { b -> protectingHandlers(b).any { it in handlers } }
+        openTryHandlers(protectedBody, handlers)
+        val tryRegion = try {
+            withActiveExit(follow) {
+                makeRegion(head, chainFollow = follow, loopCtx = loopCtx, bodyRootHeader = null)
+            }
+        } finally {
+            closeTryHandlers(protectedBody, handlers)
+        }
+        for (block in protectedBody) for (handler in handlers) recordEdge(block, handler)
+        return finishTry(tryRegion, handlers, follow, loopCtx)
     }
 
     /**
@@ -2707,8 +2796,8 @@ internal class RegionMaker(
         loopCtx: LoopCtx?,
     ): BuiltTry {
         if (follow === exit) throw Bail("try body with no normal follow not supported yet")
-        // Order catches by handler position (approximates source/try-table order).
-        val handlers = handlerSet.sortedBy { it.order }
+        // The input table's order is semantic: a later catch-all must not eclipse an earlier typed catch.
+        val handlers = handlerSet.toList()
         val catches = ArrayList<CatchClause>(handlers.size)
         for (h in handlers) {
             val excHandler = h[PipelineAttrs.EXC_HANDLER] ?: throw Bail("handler without EXC_HANDLER")
@@ -2734,12 +2823,10 @@ internal class RegionMaker(
                 catches.add(CatchClause(catchTypesFor(excHandler), null, SequenceRegion()))
                 continue
             }
-            // A distinct handler (reached only exceptionally). A handler whose ENTRY is itself protected by an
-            // UNOPENED try (a genuine nested try starting at the catch entry) is not modelled — bail honestly.
-            // But a catch body covered by an already-open ENCLOSING `finally` catch-all (Phase B: the finally
-            // legitimately protects the catch body) is fine — [makeRegion] structures it, recursing into any
-            // nested try it contains via the ordinary [makeTry] gate; unstructurable ⇒ that recursion bails.
-            if (hasUnopenedHandler(h)) throw Bail("nested try in handler not supported yet")
+            // A handler may itself begin a protected range. Bind the caught value before recursing:
+            // makeRegion opens that nested try exactly as it does for any other protected block. The
+            // hidden MOVE_EXCEPTION is the outer catch parameter, not an executable statement inside
+            // the nested try, so its binding cannot gain an exception edge or be duplicated as a store.
             // The leading move-exception binds the caught
             // value; hide it (it becomes the catch param). makeRegion emits the catch body up to the shared
             // follow, recording/placing those blocks itself.

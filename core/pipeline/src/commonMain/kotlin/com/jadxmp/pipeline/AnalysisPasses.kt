@@ -6,6 +6,8 @@ import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.pipeline.cfg.CfgBuilder
 import com.jadxmp.pipeline.cfg.Dominators
+import com.jadxmp.pipeline.cfg.ExceptionEdgePruner
+import com.jadxmp.pipeline.cfg.NullMonitorLowering
 import com.jadxmp.pipeline.cfg.FixMultiEntryLoops
 import com.jadxmp.pipeline.constructor.ConstructorArgTernaryFold
 import com.jadxmp.pipeline.constructor.ConstructorReconstruction
@@ -26,6 +28,8 @@ import com.jadxmp.pipeline.types.TypeInference
 object PassNames {
     const val BUILD_CFG = "BuildCfg"
     const val METHOD_INLINE = "MethodInline"
+    const val LOWER_NULL_MONITORS = "LowerNullMonitors"
+    const val PRUNE_EXCEPTION_EDGES = "PruneExceptionEdges"
     const val FIX_MULTI_ENTRY_LOOPS = "FixMultiEntryLoops"
     const val DOMINATORS = "Dominators"
     const val SSA = "Ssa"
@@ -73,6 +77,28 @@ class MethodInlinePass : MethodPass {
 
     override fun run(method: IrMethod, context: PassContext) {
         MethodInliner(context.root).process(method)
+    }
+}
+
+/** Preserve the mandatory null-lock failure before CFG analysis and source reconstruction. */
+class LowerNullMonitorsPass : MethodPass {
+    override val name: String get() = PassNames.LOWER_NULL_MONITORS
+    override val runAfter: List<String> get() = listOf(PassNames.METHOD_INLINE)
+    override val runBefore: List<String> get() = listOf(PassNames.PRUNE_EXCEPTION_EDGES, PassNames.FIX_MULTI_ENTRY_LOOPS, PassNames.DOMINATORS)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        NullMonitorLowering(method, context.cancellation).run()
+    }
+}
+
+/** Prove impossible exception handlers unreachable before dominance and SSA are computed. */
+class PruneExceptionEdgesPass : MethodPass {
+    override val name: String get() = PassNames.PRUNE_EXCEPTION_EDGES
+    override val runAfter: List<String> get() = listOf(PassNames.METHOD_INLINE)
+    override val runBefore: List<String> get() = listOf(PassNames.FIX_MULTI_ENTRY_LOOPS, PassNames.DOMINATORS)
+
+    override fun run(method: IrMethod, context: PassContext) {
+        ExceptionEdgePruner(method, context.cancellation).run()
     }
 }
 
@@ -226,6 +252,8 @@ object AnalysisPipeline {
     val methodPasses: List<MethodPass> = listOf(
         BuildCfgPass(),
         MethodInlinePass(),
+        LowerNullMonitorsPass(),
+        PruneExceptionEdgesPass(),
         FixMultiEntryLoopsPass(),
         DominatorsPass(),
         SsaPass(),

@@ -612,7 +612,10 @@ internal class MethodBodyWriter(
             }
             IrOpcode.THROW -> {
                 code.add("throw ")
-                emitOperand(insn.getArg(0), KotlinPrec.LOWEST)
+                val failure = insn.getArg(0)
+                // JVM throw-null raises NPE; Kotlin rejects a nullable throw expression.
+                if (isNullOperand(failure)) code.add("kotlin.NullPointerException()")
+                else emitOperand(failure, KotlinPrec.LOWEST)
             }
             IrOpcode.BREAK -> code.add("break")
             IrOpcode.CONTINUE -> {
@@ -1490,7 +1493,16 @@ internal class MethodBodyWriter(
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
             val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
-            emitOperandAsType(insn.getArg(i), expectedType, KotlinPrec.LOWEST)
+            val argument = insn.getArg(i)
+            if (expectedType != null && isReferenceType(expectedType) && isNullOperand(argument)) {
+                // Untyped null can select a more specific overload or make unrelated overloads
+                // ambiguous. Retain the bytecode descriptor without rejecting the null value.
+                code.add("null as ")
+                emitTypeRef(expectedType)
+                code.add("?")
+            } else {
+                emitOperandAsType(argument, expectedType, KotlinPrec.LOWEST)
+            }
             emitted++
         }
         code.add(")")
