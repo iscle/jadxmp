@@ -9,13 +9,14 @@ package com.jadxmp.io
 public class ByteReaderException(message: String) : Exception(message)
 
 /**
- * A little-endian cursor over a [ByteArray] with the primitive reads the DEX/class/zip formats need.
+ * A bounded cursor over a [ByteArray] with the primitive reads the DEX/class/zip formats need.
  *
  * Pure `commonMain`: no `java.*`, no external dependencies, so it compiles and runs identically on
  * JVM, wasmJs, JS, and Android. This is the single foundation every binary parser in the engine
  * reads through.
  *
- * All multi-byte integers are little-endian (the DEX convention). Signed variants sign-extend;
+ * Multi-byte reads default to little-endian (DEX); explicitly named `BE` variants read JVM order.
+ * Signed variants sign-extend;
  * unsigned variants widen into the next larger signed Kotlin type so the value is always exact.
  */
 public class ByteReader(
@@ -111,6 +112,66 @@ public class ByteReader(
         val low = readU32()
         val high = readU32()
         return low or (high shl 32)
+    }
+
+    /** Read a JVM/class-file unsigned big-endian 16-bit value. */
+    public fun readU16BE(): Int {
+        require(2)
+        return (readU8() shl 8) or readU8()
+    }
+
+    /** Read a big-endian signed 32-bit value, preserving all bits. */
+    public fun readS32BE(): Int {
+        require(4)
+        return (readU8() shl 24) or (readU8() shl 16) or (readU8() shl 8) or readU8()
+    }
+
+    /** Read a big-endian unsigned 32-bit value without sign extension. */
+    public fun readU32BE(): Long = readS32BE().toLong() and 0xFFFF_FFFFL
+
+    /** Read a big-endian signed 64-bit value, preserving all bits. */
+    public fun readS64BE(): Long {
+        require(8)
+        val high = readU32BE()
+        return (high shl 32) or readU32BE()
+    }
+
+    /**
+     * Decode a JVM CONSTANT_Utf8 payload bounded by its encoded [byteCount] (JVMS 4.4.7).
+     * There is no terminator. Preserve UTF-16 surrogate code units, reject raw NUL, overlong
+     * non-NUL encodings and four-byte UTF-8, and never read continuation bytes from the next field.
+     */
+    public fun readMutf8Bytes(byteCount: Int): String {
+        requireAvailable(byteCount.toLong())
+        val limit = position + byteCount
+        val result = StringBuilder(byteCount)
+        while (position < limit) {
+            val lead = readU8()
+            when {
+                lead in 1..0x7F -> result.append(lead.toChar())
+                lead in 0xC0..0xDF -> {
+                    if (limit - position < 1) throw ByteReaderException("truncated JVM mutf8 at $position")
+                    val b = readU8()
+                    if (b and 0xC0 != 0x80) throw ByteReaderException("bad JVM mutf8 continuation at $position")
+                    val value = ((lead and 0x1F) shl 6) or (b and 0x3F)
+                    if (value != 0 && value < 0x80) throw ByteReaderException("overlong JVM mutf8 at $position")
+                    result.append(value.toChar())
+                }
+                lead in 0xE0..0xEF -> {
+                    if (limit - position < 2) throw ByteReaderException("truncated JVM mutf8 at $position")
+                    val b = readU8()
+                    val c = readU8()
+                    if (b and 0xC0 != 0x80 || c and 0xC0 != 0x80) {
+                        throw ByteReaderException("bad JVM mutf8 continuation at $position")
+                    }
+                    val value = ((lead and 0x0F) shl 12) or ((b and 0x3F) shl 6) or (c and 0x3F)
+                    if (value < 0x800) throw ByteReaderException("overlong JVM mutf8 at $position")
+                    result.append(value.toChar())
+                }
+                else -> throw ByteReaderException("invalid JVM mutf8 lead byte 0x${lead.toString(16)} at $position")
+            }
+        }
+        return result.toString()
     }
 
     /** Read [count] raw bytes into a new array. */
