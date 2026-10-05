@@ -91,6 +91,7 @@ internal class MethodBodyWriter(
     // spelled by [KotlinIdentifiers.sanitize] of its raw name, with no model resolution (see the resolvers
     // in [KotlinMemberAliases]/[KotlinTypeRenderer], which short-circuit on the empty map before any lookup).
     private val aliasMap: AliasMap = AliasMap.EMPTY,
+    private val nullability: KotlinArrayNullability = KotlinArrayNullability(method.declaringClass.root),
 ) {
     private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -616,7 +617,7 @@ internal class MethodBodyWriter(
                 val failure = insn.getArg(0)
                 // JVM throw-null raises NPE; Kotlin rejects a nullable throw expression.
                 if (isNullOperand(failure)) code.add("kotlin.NullPointerException()")
-                else emitOperand(failure, KotlinPrec.LOWEST)
+                else emitDereference(failure)
             }
             IrOpcode.BREAK -> code.add("break")
             IrOpcode.CONTINUE -> {
@@ -640,11 +641,17 @@ internal class MethodBodyWriter(
                 val value = insn.getArg(0)
                 val array = insn.getArg(1)
                 val index = insn.getArg(2)
-                emitOperand(array, KotlinPrec.POSTFIX)
-                code.add("[")
-                emitOperand(index, KotlinPrec.LOWEST)
-                code.add("] = ")
-                emitOperandAsType(value, operandType(array).arrayElement, KotlinPrec.LOWEST)
+                if (nullability.isNullable(method, array)) {
+                    emitMaterializedOperands(listOf(array, index, value), listOf(null, IrType.INT, operandType(array).arrayElement)) { operands ->
+                        code.add(operands[0]).add("!![").add(operands[1]).add("] = ").add(operands[2])
+                    }
+                } else {
+                    emitOperand(array, KotlinPrec.POSTFIX)
+                    code.add("[")
+                    emitOperand(index, KotlinPrec.LOWEST)
+                    code.add("] = ")
+                    emitOperandAsType(value, operandType(array).arrayElement, KotlinPrec.LOWEST)
+                }
             }
             else -> {
                 val result = insn.result
@@ -691,10 +698,10 @@ internal class MethodBodyWriter(
             code.add("var ")
             code.variable(ref, declaration = true)
             val declType = effectiveType(result)
-            // A local whose initializer is the `null` literal must be declared nullable, or kotlinc
-            // rejects `var x: T = null` ("null cannot be a value of a non-null type"). Only the literal-
-            // null case widens to `T?`; a non-null initializer keeps the precise non-null type.
-            val nullable = isReferenceType(declType) && isNullLiteralExpr(insn)
+            // A storage location is nullable when any emitted assignment can carry an array-boundary
+            // null, a nullable element, or an explicit null; fresh allocations retain non-null types.
+            val nullable = isReferenceType(declType) &&
+                (isNullLiteralExpr(insn) || nullability.isNullable(method, result))
             code.add(": ").add(types.render(declType)).add(if (nullable) "?" else "")
             declared.add(key)
         } else {
@@ -704,9 +711,63 @@ internal class MethodBodyWriter(
         emitInsnExpr(insn, KotlinPrec.LOWEST, effectiveType(result))
     }
 
+    private fun emitDereference(operand: Operand) {
+        emitOperand(operand, KotlinPrec.POSTFIX)
+        if (nullability.isNullable(method, operand)) code.add("!!")
+    }
+
+    private fun emitArrayGet(instruction: Instruction) {
+        val array = instruction.getArg(0)
+        val index = instruction.getArg(1)
+        if (nullability.isNullable(method, array)) {
+            emitMaterializedOperands(listOf(array, index), listOf(null, IrType.INT)) { operands ->
+                code.add(operands[0]).add("!![").add(operands[1]).add("]")
+            }
+        } else {
+            emitOperand(array, KotlinPrec.POSTFIX)
+            code.add("[")
+            emitOperand(index, KotlinPrec.LOWEST)
+            code.add("]")
+        }
+    }
+
+    /** All operands run exactly once before the JVM operation's null/bounds/type checks. */
+    private fun emitMaterializedOperands(
+        operands: List<Operand>,
+        expectedTypes: List<IrType?> = emptyList(),
+        action: (List<String>) -> Unit,
+    ) {
+        val temporaries = operands.indices.map { names.unique(if (it == 0) "receiver" else "argument") }
+        code.add("(when (val ").add(temporaries[0]).add(" = ")
+        emitArgument(operands[0], expectedTypes.firstOrNull() ?: operandType(operands[0]))
+        code.add(") ")
+        openBrace()
+        code.add("else -> ")
+        openBrace()
+        for (index in 1 until operands.size) {
+            code.add("val ").add(temporaries[index]).add(" = ")
+            emitArgument(operands[index], expectedTypes.getOrNull(index))
+            code.newLine()
+        }
+        action(temporaries)
+        code.newLine()
+        closeBrace()
+        code.newLine()
+        closeBrace()
+        code.add(")")
+    }
+
     private fun emitInstancePut(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
-        emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
+        if (nullability.isNullable(method, insn.getArg(0))) {
+            emitMaterializedOperands(insn.args, listOf(null, field?.type)) { values ->
+                code.add(values[0]).add("!!.")
+                emitFieldName(field)
+                code.add(" = ").add(values[1])
+            }
+            return
+        }
+        emitDereference(insn.getArg(0))
         code.add(".")
         emitFieldName(field)
         code.add(" = ")
@@ -993,6 +1054,7 @@ internal class MethodBodyWriter(
                 emitOperand(insn.getArg(0), KotlinPrec.AS)
                 code.add(" as ")
                 emitTypeRef(t)
+                if (nullability.isNullable(method, insn.getArg(0))) code.add("?")
             }
             IrOpcode.INSTANCE_OF -> wrapped(KotlinPrec.NAMED_CHECK, minPrec) {
                 emitOperand(insn.getArg(0), KotlinPrec.NAMED_CHECK)
@@ -1030,18 +1092,13 @@ internal class MethodBodyWriter(
                 // silent miscompile. It is not faithfully renderable in codegen alone, so BAIL honestly.
                 code.emitErrorMarker(method, "unfused new-instance / constructor not reconstructed")
             }
-            IrOpcode.NEW_ARRAY -> emitNewArray(insn, minPrec)
+            IrOpcode.NEW_ARRAY -> emitNewArray(insn)
             IrOpcode.FILLED_NEW_ARRAY -> emitFilledNewArray(insn)
             IrOpcode.ARRAY_LENGTH -> {
-                emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
+                emitDereference(insn.getArg(0))
                 code.add(".size")
             }
-            IrOpcode.ARRAY_GET -> {
-                emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
-                code.add("[")
-                emitOperand(insn.getArg(1), KotlinPrec.LOWEST)
-                code.add("]")
-            }
+            IrOpcode.ARRAY_GET -> emitArrayGet(insn)
             IrOpcode.INSTANCE_GET -> emitInstanceGet(insn)
             IrOpcode.STATIC_GET -> emitStaticGet(insn)
             IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvokeExpression(insn)
@@ -1195,7 +1252,7 @@ internal class MethodBodyWriter(
         }
     }
 
-    private fun emitNewArray(insn: Instruction, minPrec: Int) {
+    private fun emitNewArray(insn: Instruction) {
         // referencedType is the WHOLE array type. `new int[n]` → `IntArray(n)`; a reference (or
         // multi-dimensional) array → `arrayOfNulls<Element>(n)`.
         val arrayType = referencedType(insn) ?: insn.result?.type
@@ -1211,25 +1268,11 @@ internal class MethodBodyWriter(
             size()
             code.add(")")
         } else {
-            // `arrayOfNulls<T>(n)` has type `Array<T?>`, but the value flows into non-null `Array<T>`
-            // positions (the declared local/param/field type is non-null, matching `new T[n]`'s Java
-            // type). Reconcile with a cast to the whole array type so the initializer type matches the
-            // declaration — otherwise kotlinc reports `expected 'Array<T>', actual 'Array<T?>'`. The
-            // (unchecked) cast is warning-only and semantically faithful: the runtime array is the same.
-            wrapped(KotlinPrec.AS, minPrec) {
-                code.add("arrayOfNulls<")
-                emitTypeName(element ?: IrType.OBJECT)
-                code.add(">(")
-                size()
-                code.add(") as ")
-                if (arrayType is IrType.ArrayType) {
-                    emitTypeName(arrayType)
-                } else {
-                    code.add("Array<")
-                    emitTypeName(element ?: IrType.OBJECT)
-                    code.add(">")
-                }
-            }
+            code.add("arrayOfNulls<")
+            emitTypeName(element ?: IrType.OBJECT)
+            code.add(">(")
+            size()
+            code.add(")")
         }
     }
 
@@ -1273,7 +1316,7 @@ internal class MethodBodyWriter(
 
     private fun emitInstanceGet(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
-        emitOperand(insn.getArg(0), KotlinPrec.POSTFIX)
+        emitDereference(insn.getArg(0))
         code.add(".")
         emitFieldName(field)
     }
@@ -1325,6 +1368,18 @@ internal class MethodBodyWriter(
         }
 
         if (emitProjectedInvoke(invoke)) return
+        val receiver = invoke.instanceArg
+        if (kind != InvokeKind.STATIC && kind != InvokeKind.SUPER && receiver != null &&
+            nullability.isNullable(method, receiver)
+        ) {
+            emitMaterializedOperands(invoke.args, listOf(null) + target.paramTypes) { values ->
+                code.add(values[0]).add("!!.")
+                code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
+                code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
+                code.add("(").add(values.drop(1).joinToString(", ")).add(")")
+            }
+            return
+        }
 
         val staticProjection = KotlinJvmStaticInvocationProjection.forInvoke(invoke)
         when {
@@ -1362,14 +1417,16 @@ internal class MethodBodyWriter(
             target.declaringType == IrType.STRING -> "kotlin.String"
             else -> "kotlin.CharSequence"
         }
-        if (projection == KotlinJvmInvocationProjection.CHAR_AT && receiverProjection != null) {
-            emitProjectedIndex(invoke, receiverProjection)
+        if (projection == KotlinJvmInvocationProjection.CHAR_AT &&
+            (receiverProjection != null || nullability.isNullable(method, receiver))
+        ) {
+            emitProjectedIndex(invoke, receiverProjection ?: if (target.declaringType == IrType.STRING) "kotlin.String" else "kotlin.CharSequence")
             return true
         }
         // Any's extension cannot be shadowed by a user member named javaClass; it also observes the
         // wrapper class of Kotlin-mapped boxed values, rather than a primitive class literal.
         if (receiverProjection != null) code.add("(")
-        emitOperand(receiver, if (receiverProjection != null) KotlinPrec.AS else KotlinPrec.POSTFIX)
+        if (receiverProjection != null) emitOperand(receiver, KotlinPrec.AS) else emitDereference(receiver)
         if (receiverProjection != null) code.add(" as ").add(receiverProjection).add(")")
         code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
         when (projection) {
@@ -1505,21 +1562,23 @@ internal class MethodBodyWriter(
             if (emitted > 0) code.add(", ")
             val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
             val argument = insn.getArg(i)
-            if (expectedType != null && isReferenceType(expectedType) &&
-                (preserveReferenceTypes || isNullOperand(argument))
-            ) {
-                // Bind the descriptor where overload selection requires it; the nullable cast
-                // preserves null instead of inserting a check before the Java callee receives it.
-                emitOperand(argument, KotlinPrec.AS)
-                code.add(" as ")
-                emitTypeRef(expectedType)
-                code.add("?")
-            } else {
-                emitOperandAsType(argument, expectedType, KotlinPrec.LOWEST)
-            }
+            emitArgument(argument, expectedType, preserveReferenceTypes)
             emitted++
         }
         code.add(")")
+    }
+
+    private fun emitArgument(argument: Operand, expectedType: IrType?, preserveReferenceTypes: Boolean = false) {
+        if (expectedType != null && isReferenceType(expectedType) &&
+            (preserveReferenceTypes || isNullOperand(argument))
+        ) {
+            emitOperand(argument, KotlinPrec.AS)
+            code.add(" as ")
+            emitTypeRef(expectedType)
+            code.add("?")
+        } else {
+            emitOperandAsType(argument, expectedType, KotlinPrec.LOWEST)
+        }
     }
 
     private fun emitInvokeExpression(insn: Instruction) {

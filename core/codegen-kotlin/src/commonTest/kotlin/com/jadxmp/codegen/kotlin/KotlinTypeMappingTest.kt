@@ -82,11 +82,11 @@ class KotlinTypeMappingTest {
     }
 
     /**
-     * `new String[3]` becomes `arrayOfNulls<String>(3)` (a `Array<String?>`) cast to the non-null
-     * declared element type, so it assigns to a `Array<String>` variable without a type mismatch.
+     * JVM reference arrays begin with null elements. Keep that fact in the source element type
+     * rather than asserting the elements are non-null with an unchecked array cast.
      */
     @Test
-    fun referenceArrayNewCastsToNonNullElement() {
+    fun referenceArrayNewPreservesNullableElements() {
         val cls = irClass("a.C")
         val arr = Local(1, IrType.array(IrType.STRING))
         cls.method("m") {
@@ -95,7 +95,7 @@ class KotlinTypeMappingTest {
                 ret(),
             )
         }
-        assertThatCode(generate(cls)).containsOne("arrayOfNulls<String>(3) as Array<String>")
+        assertThatCode(generate(cls)).containsOne("Array<String?> = arrayOfNulls<String>(3)").doesNotContain(" as Array<")
     }
 
     /** A primitive-element `new int[3]` uses the dedicated `IntArray(3)` and needs no cast. */

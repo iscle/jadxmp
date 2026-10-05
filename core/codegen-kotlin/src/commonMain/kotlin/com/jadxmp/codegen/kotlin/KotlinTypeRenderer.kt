@@ -16,11 +16,12 @@ import com.jadxmp.ir.type.WildcardBound
  *    `void`→`Unit`;
  *  - `java.lang.Object`→`Any`;
  *  - a **primitive array** is a dedicated class (`int[]`→`IntArray`), while a reference array is the
- *    generic `Array<T>` (`String[]`→`Array<String>`, `int[][]`→`Array<IntArray>`);
+ *    generic `Array<T?>` (`String[]`→`Array<String?>`, `int[][]`→`Array<IntArray?>`), since JVM
+ *    reference-array elements may be null;
  *  - a wildcard becomes use-site variance (`?`→`*`, `? extends T`→`out T`, `? super T`→`in T`).
  *
- * Nullability is intentionally NOT inferred yet — every reference is emitted as the non-null `T`
- * (see the module TODOs); guessing `?` unsoundly would break the "semantics-preserving" goal.
+ * Outer nullability is applied by declaration/expression emission using [KotlinArrayNullability].
+ * General object parameter and external object-return nullability remains outside that model.
  *
  * Partial/unknown types can still be present pre-inference; they render to a deterministic concrete
  * representative so output is stable.
@@ -57,7 +58,9 @@ internal class KotlinTypeRenderer(
         if (element is IrType.Primitive) {
             return primitiveArrayName(element.kind)
         }
-        return "Array<" + render(element) + ">"
+        val nullableElement = KotlinArrayNullability.isReference(element) &&
+            !(element is IrType.Wildcard && element.bound == WildcardBound.UNBOUNDED)
+        return "Array<" + render(element) + (if (nullableElement) "?" else "") + ">"
     }
 
     private fun renderObject(type: IrType.Object): String {

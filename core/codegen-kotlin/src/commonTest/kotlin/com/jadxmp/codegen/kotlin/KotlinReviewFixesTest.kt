@@ -124,7 +124,7 @@ class KotlinReviewFixesTest {
             .containsLine(1, "RED;")
             .doesNotContain("DEFAULT,")
             .containsOne("val DEFAULT: Color")
-            .containsOne("fun valueOf(x: Int): Color {")
+            .containsOne("fun valueOf(x: Int): Color? {")
     }
 
     // ---------- S2: constructor delegation in a body is flagged, not silently invalid ----------

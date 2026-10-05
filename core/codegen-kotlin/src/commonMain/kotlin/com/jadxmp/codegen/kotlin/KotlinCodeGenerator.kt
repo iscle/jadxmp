@@ -105,6 +105,7 @@ class KotlinCodeGenerator {
         private val commentMap: CommentMap = CommentMap.EMPTY,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
+        private val nullability = KotlinArrayNullability(root)
 
         /**
          * Inject the user's comment (if any) for [ref] as `//` line(s) at the current indent, immediately
@@ -293,6 +294,7 @@ class KotlinCodeGenerator {
                 code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
                 code.add(": ")
                 emitTypeName(field.type)
+                if (field.type is IrType.ArrayType) code.add("?")
             }
             code.add(")")
         }
@@ -563,6 +565,11 @@ class KotlinCodeGenerator {
                     emitPropertyNameAndType(cls, field)
                     code.add(" = ").add(KotlinLiterals.format(LiteralOperand(0L, field.type)))
                 }
+                !isFinal && field.type is IrType.ArrayType -> {
+                    code.add(KotlinModifiers.visibility(field.accessFlags)).add("var ")
+                    emitPropertyNameAndType(cls, field)
+                    code.add(" = null")
+                }
                 !isFinal && isNonNullReference(field.type) -> {
                     code.add(KotlinModifiers.visibility(field.accessFlags))
                     code.add("lateinit var ")
@@ -586,6 +593,7 @@ class KotlinCodeGenerator {
             // `sanitize(field.name)`, byte-identical), matching every reference to this field.
             code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
             code.add(": ").add(types.render(field.type))
+            if (field.type is IrType.ArrayType) code.add("?")
         }
 
         /**
@@ -623,7 +631,7 @@ class KotlinCodeGenerator {
             if (field.accessFlags and staticFinal != staticFinal) return false
             if (field.constValue != null) return false // a compile-time literal is handled as `const val`
             val store = singleUnconditionalStore(clinit, cls.fullName, field.name) ?: return false
-            val writer = MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap)
+            val writer = MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap, nullability = nullability)
             val toSuppress = writer.planStaticFinalInline(store, staticInit.suppressed) ?: return false
             code.add(KotlinModifiers.visibility(field.accessFlags))
             code.add("val ")
@@ -719,6 +727,7 @@ class KotlinCodeGenerator {
                 // A `Unit` return is Kotlin's default and is omitted; anything else is spelled out.
                 code.add(": ")
                 emitTypeName(method.returnType)
+                if (nullability.returnsNullable(method)) code.add("?")
             }
 
             val noBody = KotlinModifiers.has(method.accessFlags, KotlinModifiers.ABSTRACT) ||
@@ -735,7 +744,7 @@ class KotlinCodeGenerator {
             // honest body marker when the delegation can't be faithfully hoisted (rule 4), leaving the body
             // path unchanged. The SAME writer must render header then body so variable naming/ids stay in
             // sync between the two.
-            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames, aliasMap = aliasMap)
+            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames, aliasMap = aliasMap, nullability = nullability)
             if (isConstructor) writer.emitConstructorDelegationHeader()
             code.add(" ")
             emitBody(writer)
@@ -799,6 +808,7 @@ class KotlinCodeGenerator {
                     code.add("Any?") // the overriding `equals(other: Any?)` signature
                 } else {
                     emitTypeName(method.argTypes[i])
+                    if (method.argTypes[i] is IrType.ArrayType) code.add("?")
                 }
             }
             code.add(")")
@@ -875,7 +885,7 @@ class KotlinCodeGenerator {
             code.attachDefinition(methodRef(cls, method))
             code.add("init {").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, NameGenerator(), emptyList(), suppressed, aliasMap = aliasMap).writeBody()
+            MethodBodyWriter(code, imports, method, NameGenerator(), emptyList(), suppressed, aliasMap = aliasMap, nullability = nullability).writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()
