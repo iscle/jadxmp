@@ -3,9 +3,10 @@
 The current `core:input-jvm` foundation parses class-file envelopes, constant pools, bounded Code
 attributes and raw JVM instructions. A separate frame-primitives batch adds typed stack/local
 storage and permutations, snapshots, and constructor alias transitions; it passed independent
-review. These are foundations, not native JVM decompilation: the module is not registered with
-`core:api`. Whole-method frame analysis, register lowering, and remaining input-contract changes
-below are **proposed, not implemented**.
+review. A straight-line primitive normalizer now produces the shared CodeReader model and has passed
+independent review. The module is not registered with `core:api`; general native JVM decompilation is
+incomplete. Whole-method frame analysis, general register lowering, and remaining input-contract
+changes below are **proposed, not implemented**.
 The fused-result and explicit inline-switch prerequisites have landed separately.
 
 The engine remains clean-room and multiplatform. Format decisions follow the
@@ -33,6 +34,19 @@ method diagnostic, not guessed stack contents or silently omitted instructions. 
 parsing and compatibility checks are a separate necessary layer; unchecked metadata is not proof
 that a method is valid. Legacy `jsr`/`ret` requires explicit return-address/subroutine normalization;
 initial lowering should report it as unsupported rather than inventing a successor.
+
+The implemented primitive normalizer validates eagerly before returning its CodeReader, so reading
+its register count cannot trigger a deferred lowering failure. It supports primitive constants,
+loads/stores, iinc, stack permutations, arithmetic, conversions, comparisons and returns. Incoming
+parameters occupy the high-register bank; raw bytecode positions remain in instruction file offsets,
+while normalized instruction offsets are unique ordinals. Branches, handlers, calls, references and
+constructors currently produce explicit unsupported-method diagnostics.
+
+Reuse checked type/frame values by constant-pool entry or descriptor within each method/class,
+including future constructor initialization transitions. Repeated worklist visits must not rescan
+long shared descriptors. Do not use an unbounded global cache. The primitive slice parses method
+descriptors once and caches numeric constants/reference frame types; extend the parser's hostile
+shared-string tests to the whole-method analyzer when that stage lands.
 
 ## Frame representation
 
@@ -70,16 +84,19 @@ would return the new value.
 
 Preserve the shared pipeline's incoming-parameter convention: receiver and parameter words occupy
 consecutive registers at the **end** of the normalized frame, with long/double consuming two words.
-Map original JVM parameter local slots explicitly into that final bank. A possible layout is:
+Copy incoming parameters once into a contiguous bank of original JVM locals. Do not split that
+local bank at the incoming-argument boundary: a legal long/double store may span an old parameter
+slot and a nonparameter slot. The implemented layout is:
 
-- nonparameter local words;
+- all original JVM local words, including mutable copies of parameter words;
 - operand-stack words;
 - bounded scratch words for parallel copies;
 - incoming receiver and parameter words.
 
 The frame size is fixed before emission. `MethodParams.of` can then seed parameters correctly,
-including instance receivers and mixed wide/narrow signatures, without pretending that JVM local
-numbering already matches the normalized register numbering.
+including instance receivers and mixed wide/narrow signatures. Entry copies preserve object-ness
+and wide widths. Future raw-PC branch targets must map after this one-time prologue, including
+back edges to original PC zero; they must never reinitialize mutable locals from incoming values.
 
 Implement stack permutations over logical values. All legal `dup`, `dup_x1`, `dup_x2`, `dup2`,
 `dup2_x1`, and `dup2_x2` category forms need coverage. Emit parallel copies using scratch when
@@ -138,6 +155,7 @@ exception types and identity, not only compiler acceptance.
 6. **Integration:** method/class metadata, StackMapTable validation, archive loading, facade
    registration, native JVM corpus execution through both emitters, and the pinned differential gate.
 
-The frame-primitives slice is implemented and independently reviewed; the whole-method analyzer and
-lowering remain future work. Full native JVM support remains incomplete until the later stages and
-their runtime checks pass.
+The frame-primitives slice is implemented and independently reviewed; straight-line primitive
+lowering is implemented and independently reviewed. The whole-method analyzer and general lowering
+remain future work. Full native JVM support remains incomplete until the later stages and their
+runtime checks pass.

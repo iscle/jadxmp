@@ -67,7 +67,7 @@ internal class JvmFrame(
      * Word groups enforce all category forms without treating half a long/double as a value.
      * Only the affected suffix (at most four input values) is copied, not the whole stack.
      */
-    fun apply(operation: JvmStackOperation) {
+    fun apply(operation: JvmStackOperation): JvmStackChange {
         val topWords = when (operation) {
             JvmStackOperation.POP2, JvmStackOperation.DUP2,
             JvmStackOperation.DUP2_X1, JvmStackOperation.DUP2_X2 -> 2
@@ -89,9 +89,19 @@ internal class JvmFrame(
         }
         val newWords = stackWords - topWords - belowWords + replacement.sumOf { it.words }
         checkStack(newWords)
+        val inputs = below + top
+        val topIndices = (below.size until inputs.size).toList()
+        val belowIndices = below.indices.toList()
+        val output = when (operation) {
+            JvmStackOperation.POP, JvmStackOperation.POP2 -> emptyList()
+            JvmStackOperation.SWAP -> topIndices + belowIndices
+            else -> topIndices + belowIndices + topIndices
+        }
+        val change = JvmStackChange(stackWords - topWords - belowWords, inputs, output)
         while (operands.size > start) operands.removeAt(operands.lastIndex)
         operands.addAll(replacement)
         stackWords = newWords
+        return change
     }
 
     fun snapshot(): JvmFrame = JvmFrame(maxLocals, maxStack, thisUninitialized).also { copy ->
