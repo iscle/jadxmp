@@ -6,6 +6,7 @@ import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.node.BasicBlock
 import com.jadxmp.ir.node.IrMethod
+import com.jadxmp.pipeline.InstructionEffects
 import com.jadxmp.pipeline.pass.CancellationCheck
 
 /**
@@ -18,20 +19,11 @@ import com.jadxmp.pipeline.pass.CancellationCheck
  * structuring so the branch instruction already carries the inlined expression when [RegionMaker]
  * reads its operands into a `Condition`.
  *
- * ## Safety envelope (why this never changes semantics)
- * Only a definition that is **all** of the following is inlined:
- *  - **single-use** — its SSA value is read exactly once (so folding cannot duplicate a computation);
- *  - **not coalesced** — its value does not share a [com.jadxmp.ir.node.LocalVar] with another version
- *    (a merged variable is a real, multiply-assigned local, never an expression);
- *  - **pure** — a side-effect-free, memory-independent opcode (const/arith/compare/cast/…). Memory
- *    reads and calls are left as named statements: reordering them past other effects is not provably
- *    safe here, so per the cardinal rule we keep the uglier-but-correct form;
- *  - **used later in the same block** — the def and use live in one straight-line run, so no control
- *    flow sits between them.
- *
- * SSA guarantees the def's own operands are immutable values, so sinking a pure def down to its use
- * within a block cannot observe a different input. Anything outside this envelope is deliberately not
- * touched.
+ * Only single-use, uncoalesced values used later in the same block can be folded. Inert
+ * computations may move freely; memory reads, calls and potentially throwing computations may
+ * cross only inert instructions and inert earlier operands of the consuming instruction. The
+ * latter matters after other definitions have already been folded into its argument list.
+ * Coalesced source locals remain materialized so folding cannot reread a reassigned variable.
  */
 internal class ExpressionShaping(
     private val method: IrMethod,
@@ -111,9 +103,8 @@ internal class ExpressionShaping(
         // A coalesced (merged) variable is a real local, not an inlinable temporary.
         val local = value.localVar
         if (local != null && local.ssaValues.size > 1) return false
-        val pure = isPure(def)
-        val effectful = isEffectSensitiveInlinable(def)
-        if (!pure && !effectful) return false
+        if (!isInlinable(def)) return false
+        val effectful = !isInert(def)
 
         // Coalesced-variable read hazard: a def that reads a multiply-assigned variable cannot be safely
         // sunk to a later point (the variable may be reassigned in between). Since out-of-SSA ran, such
@@ -131,12 +122,11 @@ internal class ExpressionShaping(
         // inputs materialized so calls, field reads and throwing expressions execute exactly once.
         if (useInsn.opcode == IrOpcode.CMP) return false
 
-        // Order-preservation (rule 4): a memory READ, a CALL, or a CHECK_CAST observes/mutates memory or
-        // throws, so sinking it to its use may only cross INERT instructions — non-throwing, memory-
-        // independent, side-effect-free register computations. Then the reorder cannot change what the def
-        // reads, cannot reorder a side effect, and cannot reorder an exception. Bottom-up folding makes
-        // most cross-sets empty (adjacent reads/calls collapse first). Pure defs keep their prior envelope.
-        if (effectful && !crossSetIsInert(block, defIndex, useIndex)) return false
+        // Earlier folded operands execute before this operand in source. Even an empty cross-set
+        // can reorder effects: first(); second(); consume(second, first) must not become
+        // consume(second(), first()). Check both the remaining statements and the use's prefix.
+        if (effectful && (!crossSetIsInert(block, defIndex, useIndex) ||
+                !earlierOperandsAreInert(useInsn, use))) return false
 
         // Fold: replace the reading operand with the def's instruction as a nested expression, and drop
         // the now-inlined statement. The wrapped instruction keeps its result (codegen renders the
@@ -162,32 +152,25 @@ internal class ExpressionShaping(
         return false
     }
 
-    /**
-     * A pure opcode: side-effect-free and independent of mutable memory, so it may be freely sunk to
-     * its use within a block. Explicitly excludes memory reads (field/array get), calls, monitors,
-     * array/field writes, control flow, and `check-cast` (which can throw and so is order-sensitive).
-     */
-    private fun isPure(insn: Instruction): Boolean = when (insn.opcode) {
+    /** Shapes with expression syntax; allocation remains owned by constructor reconstruction. */
+    private fun isInlinable(insn: Instruction): Boolean = when (insn.opcode) {
         IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.CONST_CLASS,
-        IrOpcode.ARITH, IrOpcode.NEG, IrOpcode.NOT,
-        IrOpcode.MOVE, IrOpcode.CAST, IrOpcode.INSTANCE_OF,
-        IrOpcode.CMP, IrOpcode.ARRAY_LENGTH, IrOpcode.ONE_ARG,
-        -> true
+        IrOpcode.ARITH, IrOpcode.NEG, IrOpcode.NOT, IrOpcode.MOVE, IrOpcode.CAST,
+        IrOpcode.INSTANCE_OF, IrOpcode.CMP, IrOpcode.ARRAY_LENGTH, IrOpcode.ONE_ARG,
+        IrOpcode.INSTANCE_GET, IrOpcode.STATIC_GET, IrOpcode.ARRAY_GET,
+        IrOpcode.CHECK_CAST, IrOpcode.INVOKE -> true
         else -> false
     }
 
-    /**
-     * Effect-sensitive shapes that jadx inlines into their single use so conditions/expressions read
-     * `this.a == null`, `(T) x`, `a.equals(b)` instead of dangling `t = …` statements. Unlike [isPure]
-     * these observe/mutate memory or throw, so they are inlined ONLY when [crossSetIsInert] proves the
-     * sink is order-preserving. `CONSTRUCTOR` is deliberately excluded (object creation has its own
-     * reconstruction and per-arm materialization).
-     */
-    private fun isEffectSensitiveInlinable(insn: Instruction): Boolean = when (insn.opcode) {
-        IrOpcode.INSTANCE_GET, IrOpcode.STATIC_GET, IrOpcode.ARRAY_GET,
-        IrOpcode.CHECK_CAST, IrOpcode.INVOKE,
-        -> true
-        else -> false
+    private fun earlierOperandsAreInert(use: Instruction, operand: RegisterOperand): Boolean {
+        // ARRAY_PUT stores [value, array, index], but both emitters evaluate array[index] = value.
+        val order = if (use.opcode == IrOpcode.ARRAY_PUT) listOf(1, 2, 0) else use.args.indices.toList()
+        for (index in order) {
+            val arg = use.args.getOrNull(index) ?: return false
+            if (arg === operand) return true
+            if (arg is InstructionOperand && !isInert(arg.instruction)) return false
+        }
+        return false // A detached use is not proof of safe evaluation order.
     }
 
     /** Whether every instruction strictly between [defIndex] and [useIndex] in [block] is [isInert]. */
@@ -208,14 +191,10 @@ internal class ExpressionShaping(
      * (throwing), `array-length` (NPE), div/rem (arithmetic exception), writes, monitors, and control flow.
      */
     private fun isInert(insn: Instruction): Boolean {
+        if (InstructionEffects.mayThrow(insn)) return false
         val opcodeInert = when (insn.opcode) {
-            IrOpcode.CONST, IrOpcode.CONST_STRING, IrOpcode.MOVE, IrOpcode.MOVE_RESULT,
-            IrOpcode.ONE_ARG, IrOpcode.NEG, IrOpcode.NOT, IrOpcode.CMP, IrOpcode.CAST,
-            -> true
-            IrOpcode.ARITH -> {
-                val op = (insn as? com.jadxmp.ir.insn.ArithInstruction)?.op
-                op != com.jadxmp.ir.insn.ArithOp.DIV && op != com.jadxmp.ir.insn.ArithOp.REM
-            }
+            IrOpcode.CONST, IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG,
+            IrOpcode.NEG, IrOpcode.NOT, IrOpcode.CMP, IrOpcode.CAST, IrOpcode.ARITH -> true
             else -> false
         }
         if (!opcodeInert) return false

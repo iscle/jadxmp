@@ -96,8 +96,10 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 ## Remaining production blockers
 
 1. The known exception-SSA program-point bug is repaired and execution-tested. Broader transformation
-   safety still needs work: expression motion must preserve potentially throwing operations and
-   their order relative to observable effects. The current tests are not a general semantic proof.
+   safety still needs work. Expression folding now preserves potentially throwing operations relative
+   to calls and the evaluation order of folded arguments, including array-store operand order.
+   Java/Kotlin execution tests check exception types and side-effect traces; these are not a general
+   semantic proof of all transformations.
 2. Kotlin has 136 inputs with compiler errors or no output, plus three compilable outputs carrying
    error markers. Nullable signatures, boxed wrappers, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
