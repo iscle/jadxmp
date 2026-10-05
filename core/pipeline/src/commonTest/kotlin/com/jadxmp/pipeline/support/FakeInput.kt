@@ -67,6 +67,7 @@ class Insn(
     val methodRef: MethodRef? = null,
     val callSite: CallSite? = null,
     val payload: InstructionPayload? = null,
+    val resultRegister: Int = -1,
 )
 
 class FakeCatchHandler(
@@ -110,7 +111,7 @@ class FakeCodeReader(
         override val indexType: IndexType get() = spec.indexType
         override val registerCount: Int get() = spec.registers.size
         override fun register(argNum: Int): Int = spec.registers[argNum]
-        override val resultRegister: Int get() = -1
+        override val resultRegister: Int get() = spec.resultRegister
         override val literal: Long get() = spec.literal
         override val target: Int get() = spec.target
         override val index: Int get() = 0

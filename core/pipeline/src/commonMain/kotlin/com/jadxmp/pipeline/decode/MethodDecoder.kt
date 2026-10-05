@@ -99,6 +99,19 @@ class MethodDecoder(
                         p is InvokeCustomInstruction -> p.protoReturnType
                         else -> resultTypeOf(input, opcode)
                     }
+                    // JVM-style producers carry their result directly. Keep the legacy DEX
+                    // move-result path only when the input explicitly reports no fused result.
+                    if (p != null && input.resultRegister != -1) {
+                        val resultRegister = input.resultRegister
+                        val slots = Descriptors.slotsOf(pendingType)
+                        if (pendingType == IrType.VOID || resultRegister < 0 ||
+                            resultRegister.toLong() + slots > code.registerCount.toLong()) {
+                            errors.add("invalid fused result register $resultRegister for $pendingType at ${input.offset}")
+                        } else {
+                            p.result = RegisterOperand(resultRegister, pendingType)
+                        }
+                        pending = null
+                    }
                 }
             }
         }

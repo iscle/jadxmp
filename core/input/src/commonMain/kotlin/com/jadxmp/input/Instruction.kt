@@ -87,8 +87,9 @@ public interface Instruction {
     public fun register(argNum: Int): Int
 
     /**
-     * Some formats fuse the result register into the instruction instead of a following move-result.
-     * Returns the result register, or -1 when a separate move-result carries it.
+     * Call and filled-array instructions may fuse their result instead of using a following move-result.
+     * Return its first register, or -1 for a separate move-result or a discarded result. A fused result
+     * must be non-void and fit in the method frame, including both words of long/double values.
      */
     public val resultRegister: Int
 
