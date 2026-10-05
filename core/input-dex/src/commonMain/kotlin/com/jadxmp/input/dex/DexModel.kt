@@ -109,5 +109,8 @@ internal class DexClassData(
     override val annotations: List<AnnotationData>,
     override val inputFileName: String,
 ) : ClassData {
+    private val classNesting = DexClassNesting(annotations)
+    override val nesting get() = classNesting.nesting
+    override val innerAccessFlags get() = classNesting.innerAccessFlags
     override fun disassemble(): String = SmaliPrinter.render(this)
 }

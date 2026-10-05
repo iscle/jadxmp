@@ -2,6 +2,7 @@ package com.jadxmp.pipeline.model
 
 import com.jadxmp.input.AnnotationData
 import com.jadxmp.input.AnnotationVisibility
+import com.jadxmp.input.ClassNesting
 import com.jadxmp.input.EncodedValue
 import com.jadxmp.input.EncodedValueType
 import com.jadxmp.ir.node.IrClass
@@ -21,6 +22,61 @@ import kotlin.test.assertTrue
  * `EnclosingClass`/`EnclosingMethod` annotations, while a `$`-name whose outer is absent stays top-level.
  */
 class ModelBuilderNestingTest {
+
+    @Test
+    fun authoritativeTopLevelRejectsBothDollarAndLegacyAnnotationEnclosure() {
+        val root = build(
+            FakeClassData("Lexample/Outer;"),
+            FakeClassData("Lexample/Outer\$Name;", nesting = ClassNesting.TopLevel,
+                annotations = listOf(enclosingClassAnnotation("Lexample/Outer;"))),
+        )
+        assertNull(root.findClass("example.Outer\$Name")!!.outerClass)
+        assertEquals(2, topLevel(root).size)
+    }
+
+    @Test
+    fun neutralEnclosureOverridesLegacyAnnotationsAndNameHeuristics() {
+        val root = build(
+            FakeClassData("Lexample/Real;"),
+            FakeClassData("Lexample/Wrong;"),
+            FakeClassData("Lexample/Wrong\$Name;", nesting = ClassNesting.Nested("Lexample/Real;"),
+                annotations = listOf(enclosingClassAnnotation("Lexample/Wrong;"))),
+        )
+        assertSame(root.findClass("example.Real"), root.findClass("example.Wrong\$Name")!!.outerClass)
+    }
+
+    @Test
+    fun unavailableExplicitOwnerDoesNotFallBackToDifferentDollarOwner() {
+        val root = build(
+            FakeClassData("Lexample/Wrong;"),
+            FakeClassData("Lexample/Wrong\$Name;", nesting = ClassNesting.Nested("Lexample/Missing;")),
+        )
+        assertNull(root.findClass("example.Wrong\$Name")!!.outerClass)
+        assertEquals(2, topLevel(root).size)
+    }
+
+    @Test
+    fun neutralZeroMemberFlagsOverrideRawAndLegacyFlags() {
+        val root = build(FakeClassData("Lexample/Outer;"), FakeClassData(
+            "Lexample/Outer\$Name;", accessFlags = 17, innerAccessFlags = 0,
+            annotations = listOf(innerClassAnnotation("Name", 9)),
+        ))
+        val nested = root.findClass("example.Outer\$Name")!!
+        assertEquals(0, nested.accessFlags)
+        assertSame(root.findClass("example.Outer"), nested.outerClass)
+    }
+
+    @Test
+    fun neutralMetadataCannotCreateCyclicOrSelfEnclosure() {
+        val root = build(
+            FakeClassData("Lexample/A;", nesting = ClassNesting.Nested("Lexample/B;")),
+            FakeClassData("Lexample/B;", nesting = ClassNesting.Nested("Lexample/A;")),
+            FakeClassData("Lexample/C;", nesting = ClassNesting.Nested("Lexample/C;")),
+        )
+        assertEquals(3, root.classes.size)
+        assertEquals(2, topLevel(root).size)
+        assertNull(root.findClass("example.C")!!.outerClass)
+    }
 
     private fun build(vararg classes: FakeClassData): IrRoot =
         ModelBuilder.build(FakeCodeLoader(classes.toList()))

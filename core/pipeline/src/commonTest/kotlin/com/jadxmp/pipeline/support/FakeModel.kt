@@ -2,6 +2,7 @@ package com.jadxmp.pipeline.support
 
 import com.jadxmp.input.AnnotationData
 import com.jadxmp.input.ClassData
+import com.jadxmp.input.ClassNesting
 import com.jadxmp.input.CodeLoader
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.EncodedValue
@@ -39,6 +40,8 @@ class FakeClassData(
     override val fields: List<FieldData> = emptyList(),
     override val accessFlags: Int = 0,
     override val annotations: List<AnnotationData> = emptyList(),
+    override val nesting: ClassNesting? = null,
+    override val innerAccessFlags: Int? = null,
 ) : ClassData {
     override val sourceFile: String? get() = null
     override val inputFileName: String get() = "test"

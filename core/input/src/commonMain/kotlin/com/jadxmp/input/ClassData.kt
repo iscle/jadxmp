@@ -47,6 +47,12 @@ public interface ClassData {
 
     public val accessFlags: Int
 
+    /** Format-neutral lexical enclosure, or null for unavailable/legacy metadata. */
+    public val nesting: ClassNesting? get() = null
+
+    /** Member-class modifiers, independent of enclosure (which may be unavailable). */
+    public val innerAccessFlags: Int? get() = null
+
     /** Descriptor of the superclass, or null (only `java/lang/Object` and interfaces have none). */
     public val superType: String?
 

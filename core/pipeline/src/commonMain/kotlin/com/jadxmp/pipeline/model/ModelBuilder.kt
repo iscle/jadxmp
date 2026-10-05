@@ -1,6 +1,7 @@
 package com.jadxmp.pipeline.model
 
 import com.jadxmp.input.ClassData
+import com.jadxmp.input.ClassNesting
 import com.jadxmp.input.CodeLoader
 import com.jadxmp.input.EncodedValue
 import com.jadxmp.input.EncodedValueType
@@ -48,9 +49,9 @@ object ModelBuilder {
      * [IrClass.outerClass] link, so a top-level class is emitted as one unit `class Outer { class Inner … }`
      * instead of a wrong, un-recompilable standalone `Inner.java`. **jadx: RootNode.initInnerClasses**
      *
-     * The enclosing class is identified by (in order): the DEX `EnclosingClass`/`EnclosingMethod` system
-     * annotations (authoritative — survive `$`-separator obfuscation and pin local/anonymous classes to
-     * their method's class), else the `$`-separated binary name. Non-lossy: if the named outer is not in
+     * Explicit format-neutral enclosure is authoritative, including an explicit top-level class.
+     * For legacy plugins without it, DEX enclosure annotations and then a `$`-separated name remain
+     * compatibility fallbacks. Non-lossy: if the named outer is not in
      * the model (a `$` in a name that is not really an inner class, or a dangling annotation), the class is
      * left top-level rather than dropped. Handles multi-level nesting (`Outer$Inner$Deep`) because the flat
      * map already holds every intermediate class. Anonymous classes (`Outer$1`) are nested as named nested
@@ -79,10 +80,13 @@ object ModelBuilder {
         return false
     }
 
-    private fun outerClassName(fullName: String, data: ClassData): String? =
-        annotationOuter(data) ?: nameBasedOuter(fullName)
+    private fun outerClassName(fullName: String, data: ClassData): String? = when (val nesting = data.nesting) {
+        ClassNesting.TopLevel -> null
+        is ClassNesting.Nested -> className(nesting.enclosingClassType)
+        null -> annotationOuter(data) ?: nameBasedOuter(fullName)
+    }
 
-    /** Enclosing class from the DEX `EnclosingClass`/`EnclosingMethod` system annotations, if present. */
+    /** Compatibility for older input plugins that expose only DEX system annotations. */
     private fun annotationOuter(data: ClassData): String? {
         for (ann in data.annotations) {
             when (ann.annotationType) {
@@ -201,6 +205,7 @@ object ModelBuilder {
      * `R`. **jadx: ClassNode.getAccessFlags via InnerClassesAttr**
      */
     private fun effectiveAccessFlags(data: ClassData): Int {
+        data.innerAccessFlags?.let { return it }
         for (ann in data.annotations) {
             if (ann.annotationType == INNER_CLASS_ANNOTATION) {
                 val v = ann.values["accessFlags"] ?: continue
