@@ -156,7 +156,7 @@ class KotlinReservedNamesTest {
         }
         assertThatCode(generate(cls))
             .containsOne("class Foo {")
-            .containsOne("fun compute(name: String): Int {")
+            .containsOne("fun compute(name: String?): Int {")
             .doesNotContain("`") // NOT a single backtick in the whole output
     }
 

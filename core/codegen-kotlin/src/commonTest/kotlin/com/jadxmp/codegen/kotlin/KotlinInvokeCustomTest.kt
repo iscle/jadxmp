@@ -46,7 +46,7 @@ class KotlinInvokeCustomTest {
         assertThatCode(code).containsOne(
             "staticBootstrap(MethodHandles.lookup(), \"func\", " +
                 "MethodType.methodType(String::class.java, Integer.TYPE, Double.TYPE))" +
-                ".dynamicInvoker().invoke(1, 2.0) as String /* invoke-custom */",
+                ".dynamicInvoker().invoke(1, 2.0) as String? /* invoke-custom */",
         )
     }
 

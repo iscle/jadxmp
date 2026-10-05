@@ -85,7 +85,7 @@ class KotlinFieldInitTest {
         clinit(cls, call, staticPut(fieldRef(cls, "TAG", IrType.STRING), res.use()))
 
         assertThatCode(generate(cls))
-            .containsOne("val TAG: String = Helper.name()")
+            .containsOne("val TAG: String? = Helper.name()")
             .doesNotContain("JADXMP ERROR")
             // The store is the initializer now — never a reassignment in an init block.
             .doesNotContain("Foo.TAG =")

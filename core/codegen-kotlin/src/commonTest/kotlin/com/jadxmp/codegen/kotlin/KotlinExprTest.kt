@@ -185,7 +185,7 @@ class KotlinExprTest {
             paramNames = listOf("o"),
             value = expr(instanceGet(o.ref(), field)),
         )
-        assertThatCode(code).containsOne("return o.x")
+        assertThatCode(code).containsOne("return o!!.x")
     }
 
     @Test

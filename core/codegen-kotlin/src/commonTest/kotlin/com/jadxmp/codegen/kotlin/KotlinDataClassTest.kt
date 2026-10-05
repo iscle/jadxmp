@@ -1,5 +1,8 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.AliasMap
+import com.jadxmp.codegen.MethodNodeRef
+import com.jadxmp.ir.insn.FieldRef
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.type.IrType
@@ -24,18 +27,27 @@ class KotlinDataClassTest {
     }
 
     /** Give [cls] the full generated data-class member set for properties of types [propTypes]. */
-    private fun IrClass.addCanonicalDataMembers(propTypes: List<IrType>) {
-        method("<init>", argTypes = propTypes, accessFlags = Flags.PUBLIC) { body() }
+    private fun IrClass.addCanonicalDataMembers(propTypes: List<IrType>, constructorFlags: Int = Flags.PUBLIC, copyFlags: Int = Flags.PUBLIC) {
+        val selfType = IrType.objectType(fullName)
+        val self = Local(0, selfType, "this", isThis = true)
+        val parameters = propTypes.mapIndexed { index, type -> Local(index + 1, type, isParam = true) }
+        method("<init>", argTypes = propTypes, accessFlags = constructorFlags) {
+            body(*fields.mapIndexed { index, field ->
+                instancePut(self.ref(), parameters[index].ref(), FieldRef(selfType, field.name, field.type))
+            }.toTypedArray())
+        }
         propTypes.forEachIndexed { i, t ->
-            method("component${i + 1}", returnType = t, accessFlags = Flags.PUBLIC) { body() }
+            method("component${i + 1}", returnType = t, accessFlags = Flags.PUBLIC) {
+                body(ret(expr(instanceGet(self.ref(), FieldRef(selfType, fields[i].name, t)))))
+            }
         }
         method("equals", returnType = IrType.BOOLEAN, argTypes = listOf(IrType.OBJECT), accessFlags = Flags.PUBLIC) {
             body(ret(intLit(0)))
         }
         method("hashCode", returnType = IrType.INT, accessFlags = Flags.PUBLIC) { body(ret(intLit(0))) }
         method("toString", returnType = IrType.STRING, accessFlags = Flags.PUBLIC) { body(ret(expr(constString("s")))) }
-        method("copy", returnType = IrType.objectType(fullName), argTypes = propTypes, accessFlags = Flags.PUBLIC) {
-            body()
+        method("copy", returnType = IrType.objectType(fullName), argTypes = propTypes, accessFlags = copyFlags) {
+            body(ret(expr(constructor(selfType, propTypes, parameters.map { it.ref() }))))
         }
     }
 
@@ -50,7 +62,7 @@ class KotlinDataClassTest {
 
         assertThatCode(generate(cls))
             // Properties in the primary constructor, val/var per final-ness, correct types.
-            .containsOne("data class Foo(val a: String, var b: Int) {")
+            .containsOne("data class Foo(val a: String?, var b: Int) {")
             // Generated-only members (only the compiler can author these on a data class) are gone.
             .doesNotContain("component1")
             .doesNotContain("component2")
@@ -75,7 +87,7 @@ class KotlinDataClassTest {
         cls.addCanonicalDataMembers(listOf(IrType.STRING, IrType.INT))
 
         assertThatCode(generate(cls))
-            .containsOne("data class P(val a: String, var b: Int) {")
+            .containsOne("data class P(val a: String?, var b: Int) {")
             .containsOne("override fun equals(obj: Any?): Boolean {")
             .containsOne("override fun hashCode(): Int {")
             .containsOne("override fun toString(): String {")
@@ -91,15 +103,14 @@ class KotlinDataClassTest {
         // suppressed and silently regenerated as the default), while it stays a `data class`.
         val cls = irClass("a.Ov", accessFlags = Flags.PUBLIC or Flags.FINAL)
         cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
-        cls.method("<init>", argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC) { body() }
-        cls.method("component1", returnType = IrType.STRING, accessFlags = Flags.PUBLIC) { body() }
-        cls.method("equals", returnType = IrType.BOOLEAN, argTypes = listOf(IrType.OBJECT)) { body(ret(intLit(0))) }
-        cls.method("hashCode", returnType = IrType.INT) { body(ret(intLit(0))) }
-        cls.method("toString", returnType = IrType.STRING) { body(ret(expr(constString("MY_CUSTOM_REPR")))) }
-        cls.method("copy", returnType = IrType.objectType("a.Ov"), argTypes = listOf(IrType.STRING)) { body() }
+        cls.addCanonicalDataMembers(listOf(IrType.STRING))
+        cls.methods.single { it.name == "toString" }.apply {
+            blocks.clear()
+            body(ret(expr(constString("MY_CUSTOM_REPR"))))
+        }
 
         assertThatCode(generate(cls))
-            .containsOne("data class Ov(val a: String) {")
+            .containsOne("data class Ov(val a: String?) {")
             .containsOne("override fun toString(): String {")
             .containsOne("\"MY_CUSTOM_REPR\"") // the user's custom body is preserved
             .doesNotContain("component1")
@@ -111,17 +122,14 @@ class KotlinDataClassTest {
         // (a, separately) A real data class may override equals; it must survive in the body.
         val cls = irClass("a.Eq", accessFlags = Flags.PUBLIC or Flags.FINAL)
         cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
-        cls.method("<init>", argTypes = listOf(IrType.STRING), accessFlags = Flags.PUBLIC) { body() }
-        cls.method("component1", returnType = IrType.STRING, accessFlags = Flags.PUBLIC) { body() }
-        cls.method("equals", returnType = IrType.BOOLEAN, argTypes = listOf(IrType.OBJECT)) {
+        cls.addCanonicalDataMembers(listOf(IrType.STRING))
+        cls.methods.single { it.name == "equals" }.apply {
+            blocks.clear()
             body(ret(expr(constString("CUSTOM_EQ_MARKER"))))
         }
-        cls.method("hashCode", returnType = IrType.INT) { body(ret(intLit(0))) }
-        cls.method("toString", returnType = IrType.STRING) { body(ret(expr(constString("s")))) }
-        cls.method("copy", returnType = IrType.objectType("a.Eq"), argTypes = listOf(IrType.STRING)) { body() }
 
         assertThatCode(generate(cls))
-            .containsOne("data class Eq(val a: String) {")
+            .containsOne("data class Eq(val a: String?) {")
             .containsOne("override fun equals(obj: Any?): Boolean {")
             .containsOne("\"CUSTOM_EQ_MARKER\"") // custom equals body preserved
     }
@@ -173,7 +181,7 @@ class KotlinDataClassTest {
     }
 
     @Test
-    fun copyDefaultSyntheticIsSuppressed() {
+    fun unprovenDefaultDispatcherStaysExplicit() {
         val cls = irClass("a.Foo", accessFlags = Flags.PUBLIC or Flags.FINAL)
         cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
         cls.addCanonicalDataMembers(listOf(IrType.STRING))
@@ -186,8 +194,47 @@ class KotlinDataClassTest {
         ) { body() }
 
         assertThatCode(generate(cls))
-            .containsOne("data class Foo(val a: String) {")
-            .doesNotContain("copy")
+            .doesNotContain("data class")
+            .containsOne("fun copy_default")
+    }
+
+    @Test
+    fun constructorChecksAndComponentEffectsPreventReconstruction() {
+        for (member in listOf("<init>", "component1", "copy")) {
+            val cls = irClass("a.Checked")
+            cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
+            cls.addCanonicalDataMembers(listOf(IrType.STRING))
+            cls.methods.single { it.name == member }.blocks[0].instructions.add(0,
+                staticInvoke(IrType.objectType("a.Effects"), "prefix", IrType.VOID, emptyList(), emptyList()))
+            assertThatCode(generate(cls)).doesNotContain("data class").containsOne("Effects.prefix()")
+        }
+    }
+
+    @Test
+    fun staticCopyAndNonPublicConstructorsRemainExplicit() {
+        for ((constructorFlags, copyFlags) in listOf(
+            Flags.PUBLIC to (Flags.PUBLIC or Flags.STATIC),
+            Flags.PRIVATE to Flags.PUBLIC,
+            Flags.PROTECTED to Flags.PUBLIC,
+        )) {
+            val cls = irClass("a.Restricted")
+            cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
+            cls.addCanonicalDataMembers(listOf(IrType.STRING), constructorFlags, copyFlags)
+            assertThatCode(generate(cls)).doesNotContain("data class").containsOne("fun copy(")
+        }
+    }
+
+    @Test
+    fun renamedCopyAndComponentsAreNeverSuppressed() {
+        for (member in listOf("copy", "component1")) {
+            val cls = irClass("a.Renamed")
+            cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL)
+            cls.addCanonicalDataMembers(listOf(IrType.STRING))
+            val arguments = if (member == "copy") listOf(IrType.STRING.toString()) else emptyList()
+            val aliases = AliasMap.of(mapOf(MethodNodeRef(cls.fullName, member, arguments) to "renamedMember"))
+            assertThatCode(KotlinCodeGenerator().generate(cls, aliases).code)
+                .doesNotContain("data class").containsOne("fun renamedMember(")
+        }
     }
 
     // ---- conservative fallbacks (each fails an earlier signal ⇒ stays a regular class) ----

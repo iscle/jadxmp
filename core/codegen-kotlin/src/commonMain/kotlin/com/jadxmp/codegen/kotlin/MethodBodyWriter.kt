@@ -91,7 +91,7 @@ internal class MethodBodyWriter(
     // spelled by [KotlinIdentifiers.sanitize] of its raw name, with no model resolution (see the resolvers
     // in [KotlinMemberAliases]/[KotlinTypeRenderer], which short-circuit on the empty map before any lookup).
     private val aliasMap: AliasMap = AliasMap.EMPTY,
-    private val nullability: KotlinArrayNullability = KotlinArrayNullability(method.declaringClass.root),
+    private val nullability: KotlinReferenceNullability = KotlinReferenceNullability(method.declaringClass.root),
 ) {
     private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -565,7 +565,7 @@ internal class MethodBodyWriter(
     private fun emitSync(region: SyncRegion) {
         // Kotlin's `synchronized(lock) { }` is a stdlib function, not a statement keyword.
         code.add("synchronized(")
-        emitOperand(region.monitor, KotlinPrec.LOWEST)
+        emitDereference(region.monitor)
         code.add(") ")
         openBrace()
         emitRegion(region.body)
@@ -1487,6 +1487,7 @@ internal class MethodBodyWriter(
             if (returnType != IrType.VOID) {
                 code.add(" as ")
                 emitTypeRef(returnType)
+                if (isReferenceType(returnType)) code.add("?")
             }
             code.add(" /* invoke-custom */")
         }

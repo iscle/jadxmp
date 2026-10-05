@@ -68,6 +68,23 @@ with common malformed-input tests and javac interoperability tests. It is not re
 plugin yet: bytecode lowering and class/JAR decompilation remain unimplemented. The combined-suite
 counts above precede these additional reference and parser tests.
 
+## Kotlin validation after the combined snapshot
+
+The latest 211-input Kotlin compilation run reports **83 compiling, 80 without decompiler error
+markers, three compiling with error markers, 115 compiler errors and 13 empty outputs**. This is a
+compilation measurement, not whole-corpus semantic equivalence. Relative to the array-nullability
+snapshot (81 compiling, 76 unflagged), `others/TestIncorrectFieldSignature` and
+`trycatch/TestFinally3` newly compile; no previously compiling input fails. Additional unflagged
+gains include shared pipeline repairs and are not attributed solely to the Kotlin backend.
+
+Reference parameters, fields, copied values and unknown external reference results now retain
+nullable JVM behavior. Execution checks cover prefix/catch effects, receiver/argument order,
+casts, identity, throws, monitors and Java/generated-Kotlin interface contracts. Data-class
+reconstruction requires exact constructor/component/copy body proofs and compatible access/names;
+static copy factories, renamed methods and nonpublic constructors remain explicit. Targeted runtime
+and reflection checks verify those fallbacks. Dynamic reference-result nullability is explicit;
+the earlier nonnull spelling did not reproduce a runtime failure in the compiled probe.
+
 ## Correctness repairs and execution evidence
 
 - All five DEX comparison kinds retain their operand kind and NaN bias through decode and CFG
@@ -100,8 +117,8 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    to calls and the evaluation order of folded arguments, including array-store operand order.
    Java/Kotlin execution tests check exception types and side-effect traces; these are not a general
    semantic proof of all transformations.
-2. Kotlin has 136 inputs with compiler errors or no output, plus three compilable outputs carrying
-   error markers. Nullable signatures, boxed wrappers, Java varargs, class/field reconstruction and
+2. Kotlin has 128 inputs with compiler errors or no output, plus three compilable outputs carrying
+   error markers. Broader generic/override nullability, boxed wrappers, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
    execution coverage is missing; the smali gate still measures no-error and recompilation only.

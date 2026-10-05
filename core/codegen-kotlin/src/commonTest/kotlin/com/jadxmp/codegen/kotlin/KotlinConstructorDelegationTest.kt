@@ -72,7 +72,7 @@ class KotlinConstructorDelegationTest {
             )
         }
         assertThatCode(generate(cls))
-            .containsOne("constructor(s: String) : this(s, 7) {")
+            .containsOne("constructor(s: String?) : this(s, 7) {")
             .doesNotContain("JADXMP ERROR")
     }
 

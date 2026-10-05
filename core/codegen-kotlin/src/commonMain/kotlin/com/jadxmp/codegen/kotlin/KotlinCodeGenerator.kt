@@ -47,7 +47,7 @@ import com.jadxmp.ir.type.IrType
  *
  * ### Deferred (documented TODOs — not attempted here)
  * coroutine state-machine → `suspend`; lambda/SAM reconstruction; exhaustive
- * null-safety (every reference is emitted non-null `T`); getter/setter → property fusion; extension
+ * full Kotlin override/generic nullability contracts; getter/setter → property fusion; extension
  * functions. `tools:oracle:kotlinScoreboard` measures kotlinc acceptance; targeted oracle execution
  * tests cover selected semantics. Neither establishes whole-corpus Kotlin correctness.
  */
@@ -105,7 +105,7 @@ class KotlinCodeGenerator {
         private val commentMap: CommentMap = CommentMap.EMPTY,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
-        private val nullability = KotlinArrayNullability(root)
+        private val nullability = KotlinReferenceNullability(root)
 
         /**
          * Inject the user's comment (if any) for [ref] as `//` line(s) at the current indent, immediately
@@ -294,7 +294,7 @@ class KotlinCodeGenerator {
                 code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
                 code.add(": ")
                 emitTypeName(field.type)
-                if (field.type is IrType.ArrayType) code.add("?")
+                if (nullability.fieldIsNullable(field)) code.add("?")
             }
             code.add(")")
         }
@@ -392,12 +392,14 @@ class KotlinCodeGenerator {
          *  6. A generated **`copy(...)`** is present — args matching the properties by order/type and
          *     returning the class type. Every real data class emits `copy`; a hand-written destructurable
          *     value class (manual `componentN` + custom `equals`/`hashCode`/`toString`) virtually never
-         *     does, so this is what keeps such a lookalike a regular class (its custom bodies preserved,
-         *     no `copy` fabricated).
+         *     does. These signature checks only select candidates: constructor stores, component reads
+         *     and the copy constructor call must additionally have exact, effect-free bodies. Default
+         *     dispatchers and all unproved bodies stay explicit in a regular class.
          */
         private fun detectDataClass(cls: IrClass): DataClassShape? {
             if (!KotlinModifiers.has(cls.accessFlags, KotlinModifiers.FINAL)) return null
             if (KotlinModifiers.has(cls.accessFlags, KotlinModifiers.ABSTRACT)) return null
+            if (cls.superType != null && cls.superType != IrType.OBJECT) return null
 
             val properties = cls.fields.filter { f ->
                 !f.contains(AttrFlag.DONT_GENERATE) &&
@@ -408,6 +410,9 @@ class KotlinCodeGenerator {
 
             val constructors = cls.methods.filter { it.name == "<init>" && !it.contains(AttrFlag.DONT_GENERATE) }
             val constructor = constructors.singleOrNull() ?: return null
+            // The reconstructed header has a public primary constructor. Other access contracts must
+            // retain their explicit constructor until the header can represent them exactly.
+            if (constructor.accessFlags and 0x7 != KotlinModifiers.PUBLIC) return null
             if (constructor.argTypes.size != arity) return null
             for (i in 0 until arity) {
                 if (constructor.argTypes[i] != properties[i].type) return null
@@ -423,13 +428,24 @@ class KotlinCodeGenerator {
             if (byIndex.size != arity) return null
             for (i in 1..arity) {
                 val m = byIndex[i] ?: return null
+                if (m.isStatic || m.accessFlags and 0x7 != KotlinModifiers.PUBLIC) return null
                 if (m.returnType != properties[i - 1].type) return null
             }
 
             if (!hasGeneratedEquals(cls)) return null
             if (!hasGeneratedHashCode(cls)) return null
             if (!hasGeneratedToString(cls)) return null
-            if (cls.methods.none { isGeneratedCopy(cls, it, properties) }) return null
+            val copy = cls.methods.singleOrNull { isGeneratedCopy(cls, it, properties) } ?: return null
+            if (copy.accessFlags and 0x7 != KotlinModifiers.PUBLIC) return null
+            // Kotlin fixes generated method names. A renamed method must keep its explicit body so
+            // calls rendered through the alias map still resolve to the same declaration.
+            if ((byIndex.values + copy).any { KotlinMemberAliases.aliasOf(it, aliasMap) != KotlinIdentifiers.sanitize(it.name) }) return null
+            // Signatures do not prove generated bodies: arbitrary checks/effects must survive. A
+            // synthetic default dispatcher needs its own proof before it can be replaced safely.
+            if (cls.methods.any { it.name == "copy\$default" }) return null
+            if (!KotlinConstructorProof.canonicalConstructor(constructor, properties)) return null
+            if (!properties.indices.all { KotlinConstructorProof.canonicalComponent(byIndex[it + 1]!!, properties[it]) }) return null
+            if (!KotlinConstructorProof.canonicalCopy(copy)) return null
 
             return DataClassShape(constructor, properties)
         }
@@ -451,23 +467,23 @@ class KotlinCodeGenerator {
 
         private fun hasGeneratedEquals(cls: IrClass): Boolean =
             cls.methods.any { m ->
-                m.name == "equals" && m.returnType == IrType.BOOLEAN && m.argTypes.size == 1 &&
+                !m.isStatic && m.name == "equals" && m.returnType == IrType.BOOLEAN && m.argTypes.size == 1 &&
                     (m.argTypes[0] as? IrType.Object)?.className == IrType.OBJECT_CLASS
             }
 
         private fun hasGeneratedHashCode(cls: IrClass): Boolean =
-            cls.methods.any { it.name == "hashCode" && it.argTypes.isEmpty() && it.returnType == IrType.INT }
+            cls.methods.any { !it.isStatic && it.name == "hashCode" && it.argTypes.isEmpty() && it.returnType == IrType.INT }
 
         private fun hasGeneratedToString(cls: IrClass): Boolean =
             cls.methods.any { m ->
-                m.name == "toString" && m.argTypes.isEmpty() &&
+                !m.isStatic && m.name == "toString" && m.argTypes.isEmpty() &&
                     (m.returnType as? IrType.Object)?.className == "java.lang.String"
             }
 
         /**
          * A member of the confirmed data class [shape] that only the compiler can author, so `data class`
          * fully regenerates it and it is safe to suppress: the canonical constructor, every `componentN`,
-         * `copy(...)`, and the synthetic `copy$default`. Matched by exact signature so a genuine user
+         * and `copy(...)`. Matched by exact signature and checked bodies so a genuine user
          * method (a different overload, an unrelated helper) still survives.
          *
          * `equals`/`hashCode`/`toString` are deliberately **NOT** suppressed: a data class may legally
@@ -479,13 +495,12 @@ class KotlinCodeGenerator {
         private fun isGeneratedDataMember(cls: IrClass, m: IrMethod, shape: DataClassShape): Boolean {
             if (m === shape.constructor) return true
             if (componentIndex(m) != null) return true
-            if (m.name == "copy\$default") return true
             return isGeneratedCopy(cls, m, shape.properties)
         }
 
         /** The generated `copy(a: A, b: B): X` — args match the properties by order/type, returns the class. */
         private fun isGeneratedCopy(cls: IrClass, m: IrMethod, properties: List<IrField>): Boolean =
-            m.name == "copy" && m.argTypes.size == properties.size &&
+            !m.isStatic && m.name == "copy" && m.argTypes.size == properties.size &&
                 (m.returnType as? IrType.Object)?.className == cls.fullName &&
                 properties.indices.all { m.argTypes[it] == properties[it].type }
 
@@ -547,8 +562,9 @@ class KotlinCodeGenerator {
             // `val name: T` (the M2 bug), pick an honest form:
             //   - a `var` primitive → the JVM default (0/false/…): this MATCHES uninitialized-field
             //     semantics and is a harmless placeholder when the constructor overwrites it;
-            //   - a `var` non-null reference → `lateinit var` (says "assigned later", which is true);
-            //   - anything else (a `val`, where neither is legal) → keep the declaration but flag it with
+            //   - a `var` reference → nullable JVM default null;
+            //   - a final field assigned unconditionally by every explicit constructor → uninitialized val;
+            //   - anything else → keep the declaration but flag it with
             //     a `// JADXMP ERROR` marker so it is never *silently* invalid.
             val isConst = constEligible(field)
             when {
@@ -565,7 +581,7 @@ class KotlinCodeGenerator {
                     emitPropertyNameAndType(cls, field)
                     code.add(" = ").add(KotlinLiterals.format(LiteralOperand(0L, field.type)))
                 }
-                !isFinal && field.type is IrType.ArrayType -> {
+                !isFinal && nullability.fieldIsNullable(field) -> {
                     code.add(KotlinModifiers.visibility(field.accessFlags)).add("var ")
                     emitPropertyNameAndType(cls, field)
                     code.add(" = null")
@@ -573,6 +589,10 @@ class KotlinCodeGenerator {
                 !isFinal && isNonNullReference(field.type) -> {
                     code.add(KotlinModifiers.visibility(field.accessFlags))
                     code.add("lateinit var ")
+                    emitPropertyNameAndType(cls, field)
+                }
+                isFinal && KotlinConstructorProof.initializes(field) -> {
+                    code.add(KotlinModifiers.visibility(field.accessFlags)).add("val ")
                     emitPropertyNameAndType(cls, field)
                 }
                 else -> {
@@ -593,7 +613,7 @@ class KotlinCodeGenerator {
             // `sanitize(field.name)`, byte-identical), matching every reference to this field.
             code.add(KotlinMemberAliases.aliasOf(field, aliasMap))
             code.add(": ").add(types.render(field.type))
-            if (field.type is IrType.ArrayType) code.add("?")
+            if (nullability.fieldIsNullable(field)) code.add("?")
         }
 
         /**
@@ -702,6 +722,9 @@ class KotlinCodeGenerator {
             emitErrorComment(method)
             val isConstructor = method.name == "<init>"
             val overrides = isOverride(cls, method, kind)
+            if (overrides && method.name == "toString" && method.argTypes.isEmpty() &&
+                method.returnType == IrType.STRING && nullability.returnsNullable(method)
+            ) code.emitErrorMarker(method, "nullable JVM return cannot implement Kotlin Any.toString contract")
 
             code.add(KotlinModifiers.visibility(method.accessFlags))
             if (!isConstructor) {
@@ -808,7 +831,7 @@ class KotlinCodeGenerator {
                     code.add("Any?") // the overriding `equals(other: Any?)` signature
                 } else {
                     emitTypeName(method.argTypes[i])
-                    if (method.argTypes[i] is IrType.ArrayType) code.add("?")
+                    if (KotlinReferenceNullability.isReference(method.argTypes[i])) code.add("?")
                 }
             }
             code.add(")")

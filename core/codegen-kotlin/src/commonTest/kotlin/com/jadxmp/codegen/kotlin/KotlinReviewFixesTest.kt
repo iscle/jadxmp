@@ -62,17 +62,17 @@ class KotlinReviewFixesTest {
             .containsLines(4, "i = i + 1", "continue")
     }
 
-    // ---------- M2 follow-up: a type-variable field is marked, never `lateinit` ----------
+    // ---------- Type-variable fields have the same nullable JVM default as other references ----------
 
     @Test
-    fun typeVariableFieldIsMarkedNotLateinit() {
-        // `lateinit var x: T` is illegal (unbounded T has upper bound Any?); such a field must route to
-        // the honest marker branch, never emit silently-invalid `lateinit`.
+    fun typeVariableFieldUsesNullableJvmDefault() {
+        // `lateinit var x: T` is illegal for unbounded T. A nullable declaration can preserve the JVM
+        // default directly; no fabricated initialization exception is needed.
         val cls = irClass("a.Box")
         cls.fields.add(IrField(cls, "value", IrType.typeVariable("T"), Flags.PRIVATE))
         assertThatCode(generate(cls))
-            .containsOne("// JADXMP ERROR: field initializer not reconstructed")
-            .containsLine(1, "private var value: T")
+            .doesNotContain("// JADXMP ERROR: field initializer not reconstructed")
+            .containsLine(1, "private var value: T? = null")
             .doesNotContain("lateinit")
     }
 

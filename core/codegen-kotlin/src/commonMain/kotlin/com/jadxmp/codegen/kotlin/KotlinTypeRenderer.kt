@@ -20,8 +20,7 @@ import com.jadxmp.ir.type.WildcardBound
  *    reference-array elements may be null;
  *  - a wildcard becomes use-site variance (`?`→`*`, `? extends T`→`out T`, `? super T`→`in T`).
  *
- * Outer nullability is applied by declaration/expression emission using [KotlinArrayNullability].
- * General object parameter and external object-return nullability remains outside that model.
+ * Outer nullability is applied by declaration/expression emission using [KotlinReferenceNullability].
  *
  * Partial/unknown types can still be present pre-inference; they render to a deterministic concrete
  * representative so output is stable.
@@ -58,7 +57,7 @@ internal class KotlinTypeRenderer(
         if (element is IrType.Primitive) {
             return primitiveArrayName(element.kind)
         }
-        val nullableElement = KotlinArrayNullability.isReference(element) &&
+        val nullableElement = KotlinReferenceNullability.isReference(element) &&
             !(element is IrType.Wildcard && element.bound == WildcardBound.UNBOUNDED)
         return "Array<" + render(element) + (if (nullableElement) "?" else "") + ">"
     }

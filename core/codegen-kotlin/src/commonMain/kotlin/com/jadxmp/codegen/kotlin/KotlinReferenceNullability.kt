@@ -5,6 +5,7 @@ import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.insn.FieldInstruction
 import com.jadxmp.ir.insn.InstructionOperand
+import com.jadxmp.ir.insn.InvokeCustomInstruction
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.LiteralOperand
@@ -12,17 +13,19 @@ import com.jadxmp.ir.insn.Operand
 import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.node.BasicBlock
 import com.jadxmp.ir.node.IrContainer
+import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.region.*
 import com.jadxmp.ir.type.IrType
 
 /**
- * Source nullability introduced by JVM array boundaries, nullable elements and explicit nulls.
- * The model follows storage copies and method returns; it does not assume general object parameters
- * or unknown external object-returning methods are nullable. No IR type or shared analysis is mutated.
+ * Source nullability at JVM reference parameters/fields, array elements and explicit nulls.
+ * The model follows storage copies and method returns. Unknown JVM reference-returning calls can
+ * return null; explicit bytecode null checks remain at their original positions.
+ * No IR type or shared analysis is mutated.
  */
-internal class KotlinArrayNullability(private val root: IrRoot?) {
+internal class KotlinReferenceNullability(private val root: IrRoot?) {
     private data class RegisterKey(val method: IrMethod, val register: Int)
     private data class Body(val writes: Map<Any, List<Instruction>>, val returns: List<Operand>)
     private sealed class Node {
@@ -35,6 +38,9 @@ internal class KotlinArrayNullability(private val root: IrRoot?) {
     fun isNullable(method: IrMethod, operand: Operand): Boolean = reachesNull(Node.Value(method, operand))
     fun returnsNullable(method: IrMethod): Boolean = reachesNull(Node.Return(method))
 
+    fun fieldIsNullable(field: IrField): Boolean = isReference(field.type) &&
+        (field.accessFlags and KotlinModifiers.FINAL == 0 || field.constValue == null)
+
     private fun reachesNull(start: Node): Boolean {
         val pending = ArrayDeque<Node>()
         val visited = mutableSetOf<Any>()
@@ -43,7 +49,7 @@ internal class KotlinArrayNullability(private val root: IrRoot?) {
             when (val node = pending.removeFirst()) {
                 is Node.Return -> {
                     if (!isReference(node.method.returnType) || !visited.add(node.method)) continue
-                    if (node.method.returnType is IrType.ArrayType) return true
+                    if (node.method.returnType is IrType.ArrayType || hasOpenReturnContract(node.method)) return true
                     body(node.method).returns.forEach { pending.add(Node.Value(node.method, it)) }
                 }
                 is Node.Value -> {
@@ -61,7 +67,7 @@ internal class KotlinArrayNullability(private val root: IrRoot?) {
                             if (local?.isThis == true) continue
                             val parameter = local?.contains(AttrFlag.METHOD_ARGUMENT) == true ||
                                 operand.ssaValue?.contains(AttrFlag.METHOD_ARGUMENT) == true
-                            if (parameter && (operand.type is IrType.ArrayType || local?.type is IrType.ArrayType)) return true
+                            if (parameter) return true
                             val key = key(node.method, operand)
                             if (!visited.add(key)) continue
                             val writes = body(node.method).writes[key].orEmpty()
@@ -85,17 +91,26 @@ internal class KotlinArrayNullability(private val root: IrRoot?) {
                             if (resultType != null && isReference(resultType)) return true
                         }
                         IrOpcode.INVOKE -> {
+                            if (instruction is InvokeCustomInstruction) {
+                                if (isReference(instruction.protoReturnType)) return true
+                                continue
+                            }
                             val reference = (instruction as? InvokeInstruction)?.methodRef ?: continue
+                            if (!isReference(reference.returnType)) continue
+                            if (KotlinJvmInvocationProjection.forInvoke(instruction) == KotlinJvmInvocationProjection.JAVA_CLASS) continue
                             if (reference.returnType is IrType.ArrayType) return true
                             val owner = (reference.declaringType as? IrType.Object)?.className
                             val target = owner?.let { root?.findClass(it) }?.methods?.firstOrNull {
                                 it.name == reference.name && it.argTypes == reference.paramTypes && it.returnType == reference.returnType
                             }
-                            if (target != null) pending.add(Node.Return(target))
+                            if (target != null) pending.add(Node.Return(target)) else return true
                         }
                         IrOpcode.INSTANCE_GET, IrOpcode.STATIC_GET -> {
                             val type = (instruction as? FieldInstruction)?.fieldRef?.type ?: instruction.result?.type
-                            if (type is IrType.ArrayType) return true
+                            val reference = (instruction as? FieldInstruction)?.fieldRef
+                            val owner = (reference?.declaringType as? IrType.Object)?.className
+                            val field = owner?.let { root?.findClass(it) }?.fields?.firstOrNull { it.name == reference.name && it.type == type }
+                            if (type != null && isReference(type) && (field == null || fieldIsNullable(field))) return true
                         }
                         // Allocations, constructors, class/string constants and primitive results are non-null.
                         else -> Unit
@@ -104,6 +119,17 @@ internal class KotlinArrayNullability(private val root: IrRoot?) {
             }
         }
         return false
+    }
+
+    /** An overridable JVM method's callers must also accept null from an overriding implementation. */
+    private fun hasOpenReturnContract(method: IrMethod): Boolean {
+        // Kotlin fixes Any.toString's source contract to String; a nullable implementation is diagnosed
+        // explicitly by the class emitter instead of inserting a new assertion or dropping null.
+        if (method.name == "toString" && method.argTypes.isEmpty() && method.returnType == IrType.STRING) return false
+        if (method.accessFlags and (KotlinModifiers.ABSTRACT or KotlinModifiers.NATIVE) != 0) return true
+        val fixed = KotlinModifiers.STATIC or KotlinModifiers.FINAL or KotlinModifiers.PRIVATE
+        if (method.accessFlags and fixed != 0) return false
+        return method.declaringClass.accessFlags and KotlinModifiers.FINAL == 0
     }
 
     private fun key(method: IrMethod, operand: RegisterOperand): Any =

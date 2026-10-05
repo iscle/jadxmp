@@ -128,11 +128,11 @@ class KotlinClassTest {
         // M2: a property without a reconstructed initializer must never be silently uncompilable.
         val cls = irClass("a.Foo")
         cls.fields.add(IrField(cls, "count", IrType.INT, Flags.PRIVATE)) // var primitive → JVM-default init
-        cls.fields.add(IrField(cls, "label", IrType.STRING, Flags.PRIVATE)) // var ref → lateinit
+        cls.fields.add(IrField(cls, "label", IrType.STRING, Flags.PRIVATE)) // var ref → JVM null default
         cls.fields.add(IrField(cls, "name", IrType.STRING, Flags.PUBLIC or Flags.FINAL)) // val ref → marked
         assertThatCode(generate(cls))
             .containsLine(1, "private var count: Int = 0")
-            .containsLine(1, "private lateinit var label: String")
+            .containsLine(1, "private var label: String? = null")
             .containsOne("// JADXMP ERROR: field initializer not reconstructed")
             .containsLine(1, "val name: String")
     }
@@ -165,7 +165,7 @@ class KotlinClassTest {
             body(ret(intLit(0)))
         }
         assertThatCode(generate(cls))
-            .containsOne("fun compute(name: String, size: Int): Int {")
+            .containsOne("fun compute(name: String?, size: Int): Int {")
             .containsOne("return 0")
     }
 

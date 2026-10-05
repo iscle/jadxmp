@@ -16,19 +16,19 @@ class KotlinJvmInvocationProjectionTest {
     fun stringAndCharSequenceLengthUseProperty() {
         for (owner in listOf(IrType.STRING, IrType.objectType("java.lang.CharSequence"))) {
             assertThatCode(call(owner, "length", IrType.INT))
-                .containsOne("return value.length")
+                .containsOne("return value!!.length")
                 .doesNotContain("value.length()")
         }
     }
 
     @Test
     fun stringCharAtUsesIndexing() {
-        assertThatCode(call(IrType.STRING, "charAt", IrType.CHAR, index = 1)).containsOne("return value[1]")
+        assertThatCode(call(IrType.STRING, "charAt", IrType.CHAR, index = 1)).containsOne("val index = 1").containsOne("receiver!![index]")
     }
 
     @Test
     fun unrelatedLengthMethodKeepsCallSyntax() {
-        assertThatCode(call(IrType.objectType("a.Custom"), "length", IrType.INT)).containsOne("return value.length()")
+        assertThatCode(call(IrType.objectType("a.Custom"), "length", IrType.INT)).containsOne("receiver!!.length()")
     }
 
     @Test
