@@ -69,10 +69,11 @@ class KotlinCodeGenerator {
     ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = KotlinImports(packageName, cls, aliasMap)
+        val inheritance = KotlinInheritancePlan()
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -90,7 +91,7 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -104,6 +105,7 @@ class KotlinCodeGenerator {
         private val aliasMap: AliasMap = AliasMap.EMPTY,
         private val root: IrRoot? = null,
         private val commentMap: CommentMap = CommentMap.EMPTY,
+        private val inheritance: KotlinInheritancePlan = KotlinInheritancePlan(),
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -136,6 +138,9 @@ class KotlinCodeGenerator {
             emitDeclarationHeader(cls, kind, topLevel, dataShape)
             code.add(" {").newLine()
             code.incIndent()
+            if (kind == ClassKind.CLASS && cls.superType != null && cls.superType != IrType.OBJECT) {
+                inheritance.constructorDelegations(cls).problem?.let { code.emitErrorMarker(cls, it) }
+            }
 
             val isObject = kind == ClassKind.OBJECT
             val isEnum = kind == ClassKind.ENUM
@@ -542,7 +547,7 @@ class KotlinCodeGenerator {
             for ((i, part) in parts.withIndex()) {
                 if (i > 0) code.add(", ")
                 emitTypeName(part.first)
-                if (part.second) code.add("()") // implicit no-arg super constructor call
+                if (part.second && (kind != ClassKind.CLASS || inheritance.constructorDelegations(cls).value.isEmpty())) code.add("()")
             }
         }
 
@@ -759,6 +764,19 @@ class KotlinCodeGenerator {
                 // JVM annotation preserves implicit acquisition before any compiler-inserted checks.
                 code.add("@").add(imports.aliasedClass(KotlinJvmModifiers.SYNCHRONIZED_ANNOTATION)).newLine()
             }
+            val inheritedAnalysis = inheritance.overrideTargets(method)
+            inheritedAnalysis.problem?.let { code.emitErrorMarker(method, it) }
+            val inheritedTargets = inheritedAnalysis.value
+            if (inheritedTargets.any { it.accessFlags and KotlinModifiers.FINAL != 0 })
+                code.emitErrorMarker(method, "loaded declaration attempts to override a final method")
+            if (inheritedTargets.any { it.returnType != method.returnType })
+                code.emitErrorMarker(method, "covariant or incompatible loaded override requires explicit bridge reconstruction")
+            if (inheritedTargets.any { it.returnType == method.returnType &&
+                    !nullability.returnsNullable(it) && nullability.returnsNullable(method) })
+                code.emitErrorMarker(method, "nullable JVM return cannot implement loaded non-null Kotlin override contract")
+            if (inheritedTargets.any { it.accessFlags and KotlinModifiers.PUBLIC != 0 } &&
+                method.accessFlags and KotlinModifiers.PUBLIC == 0)
+                code.emitErrorMarker(method, "loaded override reduces inherited public visibility")
             val overrides = isOverride(cls, method, kind)
             if (overrides && method.name == "toString" && method.argTypes.isEmpty() &&
                 method.returnType == IrType.STRING && nullability.returnsNullable(method)
@@ -806,7 +824,7 @@ class KotlinCodeGenerator {
             // path unchanged. The SAME writer must render header then body so variable naming/ids stay in
             // sync between the two.
             val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames, aliasMap = aliasMap, nullability = nullability)
-            if (isConstructor) writer.emitConstructorDelegationHeader()
+            if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
             code.add(" ")
             emitBody(writer)
         }
@@ -825,6 +843,7 @@ class KotlinCodeGenerator {
                 // already open by inheritance, so it never needs `open` too.
                 !isOverride && isOpenCandidate(cls, method, kind) -> sb.append("open ")
             }
+            if (isOverride && method.accessFlags and KotlinModifiers.FINAL != 0) sb.append("final ")
             if (isOverride) sb.append("override ")
             return sb.toString()
         }
@@ -842,11 +861,12 @@ class KotlinCodeGenerator {
 
         /**
          * True when [method] carries the `override` modifier: either flagged by the pipeline
-         * ([KotlinCodegenKeys.IS_OVERRIDE]) or one of the members that always overrides `Any`
+         * ([KotlinCodegenKeys.IS_OVERRIDE]), proven from a loaded erased declaration, or a member that overrides `Any`
          * (`toString`/`hashCode`/`equals`), which we can recognise without the class hierarchy.
          */
         private fun isOverride(cls: IrClass, method: IrMethod, kind: ClassKind): Boolean {
-            if (method[KotlinCodegenKeys.IS_OVERRIDE] == true) return true
+            if (method[KotlinCodegenKeys.IS_OVERRIDE] == true ||
+                inheritance.overrideTargets(method).value.any { it.returnType == method.returnType }) return true
             if (kind != ClassKind.CLASS && kind != ClassKind.OBJECT) return false
             return when (method.name) {
                 "toString" -> method.argTypes.isEmpty()

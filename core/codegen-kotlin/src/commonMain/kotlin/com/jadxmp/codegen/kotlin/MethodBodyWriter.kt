@@ -151,25 +151,25 @@ internal class MethodBodyWriter(
      *
      * ### Rule 4 — a constructor is high-risk, so we only touch a provably-safe shape and BAIL otherwise
      * (leaving the body's honest `// JADXMP ERROR` marker, never an invalid header or a dropped call):
-     *  - **Only when the class extends `Object`/`Any`.** A real superclass is rendered on the class header
-     *    WITH constructor parens (`: Base()`), which implies a primary constructor; a competing
-     *    secondary-header `: super(...)` would conflict. Those (and enums, whose super is `java.lang.Enum`)
-     *    are left to the marker.
+     *  - A real superclass requires the class emitter's shared plan proving every secondary
+     *    constructor, including acyclic this-chains. Its class header then names the base without
+     *    invoking it. Unknown, enum or otherwise unsupported superclass shapes retain the marker.
      *  - **Only a genuine FIRST emittable statement.** If any statement precedes the delegation (Kotlin
      *    forbids code before a delegation) or it is nested/conditional, we bail.
      *  - A no-arg `super()` (the implicit `Any` super) is OMITTED — Kotlin supplies it. A `this(args)`
      *    delegation moves to `: this(args)`; its args are the constructor's params/constants (no local can
      *    precede a first-statement delegation), so they render identically to the body.
      */
-    fun emitConstructorDelegationHeader() {
+    fun emitConstructorDelegationHeader(provenSuperclassDelegation: InvokeInstruction? = null) {
         if (method.name != "<init>") return
-        // Gate on an Object/Any superclass (see kdoc): a real base or enum super stays with the marker.
+        // A real superclass needs the same proof that removed the class-header constructor call.
         val superType = method.declaringClass.superType
-        if (superType != null && superType != IrType.OBJECT) return
+        if (superType != null && superType != IrType.OBJECT && provenSuperclassDelegation == null) return
 
         val first = firstEmittableTopLevel() ?: return
         if (!isConstructorDelegation(first)) return
         val invoke = first as InvokeInstruction
+        if (provenSuperclassDelegation != null && first !== provenSuperclassDelegation) return
         val firstArg = if (invoke.hasInstance) 1 else 0
         val delegationArgs = invoke.argCount - firstArg
 
@@ -180,7 +180,12 @@ internal class MethodBodyWriter(
             // `this(args)` → header `: this(args)`.
             isThisCall -> {
                 code.add(" : this")
-                emitArgList(invoke, firstArg)
+                emitArgList(invoke, firstArg, preserveReferenceTypes = provenSuperclassDelegation != null)
+                headerDelegation = first
+            }
+            provenSuperclassDelegation != null && invoke.methodRef.declaringType == superType -> {
+                code.add(" : super")
+                emitArgList(invoke, firstArg, preserveReferenceTypes = true)
                 headerDelegation = first
             }
             // A no-arg super to Object/Any is implicit in Kotlin → omit the delegation entirely.
