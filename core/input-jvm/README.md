@@ -71,6 +71,10 @@ array component class. Kotlin reference-array checks use the exact array Class a
 the operand once and handling null; an erased `is Array<*>` check would be incorrect. The original
 pinned jadx drops one unused throwing cast; that measured mismatch remains explicit in the test
 while both candidate languages must retain the original ClassCastException.
+Native arraylength uses the shared ARRAY_LENGTH instruction for known arrays and null, with real
+javac execution checks for all primitive array kinds, reference/nested arrays, null joins, loops,
+unused throwing reads and division/null exception ordering. Non-array frames are rejected; array
+joins conservatively widened to Object still require future hierarchy work.
 Default-facade tests cover actual javac execution through both backends, unrelated bytes with a
 `.class` suffix, malformed recognized input, and reload after a failed load. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the

@@ -154,6 +154,15 @@ internal object JvmRegisterNormalizer {
                     emit(if (opcode == 0xa5) Opcode.IF_EQ else Opcode.IF_NE, intArrayOf(lhs, rhs),
                         target = (raw.operand as JvmOperand.Branch).target)
                 }
+                0xbe -> {
+                    val (type, source) = popReference()
+                    // Null is a valid verifier operand and must keep its runtime NPE. An Object
+                    // join alone is not evidence of an array; do not invent a narrowing cast.
+                    if (type is JvmFrameValue.Reference && !type.descriptor.startsWith('[')) {
+                        fail("arraylength requires an array, found ${type.descriptor}")
+                    }
+                    emit(Opcode.ARRAY_LENGTH, intArrayOf(push(JvmFrameValue.IntValue), source))
+                }
                 0xc0, 0xc1 -> {
                     val target = constantOperands.type((raw.operand as JvmOperand.Constant).index)
                     val source = popReference().second

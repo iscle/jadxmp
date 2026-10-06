@@ -56,7 +56,11 @@ local indexes), null constants and exact/null/Object reference returns preserve 
 Null/reference joins retain the known type; distinct initialized references conservatively join
 at Object. Narrower return assignability that needs unavailable hierarchy information is diagnosed.
 Native checkcast/instanceof and String/Class ldc/ldc_w now lower through the shared typed index
-contracts. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
+contracts. Native arraylength lowers to the shared ARRAY_LENGTH operation for known array frames
+and null operands. It preserves unused throwing reads, primitive/reference/multidimensional array
+lengths, null-array joins, loops and exception ordering in both rebuilt languages. A reference joined
+only as Object is insufficient proof of an array and remains diagnosed; precise array hierarchy joins
+are separate work. The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
 jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
 `JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.

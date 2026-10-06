@@ -34,9 +34,10 @@ class JvmClassAdapterTest {
 
     @Test fun unsupportedBodiesRemainIsolatedAndCacheTheirOriginalFailure() {
         val cls = JvmClassAdapter.adapt(file(methods = listOf(
-            method("broken", "()V", code(0, 1, 0x01, 0xbe, 0x57, 0xb1)),
+            method("broken", "()V", code(0, 1, 0x01, 0xbf)), // athrow remains unsupported.
             method("good", "()I", code(0, 1, 0x04, 0xac)),
             method("formerlyUnsupportedNull", "()V", code(0, 1, 0x01, 0x57, 0xb1)),
+            method("formerlyUnsupportedLength", "()V", code(0, 1, 0x01, 0xbe, 0x57, 0xb1)),
         )), "Example.class")
         val bad = cls.methods[0]
         val first = assertFailsWith<ByteReaderException> { bad.codeReader }
@@ -45,6 +46,10 @@ class JvmClassAdapterTest {
         assertTrue(cls.methods[1].codeReader != null)
         val nowSupported = assertNotNull(cls.methods[2].codeReader)
         assertSame(nowSupported, cls.methods[2].codeReader)
+        val lengthReader = assertNotNull(cls.methods[3].codeReader)
+        val lengthOpcodes = mutableListOf<Opcode>()
+        lengthReader.visitInstructions { it.decode(); lengthOpcodes += it.opcode }
+        assertTrue(Opcode.ARRAY_LENGTH in lengthOpcodes)
         assertTrue(cls.disassemble().contains("aconst_null"))
     }
 
