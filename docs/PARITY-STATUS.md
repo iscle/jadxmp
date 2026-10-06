@@ -3,18 +3,27 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
-## Expanded original-source round trips (engine `121c666`)
+## Expanded original-source round trips (engine `30fbba0`)
 
 All 612 pinned integration Java files now receive a result row. Of 431 eligible compiled
-originals, reference Java recompiles 411, candidate Java 289, and candidate Kotlin 211.
-Of 112 passing original checks, rebuilt reference Java passes 108, candidate Java 67,
-and candidate Kotlin 32. The other 319 compiled originals have no evaluated execution check.
+originals, reference Java recompiles 411, candidate Java 289, and candidate Kotlin 212.
+Of 112 passing original checks, rebuilt reference Java passes 108, candidate Java 69,
+and candidate Kotlin 33. The other 319 compiled originals have no evaluated execution check.
 All original extraction, compilation and check failures remain in the report.
 
-This exposes **143 Java reference-better cases beyond the existing smali gate**. Those failures
+This still exposes **141 Java reference-better cases beyond the existing smali gate**. Those failures
 remain production blockers. The additive reporting task records them without changing the
 existing gates or declaring parity; CI keeps its full evidence. See
 [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for the profile, limits and reproduction.
+
+The primitive-array constant repair raises Java check passes from 67 to 69, Kotlin check passes
+from 32 to 33, and Kotlin compilations from 211 to 212, with no measured signal losses.
+`TestPrimitivesNegate` now passes in both languages; `TestFloatValue` gains Java execution while
+its Kotlin output still fails on unavailable external generic declaration information. Shared raw
+constants receive independent typed array-store literals, preserving float/int and double/long
+bit interpretations. Equal-bit acyclic phi paths and copies are covered; general mixed primitive
+SSA views remain incomplete. Independent tests cover all five pipeline targets and seven runtime
+cases, including negative zero, null/bounds failures and reference-array store exceptions.
 
 ## Latest fixture-context and forwarding validation
 
@@ -177,8 +186,8 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 2. Kotlin has 126 fixture contexts with compiler errors or no output, plus three compilable outputs carrying
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
-3. Expanded upstream round trips expose 143 Java reference-better cases, with only 67 Java and
-   32 Kotlin passing rebuilt checks out of 112 passing originals at engine `121c666`. These failures,
+3. Expanded upstream round trips expose 141 Java reference-better cases, with only 69 Java and
+   33 Kotlin passing rebuilt checks out of 112 passing originals at engine `30fbba0`. These failures,
    unsupported extractions and compiler profiles remain unresolved. The smali gate still measures
    no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration

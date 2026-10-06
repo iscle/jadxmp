@@ -70,12 +70,19 @@ originals converted to DEX. Results from 2026-10-06:
 | jadxmp Java | 401 | 289 | 67 | 45 |
 | jadxmp Kotlin | 295 | 211 | 32 | 80 |
 
-There are **143 Java cases where the reference passes a signal the candidate fails**.
+That initial snapshot has **143 Java cases where the reference passes a signal the candidate fails**.
 These are newly exposed parity failures, not exceptions or passing parity. For example,
-`arith/TestPrimitivesNegate.java` recompiles as Java but fails its embedded check; its Kotlin
-output fails compilation. The 319 originals without eligible checks remain **not evaluated**
+`arith/TestPrimitivesNegate.java` initially recompiles as Java but fails its embedded check;
+its initial Kotlin output fails compilation. The 319 originals without eligible checks remain **not evaluated**
 for execution. Failed original compilation/checks and unsupported extraction remain visible
 outside the 431 measured outputs; they cannot become decompiler passes.
+
+The full rerun after the array constant repair at engine `30fbba0` retains the same 612 rows and
+431 eligible inputs. Java now passes **69/112** rebuilt checks; Kotlin recompiles **212/431** and
+passes **33/112** checks. Reference results and candidate no-error counts are unchanged; Java
+still recompiles 289 inputs. The Java reference-better count falls to **141** with no lost signals.
+`TestPrimitivesNegate` gains Java execution and Kotlin compilation/execution; `TestFloatValue`
+gains Java execution, while Kotlin's external generic type errors remain visible.
 
 The task writes `tools/oracle/build/reports/upstream-java-roundtrips.tsv`, including every input
 hash, extraction transformation, raw signal, compiler status and diagnostic. Recoverable decompiler
