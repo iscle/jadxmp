@@ -9,6 +9,9 @@ package com.jadxmp.input
 public interface FieldData : FieldRef {
     public val accessFlags: Int
 
+    /** Optional JVMS generic signature, independent of the erased descriptor. May reject malformed input on access. */
+    public val genericSignature: String? get() = null
+
     public val annotations: List<AnnotationData>
 
     /** The encoded initializer for a static field, or null; the field need not be final. */
@@ -25,6 +28,9 @@ public interface MethodData {
     public val ref: MethodRef
 
     public val accessFlags: Int
+
+    /** Optional JVMS generic signature, independent of the erased descriptor. May reject malformed input on access. */
+    public val genericSignature: String? get() = null
 
     public val annotations: List<AnnotationData>
 
@@ -47,8 +53,18 @@ public interface ClassData {
 
     public val accessFlags: Int
 
+    /** Optional JVMS generic signature, independent of the erased descriptor. May reject malformed input on access. */
+    public val genericSignature: String? get() = null
+
     /** Format-neutral lexical enclosure, or null for unavailable/legacy metadata. */
     public val nesting: ClassNesting? get() = null
+
+    /**
+     * Enclosure used by runtime generic reflection, independently of best-effort source nesting.
+     * Null means unknown, never proof of no enclosing scope. Formats may know reflection sees no
+     * enclosure even when [nesting] stays unavailable to permit source reconstruction heuristics.
+     */
+    public val reflectiveNesting: ClassNesting? get() = nesting
 
     /** Member-class modifiers, independent of enclosure (which may be unavailable). */
     public val innerAccessFlags: Int? get() = null

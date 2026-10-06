@@ -20,6 +20,7 @@ class DexClassNestingTest {
         )
         val data = data(annotations)
         assertEquals(ClassNesting.Nested("Lexample/Outer;", innerName = "Member"), data.nesting)
+        assertEquals(data.nesting, data.reflectiveNesting)
         assertEquals(9, data.innerAccessFlags)
         assertSame(annotations, data.annotations)
     }
@@ -45,7 +46,21 @@ class DexClassNestingTest {
         assertEquals(9, flagsOnly.innerAccessFlags)
         val absent = data(emptyList())
         assertNull(absent.nesting)
+        assertEquals(ClassNesting.TopLevel, absent.reflectiveNesting)
+        assertNull(flagsOnly.reflectiveNesting)
         assertNull(absent.innerAccessFlags)
+    }
+
+    @Test
+    fun partialDuplicateAndNonSystemScopeAnnotationsRemainUnknown() {
+        val owner = annotation("EnclosingClass", mapOf("value" to EncodedValue(EncodedValueType.TYPE, "LOuter;")))
+        val inner = annotation("InnerClass", mapOf("name" to EncodedValue(EncodedValueType.STRING, "Inner"),
+            "accessFlags" to EncodedValue(EncodedValueType.INT, 1)))
+        for (annotations in listOf(listOf(owner), listOf(inner), listOf(owner, owner, inner),
+            listOf(owner, inner.copy(visibility = AnnotationVisibility.RUNTIME)),
+            listOf(owner, inner.copy(values = emptyMap())))) {
+            assertNull(data(annotations).reflectiveNesting)
+        }
     }
 
     private fun annotation(name: String, values: Map<String, EncodedValue>) =

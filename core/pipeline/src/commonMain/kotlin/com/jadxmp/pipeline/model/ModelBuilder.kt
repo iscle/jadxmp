@@ -29,18 +29,24 @@ import kotlin.coroutines.cancellation.CancellationException
  */
 object ModelBuilder {
 
-    fun build(loader: CodeLoader): IrRoot {
+    fun build(loader: CodeLoader): IrRoot = build(loader, readCode = true)
+
+    /** Internal metadata path; its temporary nodes never enter the executable program root. */
+    internal fun buildDeclarations(loader: CodeLoader): IrRoot = build(loader, readCode = false)
+
+    private fun build(loader: CodeLoader, readCode: Boolean): IrRoot {
         val root = IrRoot()
         // Two phases: first materialize every class flat (so any outer is resolvable regardless of input
         // order), then wire the nesting tree. Every class stays reachable via [IrRoot.findClass]; only the
         // top-level classes (those with a null [IrClass.outerClass]) are driven for standalone codegen.
         val built = ArrayList<Pair<IrClass, ClassData>>(loader.classes.size)
         for (classData in loader.classes) {
-            val cls = buildClass(root, classData)
+            val cls = buildClass(root, classData, readCode)
             root.addClass(cls)
             built.add(cls to classData)
         }
         nestInnerClasses(root, built)
+        if (!readCode) GenericSignatureModel.attach(built)
         return root
     }
 
@@ -119,7 +125,7 @@ object ModelBuilder {
         return fullName.substring(0, lastDollar)
     }
 
-    private fun buildClass(root: IrRoot, data: ClassData): IrClass {
+    private fun buildClass(root: IrRoot, data: ClassData, readCode: Boolean): IrClass {
         val superType = data.superType?.let { Descriptors.parseClassType(it) }
         val interfaces = data.interfaces.map { Descriptors.parseClassType(it) }
         val cls = IrClass(
@@ -144,7 +150,7 @@ object ModelBuilder {
                 accessFlags = m.accessFlags,
             )
             try {
-                val reader = m.codeReader
+                val reader = if (readCode) m.codeReader else null
                 if (reader != null) {
                     // Obtain both values before publishing either: a lazy parser can reject its
                     // body or frame here, before the guarded per-method pipeline has started.

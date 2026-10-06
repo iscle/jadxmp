@@ -82,6 +82,7 @@ internal class DexFieldData(
     override val annotations: List<AnnotationData>,
     override val constValue: EncodedValue?,
 ) : FieldData {
+    override val genericSignature: String? get() = DexGenericSignature.read(annotations)
     private val ref = DexFieldRef(declaringClassType, name, type)
     override val declaringClassType: String get() = ref.declaringClassType
     override val name: String get() = ref.name
@@ -95,6 +96,7 @@ internal class DexMethodData(
     override val parameterAnnotations: List<List<AnnotationData>>,
     private val codeProvider: () -> CodeReader?,
 ) : MethodData {
+    override val genericSignature: String? get() = DexGenericSignature.read(annotations)
     override val codeReader: CodeReader? by lazy(codeProvider)
 }
 
@@ -109,8 +111,10 @@ internal class DexClassData(
     override val annotations: List<AnnotationData>,
     override val inputFileName: String,
 ) : ClassData {
+    override val genericSignature: String? get() = DexGenericSignature.read(annotations)
     private val classNesting = DexClassNesting(annotations)
     override val nesting get() = classNesting.nesting
+    override val reflectiveNesting get() = classNesting.reflectiveNesting
     override val innerAccessFlags get() = classNesting.innerAccessFlags
     override fun disassemble(): String = SmaliPrinter.render(this)
 }

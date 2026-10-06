@@ -15,6 +15,7 @@ import com.jadxmp.input.MethodRef
 class FakeMethodData(
     override val ref: MethodRef,
     override val accessFlags: Int = 0,
+    override val genericSignature: String? = null,
     override val codeReader: CodeReader? = null,
 ) : MethodData {
     override val annotations: List<AnnotationData> get() = emptyList()
@@ -24,6 +25,7 @@ class FakeMethodData(
 class FakeFieldData(
     private val fieldRef: FakeFieldRef,
     override val accessFlags: Int = 0,
+    override val genericSignature: String? = null,
     override val constValue: EncodedValue? = null,
 ) : FieldData {
     override val declaringClassType: String get() = fieldRef.declaringClassType
@@ -39,8 +41,10 @@ class FakeClassData(
     override val methods: List<MethodData> = emptyList(),
     override val fields: List<FieldData> = emptyList(),
     override val accessFlags: Int = 0,
+    override val genericSignature: String? = null,
     override val annotations: List<AnnotationData> = emptyList(),
     override val nesting: ClassNesting? = null,
+    override val reflectiveNesting: ClassNesting? = nesting,
     override val innerAccessFlags: Int? = null,
 ) : ClassData {
     override val sourceFile: String? get() = null
