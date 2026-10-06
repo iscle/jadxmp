@@ -65,6 +65,22 @@ unchanged; every other reference/Java/Kotlin signal matches the preceding `141ca
 Java execution remains 69/112 passing original checks; Kotlin remains 212/431 compilations
 and 33/112 passing checks. Full parity and production readiness remain unachieved.
 
+## Expanded Kotlin inheritance measurement (engine `cb02fc1`)
+
+Hosted CI again completed all 612 rows with `metadata_profile=none`. Kotlin compiles
+**228 of 431** eligible inputs, up from 212, and passes **37 of 112** original checks, up from 33.
+The four new execution passes are `TestDefConstructorNotRemoved`, `TestFieldInit3`,
+`TestOverridePrivateMethod` and `TestOverrideStaticMethod`. The other twelve new compilations
+have no evaluated original check. Five additional outputs lose an unsupported diagnostic but
+still fail compilation; those are not compilation or execution gains. Kotlin's no-error total
+rises from 295 to 312, with no measured signal losses.
+
+All 612 input/extraction hashes, classifications, preparation and transformation records match
+`20014ae`, as do every reference and candidate Java signal. Java remains at 292 compilations,
+69 passing checks and 138 reference-better cases. This is a metadata-free measurement of the
+array-store and plain-inheritance batch; it precedes the later allocation, null-throw and overload
+fixes. It neither combines the opt-in metadata profile above nor declares whole-corpus parity.
+
 ## Source overload binding
 
 Shared source binding now retains exact loaded overload descriptors when source arguments have
