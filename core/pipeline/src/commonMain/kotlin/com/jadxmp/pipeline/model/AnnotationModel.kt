@@ -50,12 +50,11 @@ internal class AnnotationModel {
         enter(depth)
         require((source.visibility == null) == nested) { "invalid annotation visibility for nesting context" }
         val type = type(source.annotationType) as? IrType.Object ?: error("annotation type is not a class")
-        charge(source.values.size)
-        val values = LinkedHashMap<String, IrAnnotationValue>()
-        for ((name, encoded) in source.values) {
-            text(name)
-            values[name] = value(encoded, depth + 1)
-        }
+        // A declaration's header can identify independently handled system metadata even if its
+        // payload is not source-representable. Nested failures still invalidate their containing
+        // value/default atomically; no partially decoded nested annotation is published as ready.
+        val values = if (nested) AnnotationMetadata.Ready(annotationValues(source, depth))
+            else capture { annotationValues(source, depth) }
         val visibility = when (source.visibility) {
             AnnotationVisibility.BUILD -> IrAnnotationVisibility.BUILD
             AnnotationVisibility.RUNTIME -> IrAnnotationVisibility.RUNTIME
@@ -63,6 +62,16 @@ internal class AnnotationModel {
             null -> null
         }
         return IrAnnotation(type, visibility, values)
+    }
+
+    private fun annotationValues(source: AnnotationData, depth: Int): Map<String, IrAnnotationValue> {
+        charge(source.values.size)
+        val values = LinkedHashMap<String, IrAnnotationValue>()
+        for ((name, encoded) in source.values) {
+            text(name)
+            values[name] = value(encoded, depth + 1)
+        }
+        return values
     }
 
     private fun value(source: EncodedValue, depth: Int): IrAnnotationValue {

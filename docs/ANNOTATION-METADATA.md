@@ -15,9 +15,13 @@ raw SYSTEM wrapper remains inspectable, including unknown element names, but who
 validation is deferred. A real DEX-to-IR control records this boundary; it is not an invalid-input
 policy exemption or a source-parity result.
 
-Each annotation is atomic. An unsupported system value (for example an `EnclosingMethod` METHOD
-reference or an anonymous `InnerClass` NULL name) is recorded as `Unavailable` at its original
-list position without erasing valid annotations beside it. The existing nesting/signature consumers
+Each annotation's value map is atomic. A validated type and visibility survive an unsupported value
+(for example an `EnclosingMethod` METHOD reference or an anonymous `InnerClass` NULL name), with
+the complete value map recorded as `Unavailable`. An invalid header instead makes the entire entry
+`Unavailable` at its original list position. Valid annotations beside it survive. This lets consumers
+route known metadata by typed identity without parsing diagnostic text or treating failed values as
+an empty map. A failed nested annotation still invalidates its containing value/default atomically.
+The existing nesting/signature consumers
 continue reading their input metadata. No system namespace is silently filtered. Unsupported
 NULL, FIELD, METHOD, METHOD_TYPE and METHOD_HANDLE annotation values retain diagnostic outcomes;
 source representability of these values is not claimed.

@@ -6,7 +6,8 @@ import com.jadxmp.ir.type.IrType
 data class IrAnnotation(
     val type: IrType.Object,
     val visibility: IrAnnotationVisibility?,
-    val values: Map<String, IrAnnotationValue>,
+    /** Validated identity survives value failure; consumers must not infer identity from diagnostics. */
+    val values: AnnotationMetadata<Map<String, IrAnnotationValue>>,
 )
 
 /** Ordered attachment entries; failure of one annotation does not erase its valid siblings. */

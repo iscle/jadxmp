@@ -22,6 +22,9 @@ class AnnotationMetadataInputTest {
         return value as T
     }
 
+    private fun values(annotation: IrAnnotation) =
+        assertIs<AnnotationMetadata.Ready<Map<String, IrAnnotationValue>>>(annotation.values).value
+
     @Test fun javacDexDefaultsAndAllDeclarationAttachmentsReachTypedIr() {
         val source = DecompiledClass("fixtures.MetadataSample", """
             package fixtures;
@@ -60,7 +63,7 @@ class AnnotationMetadataInputTest {
         assertEquals(1, entries(marked.fields.single()[SourceAttributes.ANNOTATIONS]).size)
         assertEquals(1, entries(marked.methods.single { it.name == "<init>" }[SourceAttributes.ANNOTATIONS]).size)
         val method = marked.methods.single { it.name == "method" }
-        assertEquals(IrAnnotationValue.Primitive(8, IrType.INT), entries(method[SourceAttributes.ANNOTATIONS]).single().values["number"])
+        assertEquals(IrAnnotationValue.Primitive(8, IrType.INT), values(entries(method[SourceAttributes.ANNOTATIONS]).single())["number"])
         val parameters = assertIs<AnnotationMetadata.Ready<List<IrAnnotationSet>>>(method[SourceAttributes.PARAMETER_ANNOTATIONS]).value
         assertEquals(listOf(0, 1), parameters.map { it.entries.size })
     }
@@ -84,8 +87,8 @@ class AnnotationMetadataInputTest {
             assertTrue(cls.methods.isEmpty())
             val entries = assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(cls[SourceAttributes.ANNOTATIONS]).value.entries
             val wrapper = assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries.single()).value
-            val nested = assertIs<IrAnnotationValue.Nested>(wrapper.values["value"])
-            assertEquals(IrAnnotationValue.Primitive(7, IrType.INT), nested.annotation.values["ghost"])
+            val nested = assertIs<IrAnnotationValue.Nested>(values(wrapper)["value"])
+            assertEquals(IrAnnotationValue.Primitive(7, IrType.INT), values(nested.annotation)["ghost"])
             // No method exists to request the lazy default index. The raw wrapper remains available;
             // whole-class default validation is a documented remaining boundary, not a parity claim.
         } finally {

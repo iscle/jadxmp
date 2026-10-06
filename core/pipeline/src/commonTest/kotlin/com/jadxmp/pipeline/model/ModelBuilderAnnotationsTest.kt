@@ -8,6 +8,12 @@ import com.jadxmp.pipeline.support.*
 import kotlin.test.*
 
 class ModelBuilderAnnotationsTest {
+    private fun values(annotation: IrAnnotation) =
+        assertIs<AnnotationMetadata.Ready<Map<String, IrAnnotationValue>>>(annotation.values).value
+
+    private fun entry(metadata: AnnotationMetadata<IrAnnotationSet>?) =
+        assertIs<AnnotationMetadata.Ready<IrAnnotation>>(assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(metadata).value.entries.single()).value
+
     private fun ann(values: Map<String, EncodedValue> = emptyMap(), visibility: AnnotationVisibility? = AnnotationVisibility.RUNTIME) =
         AnnotationData("Lexample/Tag;", visibility, values)
 
@@ -30,24 +36,24 @@ class ModelBuilderAnnotationsTest {
         val value = assertIs<AnnotationMetadata.Ready<IrAnnotation>>(annotations.single()).value
         assertEquals(IrAnnotationVisibility.RUNTIME, value.visibility)
         assertEquals(IrType.objectType("example.Tag"), value.type)
-        assertEquals(values.keys.toList(), value.values.keys.toList())
-        assertEquals(IrAnnotationValue.Primitive(-253, IrType.INT), value.values["number"])
-        assertEquals(IrAnnotationValue.ClassLiteral(IrType.array(IrType.INT)), value.values["type"])
-        assertEquals(IrAnnotationValue.EnumConstant(IrType.objectType("example.Mode") as IrType.Object, "SECOND"), value.values["mode"])
-        assertEquals(IrAnnotationValue.ArrayValue(listOf(IrAnnotationValue.Primitive(Long.MIN_VALUE, IrType.LONG))), value.values["array"])
-        assertNull(assertIs<IrAnnotationValue.Nested>(value.values["nested"]).annotation.visibility)
+        assertEquals(values.keys.toList(), values(value).keys.toList())
+        assertEquals(IrAnnotationValue.Primitive(-253, IrType.INT), values(value)["number"])
+        assertEquals(IrAnnotationValue.ClassLiteral(IrType.array(IrType.INT)), values(value)["type"])
+        assertEquals(IrAnnotationValue.EnumConstant(IrType.objectType("example.Mode") as IrType.Object, "SECOND"), values(value)["mode"])
+        assertEquals(IrAnnotationValue.ArrayValue(listOf(IrAnnotationValue.Primitive(Long.MIN_VALUE, IrType.LONG))), values(value)["array"])
+        assertNull(assertIs<IrAnnotationValue.Nested>(values(value)["nested"]).annotation.visibility)
         assertEquals(1, assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(cls.fields.single()[SourceAttributes.ANNOTATIONS]).value.entries.size)
         val params = assertIs<AnnotationMetadata.Ready<List<IrAnnotationSet>>>(cls.methods.single()[SourceAttributes.PARAMETER_ANNOTATIONS]).value
         assertEquals(listOf(0, 1), params.map { it.entries.size }) // positions, not register slots
         assertEquals(IrAnnotationValue.Primitive(42, IrType.INT), assertIs<AnnotationMetadata.Ready<IrAnnotationValue?>>(cls.methods.single()[SourceAttributes.ANNOTATION_DEFAULT]).value)
         values.clear()
-        assertEquals(6, value.values.size)
+        assertEquals(6, values(value).size)
     }
 
     @Test fun unsupportedAndMalformedValuesRemainFailuresInsteadOfAbsentMetadata() {
         for (encoded in listOf(EncodedValue.NULL, EncodedValue(EncodedValueType.INT, "wrong"), EncodedValue(EncodedValueType.TYPE, "Igarbage"))) {
             val cls = ModelBuilder.build(FakeCodeLoader(listOf(FakeClassData("LTest;", annotations = listOf(ann(mapOf("value" to encoded))))))).classes.single()
-            assertIs<AnnotationMetadata.Unavailable>(assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(cls[SourceAttributes.ANNOTATIONS]).value.entries.single())
+            assertIs<AnnotationMetadata.Unavailable>(entry(cls[SourceAttributes.ANNOTATIONS]).values)
         }
     }
 
@@ -56,7 +62,7 @@ class ModelBuilderAnnotationsTest {
         list.add(EncodedValue(EncodedValueType.ARRAY, list))
         val method = FakeMethodData(FakeMethodRef("LTest;", "healthy", "V", emptyList()), codeReader = FakeCodeReader(0, emptyList()))
         val cls = ModelBuilder.build(FakeCodeLoader(listOf(FakeClassData("LTest;", annotations = listOf(ann(mapOf("value" to list.single()))), methods = listOf(method))))).classes.single()
-        assertIs<AnnotationMetadata.Unavailable>(assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(cls[SourceAttributes.ANNOTATIONS]).value.entries.single())
+        assertIs<AnnotationMetadata.Unavailable>(entry(cls[SourceAttributes.ANNOTATIONS]).values)
         assertNotNull(cls.methods.single()[com.jadxmp.pipeline.PipelineAttrs.CODE_READER])
         assertEquals(AnnotationMetadata.Ready(null), cls.methods.single()[SourceAttributes.ANNOTATION_DEFAULT])
     }
@@ -66,8 +72,10 @@ class ModelBuilderAnnotationsTest {
         val cls = ModelBuilder.build(FakeCodeLoader(listOf(FakeClassData("LTest;", annotations = listOf(ann(), system, ann()))))).classes.single()
         val entries = assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(cls[SourceAttributes.ANNOTATIONS]).value.entries
         assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[0])
-        assertTrue(assertIs<AnnotationMetadata.Unavailable>(entries[1]).reason.contains("METHOD"))
-        assertTrue(assertIs<AnnotationMetadata.Unavailable>(entries[1]).reason.contains("EnclosingMethod"))
+        val systemAnnotation = assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[1]).value
+        assertTrue(assertIs<AnnotationMetadata.Unavailable>(systemAnnotation.values).reason.contains("METHOD"))
+        assertEquals(IrType.objectType("dalvik.annotation.EnclosingMethod"), systemAnnotation.type)
+        assertEquals(IrAnnotationVisibility.SYSTEM, systemAnnotation.visibility)
         assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[2])
     }
 
@@ -96,7 +104,7 @@ class ModelBuilderAnnotationsTest {
         }
         var failures = 0
         repeat(10) {
-            if (assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(mapper.annotations { listOf(annotation) }).value.entries.single() is AnnotationMetadata.Unavailable) failures++
+            if (entry(mapper.annotations { listOf(annotation) }).values is AnnotationMetadata.Unavailable) failures++
         }
         assertTrue(failures > 0)
         assertEquals(AnnotationMetadata.Ready(null), mapper.default { null })
@@ -128,7 +136,35 @@ class ModelBuilderAnnotationsTest {
         nested.clear()
         array.clear()
         val copied = assertIs<IrAnnotationValue.Nested>(assertIs<AnnotationMetadata.Ready<IrAnnotationValue?>>(snapshot).value)
-        assertEquals(IrAnnotationValue.ArrayValue(listOf(IrAnnotationValue.Str("first"))), copied.annotation.values["values"])
+        assertEquals(IrAnnotationValue.ArrayValue(listOf(IrAnnotationValue.Str("first"))), values(copied.annotation)["values"])
+    }
+
+    @Test fun failedAnnotationValueRetainsValidatedHeaderWithoutGuessingFromDiagnostics() {
+        val values = mapOf("value" to EncodedValue(EncodedValueType.METHOD,
+            FakeMethodRef("LOwner;", "m", "V", emptyList())))
+        val metadata = AnnotationModel().annotations {
+            listOf(ann(values), AnnotationData("not-a-descriptor", AnnotationVisibility.SYSTEM, emptyMap()))
+        }
+        val entries = assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(metadata).value.entries
+        val preserved = assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[0]).value
+        assertEquals(IrType.objectType("example.Tag"), preserved.type)
+        assertEquals(IrAnnotationVisibility.RUNTIME, preserved.visibility)
+        assertIs<AnnotationMetadata.Unavailable>(preserved.values)
+        assertIs<AnnotationMetadata.Unavailable>(entries[1])
+    }
+
+    @Test fun nestedFailureInvalidatesWholeValueMapAndDefaultWithoutErasingHealthySibling() {
+        val nested = EncodedValue(EncodedValueType.ANNOTATION, ann(linkedMapOf(
+            "valid" to EncodedValue(EncodedValueType.INT, 7),
+            "invalid" to EncodedValue.NULL,
+        ), visibility = null))
+        val mapper = AnnotationModel()
+        val metadata = mapper.annotations { listOf(ann(mapOf("nested" to nested)), ann()) }
+        val entries = assertIs<AnnotationMetadata.Ready<IrAnnotationSet>>(metadata).value.entries
+        val failed = assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[0]).value
+        assertIs<AnnotationMetadata.Unavailable>(failed.values)
+        assertEquals(emptyMap(), values(assertIs<AnnotationMetadata.Ready<IrAnnotation>>(entries[1]).value))
+        assertIs<AnnotationMetadata.Unavailable>(mapper.default { nested })
     }
 
 }
