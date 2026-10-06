@@ -27,6 +27,18 @@ to `core:ir`'s `SourceAttributes`. Analysis writes these canonical identity-base
 read them; `core:codegen`'s `CodegenKeys` remains a compatibility facade using the same instances.
 The pipeline must not depend on codegen merely to communicate analysis results.
 
+Source annotation planning belongs to `core:codegen`, above the typed metadata in `core:ir`.
+`AnnotationEmissionPlan` caches typed validation outcomes for one output, while each rendering
+pass owns its own `AnnotationAttachmentTracker` and `AnnotationRenderBudget`. Rolling back a
+member must also roll back its attachment coverage; the final audit includes hidden members and
+nested classes. Source names remain backend responsibilities because imports can change between
+discovery and final rendering. `AnnotationConstantScope` provides a bounded inheritance/lexical
+scope walk; callers must account for the platform member names relevant to their spelling proof.
+Unknown ancestors do not prove a safe name. These helpers prepare backend integration; their
+presence alone does not mean Java or Kotlin output preserves all annotations or metadata.
+A ready plan records checks against available metadata; it does not prove missing external
+declarations or retention contracts, or preservation of deferred compiler metadata.
+
 ## Application & UI modules
 
 | Module | Type | Notes |

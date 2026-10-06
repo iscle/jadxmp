@@ -59,6 +59,30 @@ class ImportCollector(private val currentPackage: String = "") {
         }
     }
 
+    /**
+     * Prefer a single-type import even for java.lang or this package. Unlike the implicit
+     * java.lang import, it shadows types in other compilation units of this package (JLS 6.4.1).
+     * Existing name claims remain authoritative; callers must reject a qualified fallback when
+     * their expression context cannot prove it safe. Lexical/member shadows are a caller concern.
+     */
+    fun useExplicitClass(fullName: String): String {
+        val rendered = useClass(fullName)
+        val top = topLevelBinaryOf(fullName)
+        val simple = top.substringAfterLast('.')
+        if ('.' in top && claimed[simple] == top) importsSet.add(top)
+        return rendered
+    }
+
+    /** Exact source identity: dots denote qualification; literal dollars are never nesting guesses. */
+    fun useExplicitSourceClass(fullName: String): String {
+        val simple = fullName.substringAfterLast('.')
+        val previous = claimed[simple]
+        if (previous != null && previous != fullName) return fullName
+        claimed[simple] = fullName
+        if ('.' in fullName) importsSet.add(fullName)
+        return simple
+    }
+
     /** Whether a top-level type has claimed this simple name, without sorting/copying imports. */
     fun isSimpleNameClaimed(simpleName: String): Boolean = simpleName in claimed
 
