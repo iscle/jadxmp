@@ -92,7 +92,21 @@ The original pinned jadx recompiles and executes the javac matrix, but its direc
 fails compilation: it omits byte/char/short and Boolean source conversions and assigns Object
 straight into String[]/int[][]. That failure is asserted separately; it supplies no reference execution
 parity evidence and creates no corpus gate exemption.
-The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
+Native `newarray`/`anewarray` now allocate one sized dimension, including partially allocated
+multidimensional arrays such as `new int[n][]`. An immutable `ArrayAllocationPayload` supplies
+the complete array descriptor to existing NEW_ARRAY; the decoder validates its dimension count,
+component syntax and size-register shape without consulting a fabricated constant-pool index.
+Allocation types are cached by primitive atype or constant-pool index. Construction and each use
+charge descriptor characters against the method budget, including repeated decoder parsing work.
+The allocation overwrites only its consumed size snapshot. Original javac plus verified raw fixtures
+compare original execution, pinned reference Java, and both candidate outputs for all primitive types,
+reference/interface/nested runtime classes, default values, negative sizes, evaluation effects,
+duplicated sizes and discarded allocations. Missing-component linkage precedes negative-size failure
+but follows size-expression exceptions/effects; component class initialization remains absent.
+`multianewarray` is explicitly deferred: every supplied dimension must be evaluated and checked even
+when an earlier dimension is zero, and a source closure must not postpone later checks or effects.
+
+The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, object creation and `multianewarray`, method-type/method-handle/dynamic constants, constructors,
 jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
 `JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.

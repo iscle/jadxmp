@@ -45,6 +45,7 @@ internal object JvmRegisterNormalizer {
         private val referenceTypes = mutableMapOf<String, JvmFrameValue.Reference>()
         private var operandWork = 0L
         private val constantOperands = JvmConstantOperands(constants, ::chargeOperandWork, ::reference)
+        private val arrayAllocations = JvmArrayAllocations(constantOperands, ::chargeOperandWork, ::reference)
         private val arrayOperands = JvmArrayOperands(::chargeOperandWork, ::reference)
         private val returnFrameType = if (descriptor.returnType == "V") null else valueType(descriptor.returnType)
         private val instructions = mutableListOf<JvmNormalizedInstruction>()
@@ -207,6 +208,14 @@ internal object JvmRegisterNormalizer {
                     val lhs = popReference().second
                     emit(if (opcode == 0xa5) Opcode.IF_EQ else Opcode.IF_NE, intArrayOf(lhs, rhs),
                         target = (raw.operand as JvmOperand.Branch).target)
+                }
+                0xbc, 0xbd -> {
+                    val allocation = if (opcode == 0xbc) arrayAllocations.primitive((raw.operand as JvmOperand.ArrayType).type)
+                        else arrayAllocations.reference((raw.operand as JvmOperand.Constant).index)
+                    val size = pop(JvmFrameValue.IntValue)
+                    val result = stackBase + frame.stackWords
+                    frame.push(allocation.type)
+                    emit(Opcode.NEW_ARRAY, intArrayOf(result, size), payload = allocation.payload)
                 }
                 0xbe -> {
                     val (type, source) = popReference()

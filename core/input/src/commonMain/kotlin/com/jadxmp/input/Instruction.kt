@@ -52,6 +52,14 @@ public class InlineSwitchPayload(
 ) : InstructionPayload
 
 /**
+ * Inline, format-neutral type operand for [Opcode.NEW_ARRAY]. [arrayType] is the entire array
+ * descriptor, including every dimension (for example `[[I` allocates `new int[size][]`). Only
+ * the outer dimension is allocated. Registers are [destination, size]; size is an Int value.
+ * No constant-pool index is present. Consumers validate the descriptor before building IR.
+ */
+public class ArrayAllocationPayload(public val arrayType: String) : InstructionPayload
+
+/**
  * The initializer blob of a `fill-array-data`. [data] is one of `ByteArray`/`ShortArray`/`IntArray`/
  * `LongArray` depending on [elementSize] (1/2/4/8), or an empty `ByteArray` when there are no elements.
  *

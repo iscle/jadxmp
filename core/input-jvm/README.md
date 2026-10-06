@@ -39,7 +39,7 @@ accept exact/null/Object assignment; narrower assignment needs unavailable hiera
 and is diagnosed. Native checkcast/instanceof and String/Class ldc/ldc_w now use checked typed
 constant-pool operands. A per-method ten-million-unit operand work budget charges resolution and
 unique UTF8 lengths; aliases share validated descriptors/frame types. Wrong tags/categories and
-class literals before class-file version 49 are diagnosed. Handlers, calls, allocations, dynamic/
+class literals before class-file version 49 are diagnosed. Handlers, calls, object creation and `multianewarray`, dynamic/
 method-type/method-handle constants, legacy subroutines and unreachable bytecode regions still
 produce explicit method failures.
 JVM tests compare normalized-register execution with real javac methods for branches, loops,
@@ -47,6 +47,17 @@ switches, overflow, mixed wide parameters, post-increment, signed zero and NaN; 
 normalization slice, not general JVM decompilation or complete bytecode verification.
 Direct JVM class-byte tests also verify implicit byte/char/short return narrowing and boolean low-bit
 masking, which must be explicit in normalized register instructions.
+
+Native `newarray` and `anewarray` allocate one outer dimension through a checked inline
+`ArrayAllocationPayload` on shared NEW_ARRAY; primitive types and array-valued reference components
+need no fabricated constant-pool indexes. Per-method type construction is cached, while each use
+charges descriptor work before the shared decoder validates it. All primitive array kinds, exact
+reference/nested runtime classes and default values are covered by original javac and verified
+raw-bytecode execution against both rebuilt languages and the original pinned reference. Tests
+preserve size-expression effects, negative-size failures, unused throwing allocations and duplicated
+size snapshots. Missing component resolution precedes the negative-size check but follows size
+evaluation; allocating an array does not initialize its component class. `multianewarray` remains
+explicitly unsupported: nested source allocation closures would not preserve all dimension checks.
 
 Declaration metadata decodes bounded `SourceFile`, `InnerClasses` and `EnclosingMethod` attributes
 into the shared lexical nesting contract. It preserves member modifiers, local/anonymous owners and

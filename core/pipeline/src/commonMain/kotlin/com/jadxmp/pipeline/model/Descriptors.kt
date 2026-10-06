@@ -20,6 +20,23 @@ object Descriptors {
         return parseAt(descriptor, 0).type
     }
 
+    /** Strict bounded descriptor boundary for an inline array-allocation type operand. */
+    fun parseArrayType(descriptor: String): IrType {
+        require(descriptor.length in 2..65535) { "invalid array descriptor length" }
+        val dimensions = descriptor.indexOfFirst { it != '[' }
+        require(dimensions in 1..255) { "invalid array descriptor dimensions" }
+        val root = descriptor.substring(dimensions)
+        if (root.startsWith('L')) {
+            require(root.endsWith(';') && root.length > 2) { "invalid array component descriptor" }
+            val name = root.substring(1, root.length - 1)
+            require(!name.startsWith('/') && !name.endsWith('/') && "//" !in name &&
+                name.none { it == '.' || it == ';' || it == '[' }) { "invalid array component name" }
+        } else {
+            require(root.length == 1 && root[0] in "ZBSCIJFD") { "invalid array component descriptor" }
+        }
+        return IrType.array(parseType(root), dimensions)
+    }
+
     /**
      * Convert an internal class name descriptor (`Lcom/example/Foo;`) — or a bare internal name
      * (`com/example/Foo`) — into a resolved object [IrType] with a dotted class name.

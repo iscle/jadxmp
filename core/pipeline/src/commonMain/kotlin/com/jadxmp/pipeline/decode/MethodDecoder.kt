@@ -1,5 +1,6 @@
 package com.jadxmp.pipeline.decode
 
+import com.jadxmp.input.ArrayAllocationPayload
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.FillArrayDataPayload
 import com.jadxmp.input.InlineSwitchPayload
@@ -228,7 +229,12 @@ class MethodDecoder(
                 make(TypeInstruction(IrOpcode.NEW_INSTANCE, t, reg(0, t)))
             }
             Opcode.NEW_ARRAY -> {
-                val t = Descriptors.parseType(input.indexAsType())
+                val inline = input.payload
+                require(inline == null || inline is ArrayAllocationPayload) { "invalid new-array payload" }
+                val t = if (inline is ArrayAllocationPayload) {
+                    require(input.registerCount == 2) { "new-array requires destination and size" }
+                    Descriptors.parseArrayType(inline.arrayType)
+                } else Descriptors.parseType(input.indexAsType())
                 make(TypeInstruction(IrOpcode.NEW_ARRAY, t, reg(0, t), listOf(reg(1, IrType.INT))))
             }
             Opcode.FILLED_NEW_ARRAY, Opcode.FILLED_NEW_ARRAY_RANGE -> {
