@@ -1,5 +1,6 @@
 package com.jadxmp.codegen.kotlin
 
+import com.jadxmp.codegen.NullThrowProof
 import com.jadxmp.codegen.ClassNodeRef
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
@@ -642,7 +643,7 @@ internal class MethodBodyWriter(
                 code.add("throw ")
                 val failure = insn.getArg(0)
                 // JVM throw-null raises NPE; Kotlin rejects a nullable throw expression.
-                if (isNullOperand(failure)) code.add("kotlin.NullPointerException()")
+                if (nullThrowProof.isNull(failure)) code.add("kotlin.NullPointerException()")
                 else emitDereference(failure)
             }
             IrOpcode.BREAK -> code.add("break")
@@ -1865,6 +1866,8 @@ internal class MethodBodyWriter(
             insn.argCount > 0 && isNullOperand(insn.getArg(0))
         else -> false
     }
+
+    private val nullThrowProof = NullThrowProof()
 
     private fun isNullOperand(op: Operand): Boolean = when (op) {
         is LiteralOperand -> KotlinLiterals.format(op) == "null"
