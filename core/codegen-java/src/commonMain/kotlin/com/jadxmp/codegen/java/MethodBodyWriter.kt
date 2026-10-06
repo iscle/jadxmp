@@ -5,6 +5,7 @@ import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
 import com.jadxmp.codegen.ImportCollector
+import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
@@ -198,6 +199,25 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        if (MissingMethodBody.isRequired(method)) {
+            // Keep the diagnostic at the declaration and never turn a load failure into a no-op.
+            // Java requires a static initializer to be able to complete normally syntactically.
+            if (method.name == "<clinit>") code.add("if (true) ")
+            val exceptionType = "java.lang.UnsupportedOperationException"
+            // A declared type can capture either a simple exception name or the package root.
+            // Prefer the ordinary imported name, retaining qualification for a lexical type clash.
+            var owner: com.jadxmp.ir.node.IrClass? = method.declaringClass
+            var collision = false
+            while (owner != null) {
+                if (JavaSourceName.sourceSimpleName(owner, aliasMap) == "UnsupportedOperationException" ||
+                    owner.innerClasses.any { JavaSourceName.sourceSimpleName(it, aliasMap) == "UnsupportedOperationException" }
+                ) collision = true
+                owner = owner.outerClass
+            }
+            val name = if (collision) exceptionType else types.classNameOf(IrType.objectType(exceptionType))
+            code.add("throw new ").add(name).add("(\"Method body unavailable\");").newLine()
+            return
+        }
         val region = method.region
         if (region != null) {
             emitRegion(region)

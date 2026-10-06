@@ -51,6 +51,7 @@ dependencies {
     // In-process K2JVMCompiler → hermetic, version-pinned, structured diagnostics. JVM-only, tool-scope.
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinCompilerVersion")
 
+    testImplementation(projects.core.pipeline) // Tests inject metadata through the public pass-plugin contract.
     testImplementation(projects.core.codegenKotlin)
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")

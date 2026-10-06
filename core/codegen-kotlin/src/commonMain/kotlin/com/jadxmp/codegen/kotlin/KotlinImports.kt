@@ -69,7 +69,7 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
     private fun allocateAliases(): Map<String, String> {
         val names = NameGenerator()
         reservedNames.forEach(names::reserve)
-        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners).associateWith { owner ->
+        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners + setOf("java.lang.UnsupportedOperationException")).associateWith { owner ->
             names.unique((if (owner.startsWith("kotlin.")) "Kotlin" else "Jvm") + owner.substringAfterLast('.'))
         }
     }

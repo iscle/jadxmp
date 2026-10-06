@@ -58,6 +58,12 @@ casts, incoming parameters, loops, nested handlers and protected returns. Pipeli
 JVM, JS and Wasm; the targeted Java exception-state and result-type oracle tests pass. These checks
 supplement the older combined snapshot above rather than replacing it with unrun suite totals.
 
+A concrete method whose body cannot be loaded now retains its error diagnostic and emits a throwing
+fallback instead of an empty body. Failed constructors and class initializers cannot silently return
+successfully; healthy sibling methods remain usable where the partial class recompiles. These
+flagged fallbacks are diagnostics, not recovered behavior or semantic parity. Existing errored bodies
+are retained, including the required invalid-return fixture and its failed compilation.
+
 ## JVM-input reference preparation
 
 The isolated adapter now includes the original Java-input plugin and its pinned raung-disasm

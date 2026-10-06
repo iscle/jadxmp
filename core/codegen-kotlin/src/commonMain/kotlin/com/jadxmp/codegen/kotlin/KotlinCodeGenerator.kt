@@ -7,6 +7,7 @@ import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.CodegenKeys
@@ -199,8 +200,8 @@ class KotlinCodeGenerator {
             // companion `init {}` reassigning the entry `val`s. (Static-final field inlining can only
             // FURTHER empty the residual, and only when static fields exist — which independently force a
             // companion — so this pre-inline check never wrongly emits an empty companion.)
-            val clinitDrivesCompanion = clinit != null && methodHasBody(clinit) &&
-                !KotlinEnumReconstruction.residualIsEmpty(clinit, enumSuppressed)
+            val clinitDrivesCompanion = clinit != null && (MissingMethodBody.isRequired(clinit) ||
+                methodHasBody(clinit) && !KotlinEnumReconstruction.residualIsEmpty(clinit, enumSuppressed))
             val hasCompanion = !isObject &&
                 (staticFields.isNotEmpty() || staticMethods.isNotEmpty() || clinitDrivesCompanion)
             val hasMembersAfterEntries = instanceFields.isNotEmpty() || instanceMethods.isNotEmpty() ||
@@ -878,8 +879,8 @@ class KotlinCodeGenerator {
                 emitProperty(cls, f, staticInit)
                 wrote = true
             }
-            if (clinit != null && methodHasBody(clinit) &&
-                !KotlinEnumReconstruction.residualIsEmpty(clinit, suppressed)
+            if (clinit != null && (MissingMethodBody.isRequired(clinit) ||
+                methodHasBody(clinit) && !KotlinEnumReconstruction.residualIsEmpty(clinit, suppressed))
             ) {
                 if (wrote) code.newLine()
                 emitInitBlock(cls, clinit, suppressed)
@@ -915,7 +916,7 @@ class KotlinCodeGenerator {
         }
 
         private fun methodHasBody(method: IrMethod): Boolean =
-            method.region != null || method.blocks.isNotEmpty()
+            method.region != null || method.blocks.isNotEmpty() || MissingMethodBody.isRequired(method)
 
         // ---------- shared ----------
 

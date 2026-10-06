@@ -5,6 +5,7 @@ import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.VarRef
@@ -228,6 +229,12 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        if (MissingMethodBody.isRequired(method)) {
+            // Keep the diagnostic at the declaration and never turn a load failure into a no-op.
+            code.add("throw ").add(imports.aliasedClass("java.lang.UnsupportedOperationException"))
+                .add("(\"Method body unavailable\")").newLine()
+            return
+        }
         // Introduce `var pCopy = p` for every parameter reassigned in the body BEFORE emitting any
         // statement, so the copy is in scope (and initialised to the parameter) for every use.
         setupParamCopies()
