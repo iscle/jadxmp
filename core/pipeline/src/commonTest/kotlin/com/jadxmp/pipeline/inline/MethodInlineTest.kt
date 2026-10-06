@@ -87,6 +87,20 @@ class MethodInlineTest {
     }
 
     @Test
+    fun synchronizedSyntheticForwarderKeepsItsMonitorAndCallTarget() {
+        val root = IrRoot()
+        val b = addClass(root, "inline.other.B")
+        val a = addClass(root, "inline.A")
+        val bridge = addMethod(b, "bridgeMth", staticSyntheticBridge or AccessFlags.SYNCHRONIZED, forwarderBody(cTestRef))
+        val caller = addMethod(a, "useMth", AccessFlags.STATIC, forwarderBody(bBridgeRef))
+        buildCfg(caller)
+        MethodInliner(root).process(bridge)
+        MethodInliner(root).process(caller)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE), "implicit monitor acquisition is observable behavior")
+        assertEquals("bridgeMth", invokesOf(caller).single().methodRef.name)
+    }
+
+    @Test
     fun nonSyntheticForwarderIsNotDroppedOrInlined() {
         val root = IrRoot()
         val b = addClass(root, "inline.other.B")

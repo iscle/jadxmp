@@ -134,17 +134,22 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    safety still needs work. Expression folding now preserves potentially throwing operations relative
    to calls and the evaluation order of folded arguments, including array-store operand order.
    Java/Kotlin execution tests check exception types and side-effect traces; these are not a general
-   semantic proof of all transformations.
+   semantic proof of all transformations. Synchronized synthetic forwarders now retain their monitors,
+   but the inliner's cross-class forwarding still needs a class-initialization proof: replacing a call
+   can skip the forwarding class's initialization. A separate execution-tested repair is queued.
 2. Kotlin has 127 inputs with compiler errors or no output, plus three compilable outputs carrying
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
-3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
-   execution coverage is missing; the smali gate still measures no-error and recompilation only.
+3. Upstream Java embedded `check()` fixtures are now inventoried: 443 extracted and 112 passing
+   original checks. Broad source-to-DEX-to-rebuilt execution coverage is still missing; the smali gate
+   still measures no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
    metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
    archive loading and default facade registration are still required for full class/JAR support.
-   Kotlin synchronization and volatile/transient field semantics also need repair; accepting modifiers
-   in the input model alone does not prove that emitted source preserves them.
+   Kotlin now preserves instance/static method monitor identity and volatile/transient backing-field
+   flags in targeted runtime tests, including exceptional monitor release and serialization. Synthetic
+   enum modifier combinations that Kotlin cannot regenerate remain explicit errors; broader modifier
+   and JVM ABI preservation still need coverage.
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
 6. Declaration annotations, generic signatures and other source metadata need end-to-end

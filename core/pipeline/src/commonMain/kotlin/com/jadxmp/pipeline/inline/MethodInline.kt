@@ -31,9 +31,8 @@ import com.jadxmp.pipeline.ssa.MethodParams
  * synthetic glue — never a method with real behaviour or a caller we cannot see.
  *
  * ## Faithfulness / safety envelope (deliberately narrow)
- * A method is treated as an inlinable forwarder ONLY when ALL of these hold, so the rewrite is provably
- * an identity:
- *  - it is `static` and marked `synthetic` and/or `bridge`;
+ * The current instruction-shape checks require all of these:
+ *  - it is `static`, not `synchronized`, and marked `synthetic` and/or `bridge`;
  *  - its body decodes (no decode error, no `try`/handler) to exactly one `invoke-static` followed by a
  *    `return`, and nothing else;
  *  - the target's signature is **identical** (same return type and parameter types) — so no covariant
@@ -46,6 +45,11 @@ import com.jadxmp.pipeline.ssa.MethodParams
  * permuted argument list) is left completely untouched. Forwarder **chains** are followed to the
  * terminal real method (with a cycle/budget guard) so a caller is never rewritten onto another
  * about-to-be-dropped forwarder, and a forwarder that only resolves through a cycle is not dropped.
+ *
+ * Known limitation: the cross-class case still lacks a declaring-class initialization proof. Even
+ * with no explicit side effects in the body, replacing the call can skip initialization of the
+ * forwarder's class. This is tracked as a separate correctness repair in docs/PARITY-STATUS.md;
+ * the instruction-shape checks below are not a complete semantic proof.
  *
  * Works off a lightweight re-decode of each candidate body (like `ThrowsInference`), so it is
  * independent of whether the target's class has been lowered yet and of pass ordering. Runs after CFG
@@ -110,6 +114,9 @@ class MethodInliner(private val root: IrRoot) {
 
     private fun computeForwarderTarget(method: IrMethod): MethodRef? {
         if (!method.isStatic) return null
+        // ACC_SYNCHRONIZED acquires the declaring Class monitor outside the instruction body.
+        // An otherwise identity forwarder still has observable locking behavior of its own.
+        if (method.accessFlags and AccessFlags.SYNCHRONIZED != 0) return null
         if (method.accessFlags and (AccessFlags.SYNTHETIC or AccessFlags.BRIDGE) == 0) return null
         val reader = method[PipelineAttrs.CODE_READER] ?: return null
         val code = MethodDecoder().decode(reader)

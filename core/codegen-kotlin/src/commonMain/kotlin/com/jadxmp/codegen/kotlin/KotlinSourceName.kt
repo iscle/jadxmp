@@ -31,6 +31,15 @@ import com.jadxmp.ir.node.IrClass
  */
 internal object KotlinSourceName {
 
+    /** Source import identity, including reconstructed nesting and explicit class renames. */
+    fun sourceQualifiedName(cls: IrClass, aliasMap: AliasMap = AliasMap.EMPTY): String {
+        val simple = sourceSimpleName(cls, aliasMap).removeSurrounding("`")
+        val outer = cls.outerClass
+        if (outer != null) return sourceQualifiedName(outer, aliasMap) + "." + simple
+        val packageName = cls.fullName.substringBeforeLast('.', "")
+        return if (packageName.isEmpty()) simple else "$packageName.$simple"
+    }
+
     /**
      * The emitted Kotlin simple name of [cls]: an [aliasMap] override (deobfuscation / user rename) when
      * present, else the sanitized [IrClass.shortName]. The `isEmpty` fast path keeps the no-override case

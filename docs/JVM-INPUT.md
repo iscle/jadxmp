@@ -86,9 +86,11 @@ Unsupported semantic declaration attributes currently fail explicitly: annotatio
 signatures, declared throws, annotation defaults, parameter metadata, record/sealed metadata and
 nest-access metadata. Method-level rejection stays per-method; field/class rejection stops this
 single-class load. The adapter preserves JVM synchronization/field modifiers for both backends.
-Kotlin currently needs separate support for synchronized methods and volatile/transient fields;
-these native inputs must not be claimed to have Kotlin parity. Static synchronization must lock
-the original Class object, not a generated companion object. Unknown attributes remain ignorable and retain raw bytes. Executable BootstrapMethods
+Kotlin emits instance monitor annotations and explicit static bodies locking the original declaring
+Class object, plus backing-field volatile/transient annotations. Targeted compilation/execution checks
+cover class/receiver lock identity, exceptional release, collision-safe nested/renamed owners and
+serialization. Compiler-generated enum members with unrepresentable modifiers are diagnosed;
+this does not establish arbitrary modifier or JVM ABI parity. Unknown attributes remain ignorable and retain raw bytes. Executable BootstrapMethods
 metadata remains deferred with unsupported dynamic-call bodies. This is not a complete class verifier.
 The first end-to-end execution fixture uses an interface with static primitive methods to avoid
 pretending constructor lowering is already supported. It passes real javac bytes through a test input

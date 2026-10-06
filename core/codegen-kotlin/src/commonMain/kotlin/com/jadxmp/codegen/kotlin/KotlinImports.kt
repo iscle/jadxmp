@@ -10,13 +10,14 @@ import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.type.IrType
 
-/** Collision-safe aliases for JVM references and their Kotlin signature projections layered over ordinary shared class imports. */
+/** Collision-safe imports for JVM type projections and generated Kotlin intrinsics, alongside ordinary class imports. */
 internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasMap) {
     private val ordinary = ImportCollector(packageName)
-    private var classAliases: Map<String, String>
+    private var symbolAliases: Map<String, String>
     private val reservedNames = linkedSetOf<String>()
     private var discoveryComplete = false
-    private val usedAliasedClasses = linkedSetOf<String>()
+    private val usedAliasedSymbols = linkedSetOf<String>()
+    private val monitorOwners = linkedSetOf<String>()
 
     init {
         fun reserve(name: String?) {
@@ -33,6 +34,9 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
             reserve(KotlinSourceName.sourceSimpleName(current, aliasMap))
             current.fields.forEach { reserve(KotlinMemberAliases.aliasOf(it, aliasMap)) }
             for (method in current.methods) {
+                if (method.isStatic && KotlinJvmModifiers.isSynchronized(method)) {
+                    monitorOwners += KotlinSourceName.sourceQualifiedName(current, aliasMap)
+                }
                 reserve(KotlinMemberAliases.aliasOf(method, aliasMap))
                 method[CodegenKeys.PARAM_NAMES]?.forEach(::reserve)
                 method.ssaValues.forEach { reserve(it.localVar?.name) }
@@ -57,36 +61,47 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
                 (type as? IrType.Object)?.className?.let(cls.root::findClass)?.let(classes::add)
             }
         }
-        classAliases = allocateAliases()
+        symbolAliases = allocateAliases()
     }
 
     /** Finalize after the discarded render has discovered all referenced types, including raw/default-package types. */
     fun finishDiscovery() {
-        classAliases = allocateAliases()
+        symbolAliases = allocateAliases()
         discoveryComplete = true
     }
 
     private fun allocateAliases(): Map<String, String> {
         val names = NameGenerator()
         reservedNames.forEach(names::reserve)
-        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners + setOf("java.lang.UnsupportedOperationException")).associateWith { owner ->
-            names.unique((if (owner.startsWith("kotlin.")) "Kotlin" else "Jvm") + owner.substringAfterLast('.'))
+        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners + setOf("java.lang.UnsupportedOperationException") + KotlinJvmModifiers.aliasedSymbols + monitorOwners).associateWith { owner ->
+            val base = when {
+                owner == KotlinJvmModifiers.SYNCHRONIZED_FUNCTION -> "kotlinSynchronized"
+                owner in monitorOwners -> "JvmMonitorOwner"
+                else -> (if (owner.startsWith("kotlin.")) "Kotlin" else "Jvm") + owner.substringAfterLast('.')
+            }
+            names.unique(base)
         }
     }
 
     fun aliasedClass(fullName: String): String {
-        usedAliasedClasses.add(fullName)
-        return classAliases.getValue(fullName)
+        usedAliasedSymbols.add(fullName)
+        return symbolAliases.getValue(fullName)
+    }
+
+    fun aliasedFunction(fullName: String): String {
+        require(fullName == KotlinJvmModifiers.SYNCHRONIZED_FUNCTION)
+        usedAliasedSymbols.add(fullName)
+        return symbolAliases.getValue(fullName)
     }
 
     /** An aliased Kotlin import removes the corresponding implicit simple-name import. */
     fun builtinName(simpleName: String): String {
         val fullName = "kotlin.$simpleName"
-        return if (fullName in usedAliasedClasses) classAliases.getValue(fullName) else simpleName
+        return if (fullName in usedAliasedSymbols) symbolAliases.getValue(fullName) else simpleName
     }
 
     fun reserveAliases(names: NameGenerator) {
-        classAliases.values.forEach(names::reserve)
+        symbolAliases.values.forEach(names::reserve)
     }
 
     fun useClass(fullName: String): String {
@@ -100,7 +115,7 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
     }
 
     fun imports(): List<Pair<String, String?>> {
-        val aliased = usedAliasedClasses.map { it to classAliases.getValue(it) }
+        val aliased = usedAliasedSymbols.map { it to symbolAliases.getValue(it) }
         val plain = ordinary.imports().map { it to null }
         return (plain + aliased).sortedBy { it.first }
     }

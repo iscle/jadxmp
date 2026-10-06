@@ -56,8 +56,10 @@ Native facade tests compile actual javac class bytes directly through both sourc
 the output and execute branch/loop/switch and numeric edge cases without D8. Constructors, calls,
 reference operations and exception handlers remain unsupported, so this is partial native input.
 The default input registry remains unchanged. JVM synchronization and field modifier bits remain
-in the shared declarations; Kotlin synchronized-method and volatile/transient-field emission are
-separate known gaps and are not covered by the primitive round-trip parity claim.
+in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the
+original Class rather than Companion, and volatile/transient backing-field annotations. Dedicated
+runtime tests check monitor identity/release and field reflection/serialization; unsupported synthetic
+enum modifier contracts remain explicitly diagnosed. This is not general JVM ABI parity.
 
 Field constants decode `ConstantValue` into typed input values, including narrowing, wide values,
 strings and signed zero. Only static fields receive these initializers, whether final or not;

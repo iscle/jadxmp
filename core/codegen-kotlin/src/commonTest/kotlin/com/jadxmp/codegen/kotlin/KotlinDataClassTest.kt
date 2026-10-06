@@ -52,6 +52,29 @@ class KotlinDataClassTest {
     }
 
     @Test
+    fun synchronizedComponentsAndCopyKeepExplicitBodies() {
+        for (name in listOf("component1", "copy")) {
+            val cls = irClass("a.LockedData")
+            cls.field("a", IrType.INT, Flags.PRIVATE or Flags.FINAL)
+            cls.addCanonicalDataMembers(listOf(IrType.INT), copyFlags = Flags.PUBLIC or if (name == "copy") 0x20 else 0)
+            if (name == "component1") {
+                val original = cls.methods.single { it.name == name }
+                cls.methods.remove(original)
+                cls.method(name, IrType.INT, accessFlags = Flags.PUBLIC or 0x20) { blocks.addAll(original.blocks) }
+            }
+            assertThatCode(generate(cls)).doesNotContain("data class").contains("@KotlinSynchronized")
+        }
+    }
+
+    @Test
+    fun reconstructedPropertiesKeepFieldModifiers() {
+        val cls = irClass("a.FlaggedData")
+        cls.field("a", IrType.INT, Flags.PRIVATE or 0xc0)
+        cls.addCanonicalDataMembers(listOf(IrType.INT))
+        assertThatCode(generate(cls)).contains("data class FlaggedData(@field:KotlinVolatile @field:KotlinTransient var a: Int)")
+    }
+
+    @Test
     fun fullShapeBecomesDataClassSuppressingOnlyGeneratedOnlyMembers() {
         val cls = irClass("a.Foo", accessFlags = Flags.PUBLIC or Flags.FINAL)
         cls.field("a", IrType.STRING, Flags.PRIVATE or Flags.FINAL) // val (final)

@@ -229,6 +229,20 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        // @Synchronized on a companion method locks the companion, not the original JVM Class.
+        // An inline synchronized call preserves nonlocal returns and releases on every throw path.
+        if (method.isStatic && KotlinJvmModifiers.isSynchronized(method)) {
+            code.add(imports.aliasedFunction(KotlinJvmModifiers.SYNCHRONIZED_FUNCTION)).add("(")
+                .add(imports.aliasedClass(KotlinSourceName.sourceQualifiedName(method.declaringClass, aliasMap)))
+                .add("::class.java) {").newLine()
+            code.incIndent()
+            writeBodyContents()
+            code.decIndent()
+            code.add("}").newLine()
+        } else writeBodyContents()
+    }
+
+    private fun writeBodyContents() {
         if (MissingMethodBody.isRequired(method)) {
             // Keep the diagnostic at the declaration and never turn a load failure into a no-op.
             code.add("throw ").add(imports.aliasedClass("java.lang.UnsupportedOperationException"))
