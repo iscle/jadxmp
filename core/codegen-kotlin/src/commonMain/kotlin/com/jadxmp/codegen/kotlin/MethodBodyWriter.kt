@@ -1211,6 +1211,10 @@ internal class MethodBodyWriter(
 
     private fun emitPrimitiveCast(insn: Instruction, minPrec: Int) {
         val target = insn.result?.type ?: IrType.INT
+        if (target == IrType.BOOLEAN) {
+            emitOperandAsType(insn.getArg(0), target, minPrec)
+            return
+        }
         if (operandType(insn.getArg(0)) == IrType.BOOLEAN && target is IrType.Primitive &&
             target != IrType.BOOLEAN && target != IrType.VOID
         ) {

@@ -76,6 +76,14 @@ public enum class Opcode {
     // --- primitive conversions ---
     /** Format-neutral conversion: registers [destination Int, source Boolean], false→0 / true→1. */
     BOOLEAN_TO_INT,
+    /** Format-neutral conversion: registers [destination Boolean, source Int], zero→false / nonzero→true. */
+    INT_TO_BOOLEAN,
+    /**
+     * Format-neutral widening: [destination, source] views a reference-component array as Object[].
+     * The producer must prove the source is such an array (or null), never a primitive array.
+     * Identity and the runtime component class are preserved; there is no constant-pool operand.
+     */
+    REFERENCE_ARRAY_TO_OBJECT_ARRAY,
     INT_TO_LONG,
     INT_TO_FLOAT,
     INT_TO_DOUBLE,

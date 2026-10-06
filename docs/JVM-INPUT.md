@@ -76,7 +76,23 @@ defines the null component frame as null. Execution tests compare original class
 jadx output with both candidate languages for raw floating bits, identity, null/bounds failures,
 unused reads, integer promotion, index evaluation and reachable successors beside a throwing null
 path. These tests compare exception types and ordering, not messages or stack traces.
-The shared pipeline retains responsibility for null checks and expression order. Array stores, handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
+Native array stores implement all eight xastore instructions using the same bounded component
+schema. Byte, char and short stores narrow a separate popped value copy; Boolean stores mask its
+low bit before an explicit INT_TO_BOOLEAN conversion (zero/nonzero). A duplicated assignment
+result therefore keeps the original computational Int. Reference stores accept any initialized
+reference value, as the verifier permits; REFERENCE_ARRAY_TO_OBJECT_ARRAY widens only the
+proven reference-component array view after all operands have been evaluated. Its typed CHECK_CAST
+IR has no constant-pool dependency, preserves identity and the runtime component class, and keeps
+ArrayStoreException instead of introducing a value ClassCastException. Primitive arrays cannot
+use that view, whereas int[][] and other reference-component nested arrays can. Null, bounds and
+component checks retain their JVM ordering, after index/value effects; proven-null stores become
+THROW only after those effects. Both rebuilt languages execute javac fixtures and direct verified
+JVM fixtures for truncation, low-bit values, raw IEEE bits, alias/duplicate identity and failure order.
+The original pinned jadx recompiles and executes the javac matrix, but its direct raw-store output
+fails compilation: it omits byte/char/short and Boolean source conversions and assigns Object
+straight into String[]/int[][]. That failure is asserted separately; it supplies no reference execution
+parity evidence and creates no corpus gate exemption.
+The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
 jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
 `JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.

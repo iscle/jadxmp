@@ -298,6 +298,11 @@ class MethodDecoder(
 
             // ---- conversions ----
             Opcode.BOOLEAN_TO_INT -> make(cast(reg(0, IrType.INT), reg(1, IrType.BOOLEAN)))
+            Opcode.INT_TO_BOOLEAN -> make(cast(reg(0, IrType.BOOLEAN), reg(1, IrType.INT)))
+            Opcode.REFERENCE_ARRAY_TO_OBJECT_ARRAY -> {
+                val target = IrType.array(IrType.OBJECT)
+                make(TypeInstruction(IrOpcode.CHECK_CAST, target, reg(0, target), listOf(reg(1, IrType.array(IrType.UNKNOWN_OBJECT)))))
+            }
             Opcode.INT_TO_LONG -> make(cast(reg(0, IrType.LONG), reg(1, IrType.INT)))
             Opcode.INT_TO_FLOAT -> make(cast(reg(0, IrType.FLOAT), reg(1, IrType.INT)))
             Opcode.INT_TO_DOUBLE -> make(cast(reg(0, IrType.DOUBLE), reg(1, IrType.INT)))

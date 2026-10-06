@@ -119,21 +119,54 @@ internal object JvmRegisterNormalizer {
                     val load = arrayOperands.load(arrayType, opcode)
                     // Both inputs are snapshots in the stack bank. A wide result may reuse both
                     // popped words: ARRAY_GET reads its arguments before committing the result.
-                    val result = push(load.result)
+                    val result = push(load.value)
                     if (arrayType == JvmFrameValue.NullValue) {
                         // The verifier has a normal frame, but execution cannot complete this
                         // instruction normally. Both inputs were evaluated before the mandated
                         // NPE; throwing this proven null avoids inventing an array component type.
                         emit(Opcode.THROW, intArrayOf(array))
                     } else {
-                        emit(load.opcode, intArrayOf(result, array, index))
+                        emit(load.read, intArrayOf(result, array, index))
                         // baload's result is computational Int even for Boolean arrays. Make
                         // the 0/1 boundary explicit before arbitrary JVM numeric consumers.
-                        if (load.opcode == Opcode.AGET_BOOLEAN) emit(Opcode.BOOLEAN_TO_INT, intArrayOf(result, result))
+                        if (load.read == Opcode.AGET_BOOLEAN) emit(Opcode.BOOLEAN_TO_INT, intArrayOf(result, result))
                     }
                 }
                 in 0x36..0x39 -> store((raw.operand as JvmOperand.Local).index, TYPES[opcode - 0x36])
                 in 0x3b..0x4a -> store((opcode - 0x3b) % 4, TYPES[(opcode - 0x3b) / 4])
+                in 0x4f..0x56 -> {
+                    val value = if (opcode == 0x53) popReference().second else {
+                        pop(if (opcode in 0x4f..0x52) TYPES[opcode - 0x4f] else JvmFrameValue.IntValue)
+                    }
+                    val index = pop(JvmFrameValue.IntValue)
+                    val (arrayType, array) = popReference()
+                    val component = arrayOperands.store(arrayType, opcode)
+                    if (arrayType == JvmFrameValue.NullValue) {
+                        // Operand effects already happened in JVM order; the store itself cannot
+                        // complete normally. Still validate the original following bytecode frame.
+                        emit(Opcode.THROW, intArrayOf(array))
+                    } else {
+                        // Only the popped copy is narrowed. A duplicated assignment value below
+                        // these operands must keep its original computational Int unchanged.
+                        when (component.write) {
+                            Opcode.APUT_BYTE -> emit(Opcode.INT_TO_BYTE, intArrayOf(value, value))
+                            Opcode.APUT_CHAR -> emit(Opcode.INT_TO_CHAR, intArrayOf(value, value))
+                            Opcode.APUT_SHORT -> emit(Opcode.INT_TO_SHORT, intArrayOf(value, value))
+                            Opcode.APUT_BOOLEAN -> {
+                                emit(Opcode.AND_INT_LIT, intArrayOf(value, value), 1)
+                                emit(Opcode.INT_TO_BOOLEAN, intArrayOf(value, value))
+                            }
+                            Opcode.APUT_OBJECT -> {
+                                // aastore accepts any reference value and checks assignability at
+                                // runtime, after null/bounds. Widen the proven reference array,
+                                // never narrow the value (which would replace ASE with CCE).
+                                emit(Opcode.REFERENCE_ARRAY_TO_OBJECT_ARRAY, intArrayOf(array, array))
+                            }
+                            else -> Unit
+                        }
+                        emit(component.write, intArrayOf(value, array, index))
+                    }
+                }
                 in 0x57..0x5f -> permutation(STACK_OPERATIONS[opcode - 0x57])
                 in 0x60..0x73 -> {
                     val type = TYPES[(opcode - 0x60) % 4]

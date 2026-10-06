@@ -86,7 +86,16 @@ addition, bitwise masks, negation, shifts and wide conversion. The normalized BO
 operation makes that boundary explicit in shared typed IR, also after native instanceof. Direct
 JVM numeric instanceof consumers are executed through both rebuilt languages and the pinned
 reference; existing null/missing-target resolution controls remain in the type-operation suite.
-Array stores remain unsupported.
+All eight native array-store opcodes are also supported with exact frame checks. Integer narrowing
+and Boolean low-bit storage are explicit before shared APUT operations, and duplicated assignment
+results remain unchanged. A proven reference-array view as Object[] preserves dynamic component
+checks/ArrayStoreException without casting the value; primitive arrays are never widened this way.
+Null/bounds/store-check ordering follows array, index and value evaluation, including already
+performed mutations and throwing expressions. Original javac and both rebuilt languages execute
+the same mutation matrix alongside pinned jadx. Direct verified JVM cases additionally cover raw
+narrowing/low-bit stores and Object values into statically narrow reference arrays. Candidate outputs
+execute correctly; the pinned original's missing conversions make that raw fixture uncompilable,
+which is reported explicitly rather than counted as reference runtime parity.
 Default-facade tests cover actual javac execution through both backends, unrelated bytes with a
 `.class` suffix, malformed recognized input, and reload after a failed load. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the
