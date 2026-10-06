@@ -1,8 +1,9 @@
 # JVM input
 
 This module is the multiplatform foundation for native `.class` and `.jar` input. It is not yet
-registered with `core:api`: stack-to-register lowering, metadata normalization,
-and archive integration must land before it provides decompilation.
+registered with `core:api` by default. The class-only `JvmInput.loadClass(name, bytes)` entry produces
+native input for an explicitly supplied facade plugin; archive loading and general JVM lowering
+remain incomplete.
 
 The initial parser follows the [JVMS class-file format](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
 through Java 21 (major 65). Newer versions receive an explicit unsupported-version diagnostic.
@@ -42,13 +43,26 @@ masking, which must be explicit in normalized register instructions.
 Declaration metadata decodes bounded `SourceFile`, `InnerClasses` and `EnclosingMethod` attributes
 into the shared lexical nesting contract. It preserves member modifiers, local/anonymous owners and
 enclosing methods; access-control nests do not imply lexical nesting. This metadata reader is not
-yet wired to a ClassData adapter or the facade. Annotations, signatures and the remaining attributes
-still require semantic decoding; their raw bytes remain in the parsed class model.
+a complete JVM metadata layer. The class adapter maps descriptors, nesting, modifiers and typed field
+constants directly into ClassData. Concrete bodies use cached lazy providers; malformed or unsupported
+bodies throw per-method diagnostics for the facade's existing fault-isolation guard. Cancellation is
+never cached. Declaration processing has a ten-million-character work budget before repeated shared
+strings enter maps. Unsupported semantic attributes (including annotations, signatures, throws,
+record/sealed and nest-access metadata) are explicitly rejected at class/field scope or diagnosed at
+method scope. Unknown attributes retain their bytes and remain ignorable as specified by the JVMS.
+Module descriptors, contradictory class forms and duplicate declarations are rejected.
+
+Native facade tests compile actual javac class bytes directly through both source emitters, recompile
+the output and execute branch/loop/switch and numeric edge cases without D8. Constructors, calls,
+reference operations and exception handlers remain unsupported, so this is partial native input.
+The default input registry remains unchanged. JVM synchronization and field modifier bits remain
+in the shared declarations; Kotlin synchronized-method and volatile/transient-field emission are
+separate known gaps and are not covered by the primitive round-trip parity claim.
 
 Field constants decode `ConstantValue` into typed input values, including narrowing, wide values,
 strings and signed zero. Only static fields receive these initializers, whether final or not;
 instance-field initialization belongs to constructor bytecode. Direct JVM execution checks cover
-these distinctions. The class adapter still needs to expose the decoded field values.
+these distinctions. The class adapter exposes the decoded field values through `FieldData.constValue`.
 
 All production code is `commonMain`; IO primitives come from `core:binary-io`. No ASM, D8 or
 upstream jadx implementation enters the engine. The original jadx commit remains the behavioral

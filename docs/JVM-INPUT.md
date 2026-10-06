@@ -17,7 +17,8 @@ owner never falls back to a different name-derived owner. JVM declaration metada
 `SourceFile`, the current class's `InnerClasses` entry and `EnclosingMethod` (including initializer
 contexts with method index zero). `NestHost`/`NestMembers` are not lexical enclosure. Names and
 enclosing-method references are retained for later reconstruction; emitting source names and updating
-all references together remains separate work. The class adapter/facade integration is still pending.
+all references together remains separate work. A class-only adapter and opt-in facade integration
+are implemented and independently reviewed; archive loading/default registration remain pending.
 
 The engine remains clean-room and multiplatform. Format decisions follow the
 [JVMS class-file specification](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
@@ -69,6 +70,30 @@ including future constructor initialization transitions. Repeated worklist visit
 long shared descriptors. Do not use an unbounded global cache. The primitive slice parses method
 descriptors once and caches numeric constants/reference frame types; extend the parser's hostile
 shared-string tests to the whole-method analyzer when that stage lands.
+
+## Class-only adapter and facade boundary
+
+`JvmInput.loadClass(name, bytes)` parses one class into the existing CodeLoader/ClassData model.
+It maps native descriptors, lexical metadata, member modifiers and typed ConstantValue initializers
+without manufacturing Dalvik metadata. Method descriptors are cached within the class; a declaration
+work budget of ten million referenced characters bounds repeated string hashing/materialization.
+Each body provider validates Code multiplicity/abstract/native constraints and caches its reader or
+original ordinary failure. Cancellation is rethrown without poisoning that cache. `loadClass` itself
+does not force bodies; the facade's guarded ModelBuilder body access converts failures into method
+errors while retaining successful sibling methods.
+
+Unsupported semantic declaration attributes currently fail explicitly: annotations, generic
+signatures, declared throws, annotation defaults, parameter metadata, record/sealed metadata and
+nest-access metadata. Method-level rejection stays per-method; field/class rejection stops this
+single-class load. The adapter preserves JVM synchronization/field modifiers for both backends.
+Kotlin currently needs separate support for synchronized methods and volatile/transient fields;
+these native inputs must not be claimed to have Kotlin parity. Static synchronization must lock
+the original Class object, not a generated companion object. Unknown attributes remain ignorable and retain raw bytes. Executable BootstrapMethods
+metadata remains deferred with unsupported dynamic-call bodies. This is not a complete class verifier.
+The first end-to-end execution fixture uses an interface with static primitive methods to avoid
+pretending constructor lowering is already supported. It passes real javac bytes through a test input
+plugin, the facade/pipeline and both emitters, then recompiles and executes the generated sources.
+No D8 conversion or upstream engine implementation enters this native path.
 
 ## Frame representation
 

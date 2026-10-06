@@ -53,6 +53,7 @@ dependencies {
 
     testImplementation(projects.core.pipeline) // Tests inject metadata through the public pass-plugin contract.
     testImplementation(projects.core.codegenKotlin)
+    testImplementation(projects.core.inputJvm)
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

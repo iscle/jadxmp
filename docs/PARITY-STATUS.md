@@ -70,12 +70,14 @@ The isolated adapter now includes the original Java-input plugin and its pinned 
 0.1.1 dependency. Both plugin service descriptors are merged deterministically. Three new reference
 tests verify discovery of both plugins and direct class/class-only-JAR compilation and execution,
 without D8 conversion. The existing DEX smoke test also passes. The new `core:input-jvm` foundation parses class envelopes, constant pools and raw attributes,
-with common malformed-input tests and javac interoperability tests. It is not registered as an input
-plugin yet. Primitive arithmetic, branch, loop and switch lowering now produce normalized register
-input, with real JVM execution comparisons and bounded frame analysis. Shared format-neutral nesting,
-JVM lexical metadata and typed field constants prepare the class adapter; general bytecode lowering
-and class/JAR facade integration remain incomplete. The combined-suite counts above precede these
-additional reference and parser tests.
+with common malformed-input tests and javac interoperability tests. `JvmInput.loadClass` now exposes
+a class-only adapter usable through an explicitly supplied facade plugin. Primitive arithmetic,
+branches, loops and switches pass native javac bytes through the complete pipeline and both emitters,
+then recompile and execute numeric edge cases without D8. The adapter retains lexical metadata, typed
+field constants and lazy per-method failure isolation; unsupported semantic attributes are diagnosed
+instead of silently dropped. Independent tests pass on JVM/JS/Wasm. General bytecode lowering, archive
+loading and default registry integration remain incomplete. The combined-suite counts above precede
+these additional reference and native-input tests.
 
 ## Kotlin validation after the combined snapshot
 
@@ -140,7 +142,9 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    execution coverage is missing; the smali gate still measures no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
    metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
-   class adaptation and archive/facade integration are still required for class/JAR input support.
+   archive loading and default facade registration are still required for full class/JAR support.
+   Kotlin synchronization and volatile/transient field semantics also need repair; accepting modifiers
+   in the input model alone does not prove that emitted source preserves them.
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
 6. Declaration annotations, generic signatures and other source metadata need end-to-end
