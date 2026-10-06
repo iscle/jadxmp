@@ -121,6 +121,8 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
      * [diagnostics], and degraded to zero classes — never an uncaught crash (CONVENTIONS "Errors").
      */
     fun load(name: String, bytes: ByteArray): Int {
+        // Failed/cancelled preparation must never expose the previous or a half-prepared model.
+        root = null
         loadDiagnostics.clear()
         cache.clear()
         usageIndexCache.clear()
@@ -150,6 +152,8 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
             null
         }
         val built = ModelBuilder.build(loader)
+        runner.runRoot(built)
+        built[IrAttrs.ERROR]?.let { loadDiagnostics.add("root preparation failed: ${it.message}") }
         root = built
         // Build the deobfuscation auto-map once for this model — empty unless opted in via
         // [DecompilerArgs.deobfuscation]. The effective [aliasMap] is then derived from it plus the (empty)
@@ -425,7 +429,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     fun decompileAll(): DecompilationResult {
         val model = root ?: return DecompilationResult(emptyList(), 0)
         val classes = model.classes.filter { it.outerClass == null }.map { decompileClass(it.fullName)!! }
-        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount })
+        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
     }
 
     /**
@@ -444,7 +448,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         val model = root ?: return DecompilationResult(emptyList(), 0)
         val topLevel = model.classes.filter { it.outerClass == null }
         val classes = scheduler.map(topLevel) { cls, check -> decompileNow(model, cls, args.outputFormat, check) }
-        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount })
+        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
     }
 
     /**

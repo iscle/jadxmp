@@ -190,3 +190,18 @@ This expands fixture discovery and original-input validation only: the new sampl
 not yet been measured through both decompilers, and the existing parity gates are unchanged.
 See [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for extraction transformations,
 assertion dependency isolation and remaining work.
+
+## Root-pass lifecycle validation
+
+Registered root passes now execute once per load, before the deobfuscation alias snapshot
+and before lazy class processing. Previously the facade registered these passes but never
+called them. Root failures remain visible in diagnostics and count once in both sequential
+and parallel aggregate results, including empty models. Cancelled root preparation exposes
+neither the prior model nor a partially prepared replacement; both cancellation types propagate.
+
+Lifecycle checks cover reloads, repeated cached renders, output-format changes, ordering,
+failure continuation and cancellation identity. The four missing-body runtime tests now also
+assert that their parameter-name collision setup actually ran; all pass with that setup active.
+The isolated API/pipeline JVM, JavaScript and Wasm tests, existing three-source execution gate
+and 211-input Java differential gate pass. Independent review completed with no remaining
+must-fix findings. These checks do not establish whole-project production readiness.

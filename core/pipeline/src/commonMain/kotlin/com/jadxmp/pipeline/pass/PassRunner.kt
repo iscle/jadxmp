@@ -7,6 +7,7 @@ import com.jadxmp.ir.attr.IrAttrs
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.IrRoot
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Orders passes by their [Pass.runAfter]/[Pass.runBefore] hints and runs them with **fault isolation**:
@@ -28,13 +29,18 @@ class PassRunner(
 
     /** Run every stage over the whole model: root passes, then each class (and its methods). */
     fun run(root: IrRoot, context: PassContext = PassContext(root)) {
-        for (pass in rootPasses) {
-            context.cancellation.ensureActive()
-            guarded(root) { pass.run(root, context) }
-        }
+        runRoot(root, context)
         for (cls in root.classes) {
             context.cancellation.ensureActive()
             runClass(cls, context)
+        }
+    }
+
+    /** Run preparation without eagerly processing class bodies; the facade calls this once per load. */
+    fun runRoot(root: IrRoot, context: PassContext = PassContext(root)) {
+        for (pass in rootPasses) {
+            context.cancellation.ensureActive()
+            guarded(root) { pass.run(root, context) }
         }
     }
 
@@ -63,6 +69,8 @@ class PassRunner(
             body()
         } catch (c: CancellationSignal) {
             throw c // never swallow cancellation
+        } catch (c: CancellationException) {
+            throw c
         } catch (t: Throwable) {
             recordError(node, t)
         }

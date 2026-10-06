@@ -113,11 +113,13 @@ class MissingBodySemanticsTest {
             override val id = "failed-body-fixture"
             override fun tryLoad(name: String, bytes: ByteArray) = ListCodeLoader(listOf(declaration))
         }
+        var parameterPassRan = false
         val parameterNames = object : PassPlugin {
             override val id = "collision-parameter-names"
             override fun rootPasses() = listOf(object : RootPass {
                 override val name = "collision-parameter-names"
                 override fun run(root: IrRoot, context: PassContext) {
+                    parameterPassRan = true
                     for (cls in root.classes) for (method in cls.methods) if (method.argTypes.size == 3) {
                         method[CodegenKeys.PARAM_NAMES] = listOf("java", "UnsupportedOperationException", "JvmUnsupportedOperationException")
                     }
@@ -129,6 +131,7 @@ class MissingBodySemanticsTest {
             registry = PluginRegistry(listOf(plugin), listOf(parameterNames)),
         ))
         assertEquals(1, engine.load("fixture", byteArrayOf()))
+        assertTrue(parameterPassRan, "Collision parameter injection must run")
         return engine.decompileAll()
     }
 }
