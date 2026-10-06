@@ -109,13 +109,16 @@ internal object GenericSignatureModel {
             val budget = budget(cls)
             val instanceErasures by lazy { GenericSignatures.ErasureScope(scope.parameters) }
             val staticErasures by lazy { GenericSignatures.ErasureScope(emptyList()) }
+            val instanceFields by lazy { CachedFieldSignatures(scope.parameters) }
+            val staticFields by lazy { CachedFieldSignatures(emptyList()) }
             for ((field, input) in cls.fields.zip(data.fields)) diagnostics.guarded(field, cls) {
                 if (budget.exhausted) return@guarded
                 input.genericSignature?.let { text ->
                     field[GenericAttributes.RAW_SIGNATURE] = text
                     val fieldScope = if (field.accessFlags and AccessFlags.STATIC == 0) scope.parameters else emptyList()
                     budget.charge(text, fieldScope.size)
-                    val type = withReflectiveScope(scope) { GenericSignatures.parseField(text, fieldScope) }
+                    val signatures = if (field.accessFlags and AccessFlags.STATIC == 0) instanceFields else staticFields
+                    val type = withReflectiveScope(scope) { signatures.parse(text) }
                     val erasures = if (field.accessFlags and AccessFlags.STATIC == 0) instanceErasures else staticErasures
                     signatureRequire(erasures.erase(type) == field.type) { "field generic signature disagrees with erased descriptor" }
                     field[GenericAttributes.FIELD] = type

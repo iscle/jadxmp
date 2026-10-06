@@ -95,6 +95,39 @@ class DeclarationGenericSignatureTest {
         assertNull(cls[IrAttrs.ERROR])
     }
 
+    @Test fun repeatedFieldSignaturesRetainClassAndStaticScopes() {
+        fun input(name: String, bound: String) = FakeClassData("L$name;",
+            nesting = com.jadxmp.input.ClassNesting.TopLevel,
+            genericSignature = "<T:L$bound;>Ljava/lang/Object;",
+            fields = listOf(
+                FakeFieldData(FakeFieldRef("L$name;", "first", "L$bound;"), genericSignature = "TT;"),
+                FakeFieldData(FakeFieldRef("L$name;", "second", "L$bound;"), genericSignature = "TT;"),
+                FakeFieldData(FakeFieldRef("L$name;", "staticField", "L$bound;"),
+                    accessFlags = com.jadxmp.input.AccessFlags.STATIC, genericSignature = "TT;"),
+            ))
+        val classes = ModelBuilder.buildDeclarations(FakeCodeLoader(listOf(
+            input("StringScope", "java/lang/String"), input("NumberScope", "java/lang/Number"),
+        ))).classes
+        for (cls in classes) {
+            assertTrue(cls.fields.take(2).all { it[GenericAttributes.FIELD] == IrType.typeVariable("T") })
+            assertNull(cls.fields.last()[GenericAttributes.FIELD])
+            assertNotNull(cls.fields.last()[IrAttrs.ERROR])
+            assertNull(cls[GenericAttributes.RECOVERIES])
+        }
+    }
+
+    @Test fun cachedFieldSignaturesStillConsumeTheAggregateWorkBudget() {
+        val signature = "L" + "x".repeat(10_000) + ";"
+        val fields = (0 until 150).map { index -> FakeFieldData(
+            FakeFieldRef("LCached;", "field$index", signature), genericSignature = signature) }
+        val cls = ModelBuilder.buildDeclarations(FakeCodeLoader(listOf(FakeClassData("LCached;", fields = fields))))
+            .classes.single()
+        assertEquals(150, cls.fields.size)
+        assertEquals(99, cls.fields.count { it[GenericAttributes.FIELD] != null })
+        assertTrue(cls[IrAttrs.ERROR]!!.message.contains("aggregate generic signature work limit"))
+        assertNull(cls[GenericAttributes.RECOVERIES])
+    }
+
     @Test fun repeatedLargeLexicalScopesHaveAnAggregateWorkLimit() {
         val formals = (0 until 1500).joinToString("") { "T$it:Ljava/lang/Object;" }
         val data = FakeClassData("LWide;", genericSignature = "<$formals>Ljava/lang/Object;",
