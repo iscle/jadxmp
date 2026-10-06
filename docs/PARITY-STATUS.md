@@ -81,6 +81,23 @@ All 612 input/extraction hashes, classifications, preparation and transformation
 array-store and plain-inheritance batch; it precedes the later allocation, null-throw and overload
 fixes. It neither combines the opt-in metadata profile above nor declares whole-corpus parity.
 
+## Expanded null-throw and overload measurement (engine `81c9227`)
+
+[Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37413163234) completed all 612 original
+rows with `metadata_profile=none`. Java remains at **292/431 compilations** and now passes
+**70/112 original checks**; Kotlin reaches **230/431 compilations** and **38/112 passing checks**.
+The exact original `TestOverloadedMethodInvoke` check now passes in both languages. Kotlin also
+compiles `TestNullInline` and `TestTypeResolver24`; neither has an evaluated original check, so
+those two corpus gains establish compilation only. **137 reference-better Java cases remain**.
+
+Compared with `cb02fc1`, all 612 input/extraction hashes, classifications, preparation and
+transformation records and all reference signals are identical. No no-error, compilation or
+execution signal was lost. Four rows changed: the three gains above, plus a Kotlin compiler
+classification change from CLEAN to WARNINGS for the already-compiling `TestGenericsMthOverride`.
+The three changed Kotlin gain rows also compile with warnings. No-error counts remain Java 401
+and Kotlin 312. This report includes the native allocation, pure-null throw and overload-binding
+batch; it does not establish full parity, annotation preservation or production readiness.
+
 ## Source overload binding
 
 Shared source binding now retains exact loaded overload descriptors when source arguments have
