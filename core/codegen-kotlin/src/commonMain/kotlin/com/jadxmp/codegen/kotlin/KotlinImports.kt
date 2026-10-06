@@ -11,12 +11,31 @@ import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.type.IrType
 
 /** Collision-safe imports for JVM type projections and generated Kotlin intrinsics, alongside ordinary class imports. */
-internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasMap) {
+internal class KotlinImports(
+    packageName: String, private val cls: IrClass, private val aliasMap: AliasMap,
+    private val constructorNames: KotlinConstructorNamePlan = KotlinConstructorNamePlan(cls, aliasMap),
+) {
+    private val constructorOwners = mutableMapOf<String, String>()
+    private val nameScope = KotlinNameScope()
+
+    fun hasCompleteNameScope(context: IrClass): Boolean = nameScope.hasCompleteNameScope(context)
+
+    fun constructorAlias(type: IrType, context: IrClass = cls): String? {
+        val cls = constructorNames.constructorClass(type) ?: return null
+        if (!hasCompleteNameScope(context)) throw ConstructorNameScopeException()
+        val owner = constructorOwners.getOrPut(cls.fullName) {
+            KotlinSourceName.sourceQualifiedName(cls, aliasMap)
+        }
+        return aliasedClass(owner, cls.fullName)
+    }
+
     private val ordinary = ImportCollector(packageName)
     private var symbolAliases: Map<String, String>
     private val reservedNames = linkedSetOf<String>()
     private var discoveryComplete = false
     private val usedAliasedSymbols = linkedSetOf<String>()
+    private val dynamicAliasedOwners = linkedSetOf<String>()
+    private val aliasedReferenceOwners = mutableMapOf<String, String>()
     private val monitorOwners = linkedSetOf<String>()
 
     init {
@@ -57,7 +76,9 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
                 }
             }
             classes.addAll(current.innerClasses)
-            for (type in listOfNotNull(current.superType) + current.interfaces) {
+            current.outerClass?.let(classes::add)
+            (current.superType as? IrType.Object)?.className?.let(cls.root::findClass)?.let(classes::add)
+            for (type in current.interfaces) {
                 (type as? IrType.Object)?.className?.let(cls.root::findClass)?.let(classes::add)
             }
         }
@@ -66,6 +87,7 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
 
     /** Finalize after the discarded render has discovered all referenced types, including raw/default-package types. */
     fun finishDiscovery() {
+        constructorNames.finishDiscovery()
         symbolAliases = allocateAliases()
         discoveryComplete = true
     }
@@ -73,7 +95,7 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
     private fun allocateAliases(): Map<String, String> {
         val names = NameGenerator()
         reservedNames.forEach(names::reserve)
-        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners + setOf("java.lang.UnsupportedOperationException") + KotlinJvmModifiers.aliasedSymbols + monitorOwners).associateWith { owner ->
+        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners + setOf("java.lang.UnsupportedOperationException") + KotlinJvmModifiers.aliasedSymbols + monitorOwners + dynamicAliasedOwners).associateWith { owner ->
             val base = when {
                 owner == KotlinJvmModifiers.SYNCHRONIZED_FUNCTION -> "kotlinSynchronized"
                 owner in monitorOwners -> "JvmMonitorOwner"
@@ -83,9 +105,20 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
         }
     }
 
-    fun aliasedClass(fullName: String): String {
+    fun aliasedClass(fullName: String, referenceName: String = fullName): String {
+        if (referenceName != fullName) {
+            val previous = aliasedReferenceOwners[referenceName]
+            check(previous == null || previous == fullName) { "conflicting aliased source identities" }
+            check(!discoveryComplete || previous == fullName) { "aliased identity was not discovered before rendering" }
+            if (previous == null) aliasedReferenceOwners[referenceName] = fullName
+        }
         usedAliasedSymbols.add(fullName)
-        return symbolAliases.getValue(fullName)
+        symbolAliases[fullName]?.let { return it }
+        check(!discoveryComplete) { "aliased owner was not discovered before rendering" }
+        dynamicAliasedOwners.add(fullName)
+        // Pass-one text is discarded. Allocate all discovered owners once, after ordinary imports
+        // and declarations have reserved their names; repeated rebuilding would be quadratic.
+        return fullName
     }
 
     fun aliasedFunction(fullName: String): String {
@@ -105,6 +138,10 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
     }
 
     fun useClass(fullName: String): String {
+        // Import aliases remove ordinary source spellings. Route the exact registered binary
+        // identity too; blindly replacing '$' would confuse real package and literal-dollar names.
+        aliasedReferenceOwners[fullName]?.let { return aliasedClass(it) }
+        if (fullName in dynamicAliasedOwners) return aliasedClass(fullName)
         if (!discoveryComplete) {
             // Imports expose the top-level type, including when the reference denotes a nested type.
             // Reserving before alias finalization is essential for default-package classes: unlike a

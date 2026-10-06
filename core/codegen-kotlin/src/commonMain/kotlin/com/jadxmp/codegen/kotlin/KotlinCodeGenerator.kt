@@ -69,13 +69,14 @@ class KotlinCodeGenerator {
         commentMap: CommentMap = CommentMap.EMPTY,
     ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
-        val imports = KotlinImports(packageName, cls, aliasMap)
+        val constructorNames = KotlinConstructorNamePlan(cls, aliasMap)
+        val imports = KotlinImports(packageName, cls, aliasMap, constructorNames)
         val inheritance = KotlinInheritancePlan()
         val invocationBindings = InvocationSourceBinding(cls.root)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -93,7 +94,7 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -109,6 +110,7 @@ class KotlinCodeGenerator {
         private val commentMap: CommentMap = CommentMap.EMPTY,
         private val inheritance: KotlinInheritancePlan = KotlinInheritancePlan(),
         private val invocationBindings: InvocationSourceBinding,
+        private val constructorNames: KotlinConstructorNamePlan,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -141,6 +143,7 @@ class KotlinCodeGenerator {
             emitDeclarationHeader(cls, kind, topLevel, dataShape)
             code.add(" {").newLine()
             code.incIndent()
+            constructorNames.problem(cls)?.let { code.emitErrorMarker(cls, it) }
             if (kind == ClassKind.CLASS && cls.superType != null && cls.superType != IrType.OBJECT) {
                 inheritance.constructorDelegations(cls).problem?.let { code.emitErrorMarker(cls, it) }
             }
@@ -771,6 +774,10 @@ class KotlinCodeGenerator {
             emitUserComment(methodRef(cls, method))
             emitErrorComment(method)
             val isConstructor = method.name == "<init>"
+            if (constructorNames.suppress(method)) {
+                code.add("@").add(imports.aliasedClass(KotlinConstructorNamePlan.SUPPRESS))
+                    .add("(\"CONFLICTING_OVERLOADS\")").newLine()
+            }
             val synchronized = KotlinJvmModifiers.isSynchronized(method)
             if (synchronized && (isConstructor || method.accessFlags and (KotlinModifiers.ABSTRACT or KotlinModifiers.NATIVE) != 0)) {
                 code.emitErrorMarker(method, "synchronized JVM declaration cannot be emitted with this method kind")
@@ -1040,7 +1047,7 @@ class KotlinCodeGenerator {
                 emit()
             } catch (t: Throwable) {
                 code.restore(checkpoint)
-                code.emitErrorMarker(node, reason())
+                code.emitErrorMarker(node, if (t is ConstructorNameScopeException) t.message!! else reason())
             }
         }
 

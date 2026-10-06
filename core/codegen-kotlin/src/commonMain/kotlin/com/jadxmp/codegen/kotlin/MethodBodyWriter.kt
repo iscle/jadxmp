@@ -1387,6 +1387,14 @@ internal class MethodBodyWriter(
         emitFieldName(field)
     }
 
+    private fun emitConstructorClassName(type: IrType) {
+        val alias = imports.constructorAlias(type, method.declaringClass)
+        if (alias == null) emitClassName(type) else {
+            code.attachReference(ClassNodeRef(className(type)))
+            code.add(alias)
+        }
+    }
+
     private fun emitInvoke(insn: Instruction) {
         if (insn is InvokeCustomInstruction) {
             emitInvokeCustom(insn, KotlinPrec.LOWEST)
@@ -1402,7 +1410,7 @@ internal class MethodBodyWriter(
 
         // A normalized constructor renders `T(args)` (Kotlin has no `new`). The callee is a bare name.
         if (invoke.opcode == IrOpcode.CONSTRUCTOR) {
-            emitClassName(target.declaringType)
+            emitConstructorClassName(target.declaringType)
             emitArgList(invoke, 0)
             return
         }
@@ -1418,7 +1426,7 @@ internal class MethodBodyWriter(
                 // (a later pass reconstructs primary/secondary-constructor delegation).
                 code.add(if (targetName == enclosingName) "this" else "super")
             } else {
-                emitClassName(target.declaringType)
+                emitConstructorClassName(target.declaringType)
             }
             emitArgList(invoke, firstArg)
             return
