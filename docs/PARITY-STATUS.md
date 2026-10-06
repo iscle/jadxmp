@@ -25,6 +25,34 @@ bit interpretations. Equal-bit acyclic phi paths and copies are covered; general
 SSA views remain incomplete. Independent tests cover all five pipeline targets and seven runtime
 cases, including negative zero, null/bounds failures and reference-array store exceptions.
 
+## Explicit external metadata profile (engine `a6b9d40`)
+
+The separate opt-in `fixture-classpath-v1` run also covers all **612 inputs**. With the validated
+AssertJ declaration catalog supplied only to candidate Kotlin, **219 of 431 eligible outputs compile
+and 40 of 112 rebuilt checks pass**, compared with **212 compilations and 33 passing checks** in the
+recorded metadata-free profile above. No measured signals are lost. All input/extracted-source hashes,
+original/preparation classifications, reference Java signals and candidate Java signals match that
+metadata-free report; the 319 compiled originals without checks remain not evaluated.
+
+Both compilation and execution improve for these seven original fixtures:
+`arrays/TestArrayFillNegative`, `code/TestArrayAccessReorder`, `others/TestDeboxing`,
+`others/TestFieldInitOrder`, `others/TestFloatValue`, `trycatch/TestLoopInTryCatch2` and
+`trycatch/TestTryCatchInIf`. Raw external types such as `AbstractFloatAssert<*>` now have the arity
+required by Kotlin. Bare constructor/static/class-literal names and generated erased declarations stay
+unchanged. This does not enable source-generic or bridge reconstruction.
+
+The profile reads the same `assertj-core-3.27.7.jar` used by original/rebuilt compilation: SHA-256
+`c4a445426c3c2861666863b842cc4ec7bbb1c4226fefd370b6d2fe83d6c4ff0f` (1,399,383 bytes).
+It admits 839 of 842 declarations; six recorded diagnostics exclude three unsupported helper classes,
+and the versioned module descriptor is explicitly skipped. Every artifact, admission diagnostic and
+skip is retained in the report. See [GENERIC-METADATA.md](GENERIC-METADATA.md) for limits and reproduction.
+
+The default remains **metadata-free**. These are profile-assisted gains, not a replacement of the
+metadata-free totals or the enforced gates. Independent validation passed 203 Kotlin backend tests on
+each of JVM, JS Node/browser and Wasm Node/browser, plus 15 focused oracle tests. The full owner suite
+passed 159 oracle tests, both enforced Java gates with zero regressions, and the unchanged default
+Kotlin smali result of 83/209 compiling and 80 unflagged.
+
 ## Latest fixture-context and forwarding validation
 
 The smali gate covers **211 physical sources in 209 fixture contexts**: **201 parity
