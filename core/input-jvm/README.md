@@ -24,16 +24,20 @@ structurally decoded instructions are not yet normalized decompiler input.
 Frame primitives model typed logical stack values, wide local slots, stack permutations, independent
 snapshots, and constructor alias transitions. They validate local and stack bounds without depending
 on the IR or pipeline. Primitive joins conservatively invalidate incompatible locals and require
-matching stack shapes/types. Reference/exception analysis and StackMapTable checks are still
-pending; these primitives do not constitute a complete bytecode verifier. The proposed
+matching stack shapes/types. Reference joins preserve nullability and conservatively widen distinct
+initialized types to Object. Precise reference hierarchy/exception analysis and StackMapTable checks
+are still pending; these primitives do not constitute a complete bytecode verifier. The proposed
 stages and shared input-contract prerequisites are recorded in [docs/JVM-INPUT.md](../../docs/JVM-INPUT.md).
 
-The register normalizer handles primitive methods with integer branches, loops and dense/sparse
-switches, eagerly producing the shared CodeReader model. It copies high-register parameters into contiguous JVM local slots and preserves
+The register normalizer handles primitive/reference values with integer/reference/null branches,
+loops and dense/sparse switches, eagerly producing the shared CodeReader model. It copies high-register parameters into contiguous JVM local slots and preserves
 local-load snapshots, category-two values and floating-point constant bits. Bounded block-level
 frame analysis precedes one-time emission; branch targets skip the parameter prologue and resolve
-removed NOP/pop instructions. Switch default destinations remain explicit. Handlers, calls, reference
-operations, legacy subroutines and unreachable bytecode regions produce explicit method failures.
+removed NOP/pop instructions. Switch default destinations remain explicit. Native reference/null
+loads and stores (including wide local indexes) preserve snapshots and identity. Reference returns
+accept exact/null/Object assignment; narrower assignment needs unavailable hierarchy information
+and is diagnosed. Handlers, calls, casts, allocations, reference constant-pool loads, legacy
+subroutines and unreachable bytecode regions produce explicit method failures.
 JVM tests compare normalized-register execution with real javac methods for branches, loops,
 switches, overflow, mixed wide parameters, post-increment, signed zero and NaN; this is a bounded
 normalization slice, not general JVM decompilation or complete bytecode verification.
@@ -54,7 +58,10 @@ Module descriptors, contradictory class forms and duplicate declarations are rej
 
 Native facade tests compile actual javac class bytes directly through both source emitters, recompile
 the output and execute branch/loop/switch and numeric edge cases without D8. Constructors, calls,
-reference operations and exception handlers remain unsupported, so this is partial native input.
+casts, reference constant-pool loads and exception handlers remain unsupported, so this is partial
+native input. Reference execution tests compare original javac classes, the pinned jadx Java output
+and candidate Java/Kotlin for nulls, identity, arrays and loops. Shared long descriptor comparisons
+count against the analysis budget.
 The default input registry remains unchanged. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the
 original Class rather than Companion, and volatile/transient backing-field annotations. Dedicated

@@ -208,7 +208,7 @@ class JvmPrimitiveNormalizerTest {
         val handler = if (handlers) u2(1) + u2(0) + u2(code.size) + u2(0) + u2(0) else u2(0)
         val attribute = JvmAttribute("Code", 100, u2(stack) + u2(locals) + i4(code.size) + code + handler + u2(0))
         val method = JvmMember(if (isStatic) 8 else 0, name, descriptor, listOf(attribute))
-        return JvmPrimitiveNormalizer.normalize("Example", method, JvmMethodDescriptor.parse(descriptor), constants,
+        return JvmRegisterNormalizer.normalize("Example", method, JvmMethodDescriptor.parse(descriptor), constants,
             JvmCodeAttribute.parse(attribute, constants))
     }
     private fun pool(entry: ByteArray = byteArrayOf(), slots: Int = if (entry.isEmpty()) 0 else 1) =

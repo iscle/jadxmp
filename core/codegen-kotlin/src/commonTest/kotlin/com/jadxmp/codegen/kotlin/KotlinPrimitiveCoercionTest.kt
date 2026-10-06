@@ -9,6 +9,16 @@ import com.jadxmp.testsupport.assertThatCode
 import kotlin.test.Test
 
 class KotlinPrimitiveCoercionTest {
+    @Test fun integerRegisterAtBooleanReturnUsesExplicitTruthTest() {
+        val cls = irClass("a.C")
+        val value = Local(1, IrType.INT, name = "value", isParam = true)
+        cls.method("m", returnType = IrType.BOOLEAN, argTypes = listOf(IrType.INT)) {
+            this[CodegenKeys.PARAM_NAMES] = listOf("value")
+            body(ret(value.ref()))
+        }
+        assertThatCode(generate(cls)).containsOne("return value != 0")
+    }
+
     @Test
     fun numericComparisonUsesCoalescedBooleanAsOneOrZero() {
         val cls = irClass("a.C")

@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -33,14 +34,17 @@ class JvmClassAdapterTest {
 
     @Test fun unsupportedBodiesRemainIsolatedAndCacheTheirOriginalFailure() {
         val cls = JvmClassAdapter.adapt(file(methods = listOf(
-            method("broken", "()V", code(0, 1, 0x01, 0x57, 0xb1)),
+            method("broken", "()V", code(0, 1, 0x01, 0xbe, 0x57, 0xb1)),
             method("good", "()I", code(0, 1, 0x04, 0xac)),
+            method("formerlyUnsupportedNull", "()V", code(0, 1, 0x01, 0x57, 0xb1)),
         )), "Example.class")
         val bad = cls.methods[0]
         val first = assertFailsWith<ByteReaderException> { bad.codeReader }
         assertSame(first, assertFailsWith<ByteReaderException> { bad.codeReader })
         assertTrue(first.message.orEmpty().contains("unsupported"))
         assertTrue(cls.methods[1].codeReader != null)
+        val nowSupported = assertNotNull(cls.methods[2].codeReader)
+        assertSame(nowSupported, cls.methods[2].codeReader)
         assertTrue(cls.disassemble().contains("aconst_null"))
     }
 

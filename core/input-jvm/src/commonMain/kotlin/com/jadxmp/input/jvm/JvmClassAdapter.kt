@@ -57,7 +57,7 @@ internal object JvmClassAdapter {
                     // Type-use annotations may live inside Code (for local variables/casts), not
                     // on the declaration. They require the same explicit unsupported diagnostic.
                     checkAttributes(parsedCode.attributes)
-                    JvmPrimitiveNormalizer.normalize(file.name, method, descriptor, file.constants, parsedCode)
+                    JvmRegisterNormalizer.normalize(file.name, method, descriptor, file.constants, parsedCode)
                 }
             }
             object : MethodData {

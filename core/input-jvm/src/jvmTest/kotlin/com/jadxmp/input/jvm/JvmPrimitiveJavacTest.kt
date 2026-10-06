@@ -26,7 +26,7 @@ class JvmPrimitiveJavacTest {
         for (member in file.methods) {
             val descriptor = JvmMethodDescriptor.parse(member.descriptor)
             val code = JvmCodeAttribute.parse(member.attributes.single(), file.constants)
-            val reader = JvmPrimitiveNormalizer.normalize(file.name, member, descriptor, file.constants, code)
+            val reader = JvmRegisterNormalizer.normalize(file.name, member, descriptor, file.constants, code)
             val method = klass.getDeclaredMethod(member.name, Int::class.javaPrimitiveType)
             for (value in listOf(-65537, -257, -2, -1, 0, 1, 2, 255, 256, 65535, 65536)) {
                 assertEquals(bits(method.invoke(null, value)), execute(reader, descriptor, listOf(value), false),
@@ -48,7 +48,7 @@ class JvmPrimitiveJavacTest {
         for (member in file.methods) {
             val descriptor = JvmMethodDescriptor.parse(member.descriptor)
             val code = JvmCodeAttribute.parse(member.attributes.single(), file.constants)
-            val reader = JvmPrimitiveNormalizer.normalize(file.name, member, descriptor, file.constants, code)
+            val reader = JvmRegisterNormalizer.normalize(file.name, member, descriptor, file.constants, code)
             val arguments = List(descriptor.parameterTypes.size) { 123 }
             val method = klass.getDeclaredMethod(member.name, *Array(arguments.size) { Int::class.javaPrimitiveType })
             reader.visitInstructions { instruction ->
@@ -81,7 +81,7 @@ class JvmPrimitiveJavacTest {
         for (member in file.methods) {
             val descriptor = JvmMethodDescriptor.parse(member.descriptor)
             val code = JvmCodeAttribute.parse(member.attributes.single(), file.constants)
-            val reader = JvmPrimitiveNormalizer.normalize(file.name, member, descriptor, file.constants, code)
+            val reader = JvmRegisterNormalizer.normalize(file.name, member, descriptor, file.constants, code)
             val method = klass.getDeclaredMethod(member.name, Int::class.javaPrimitiveType)
             for (value in listOf(0, 1, 3, 17)) {
                 assertEquals(bits(method.invoke(null, value)), execute(reader, descriptor, listOf(value), false),
@@ -106,7 +106,7 @@ class JvmPrimitiveJavacTest {
         for (member in file.methods) {
             val descriptor = JvmMethodDescriptor.parse(member.descriptor)
             val code = JvmCodeAttribute.parse(member.attributes.single(), file.constants)
-            val reader = JvmPrimitiveNormalizer.normalize(file.name, member, descriptor, file.constants, code)
+            val reader = JvmRegisterNormalizer.normalize(file.name, member, descriptor, file.constants, code)
             val method = klass.getDeclaredMethod(member.name,
                 *Array(descriptor.parameterTypes.size) { Int::class.javaPrimitiveType })
             val values = listOf(Int.MIN_VALUE, -1, 0, 1, Int.MAX_VALUE)
@@ -215,7 +215,7 @@ class JvmPrimitiveJavacTest {
                     val member = file.methods.single { it.name == case.name }
                     val descriptor = JvmMethodDescriptor.parse(member.descriptor)
                     val code = JvmCodeAttribute.parse(member.attributes.single { it.name == "Code" }, file.constants)
-                    val reader = JvmPrimitiveNormalizer.normalize(file.name, member, descriptor, file.constants, code)
+                    val reader = JvmRegisterNormalizer.normalize(file.name, member, descriptor, file.constants, code)
                     val method = klass.getDeclaredMethod(case.name, *case.arguments.map(::primitiveClass).toTypedArray())
                     val expected = method.invoke(case.receiver, *case.arguments.toTypedArray())
                     val actual = execute(reader, descriptor, case.arguments, case.receiver != null)

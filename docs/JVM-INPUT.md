@@ -6,7 +6,7 @@ storage and permutations, snapshots, and constructor alias transitions; it passe
 review. The primitive normalizer produces the shared CodeReader model; its straight-line slice has
 passed independent review. A bounded primitive control-flow extension has also passed independent
 review and JVM/JS/Wasm tests. The module is not registered with `core:api`; general native JVM decompilation is
-incomplete. Reference/exception frame analysis, general register lowering, and remaining
+incomplete. Precise reference hierarchy/exception analysis, remaining opcode lowering, and remaining
 input-contract changes below are **proposed, not implemented**.
 The fused-result and explicit inline-switch prerequisites have landed separately.
 
@@ -46,23 +46,29 @@ parsing and compatibility checks are a separate necessary layer; unchecked metad
 that a method is valid. Legacy `jsr`/`ret` requires explicit return-address/subroutine normalization;
 initial lowering should report it as unsupported rather than inventing a successor.
 
-The implemented primitive normalizer validates eagerly before returning its CodeReader, so reading
+The implemented register normalizer validates eagerly before returning its CodeReader, so reading
 its register count cannot trigger a deferred lowering failure. It supports primitive constants,
 loads/stores, iinc, stack permutations, arithmetic, conversions, comparisons and returns. Incoming
 parameters occupy the high-register bank; raw bytecode positions remain in instruction file offsets,
-while normalized instruction offsets are unique ordinals. Integer branches, goto/goto_w, primitive
-joins/loops and both switch forms are implemented. Handlers, calls, reference operations,
+while normalized instruction offsets are unique ordinals. Integer/reference/null branches,
+goto/goto_w, primitive/reference joins/loops and both switch forms are implemented. Native reference loads/stores (including wide
+local indexes), null constants and exact/null/Object reference returns preserve value identity.
+Null/reference joins retain the known type; distinct initialized references conservatively join
+at Object. Narrower return assignability that needs unavailable hierarchy information is diagnosed.
+Handlers, calls, casts, allocations, reference constant-pool operations,
 constructors, jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
-`JvmPrimitiveFlow` discovers basic blocks and computes their incoming frames with a worklist.
-The same primitive transfer functions validate analysis and emission; analysis emits nothing,
-and each block is emitted once after convergence. Logical stack types must agree exactly at joins;
+`JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.
+The same typed transfer functions validate analysis and emission; analysis emits nothing,
+and each block is emitted once after convergence. Primitive stack types must agree at joins;
 incompatible locals become unusable, including overlapping wide slots. Incoming parameter copies
 run once, while back edges to raw PC zero enter after that prologue. Original NOP/pop targets map
 to the next emitted instruction. Inline switches retain explicit case and default destinations.
 Dense retained frame storage is limited to 4,000,000 cells per method, including initial/working
 frame capacity; scan/transfer work is limited to 10,000,000 units. Exhaustion produces a method
-diagnostic. These limits avoid unbounded max_locals-by-block storage and repeated scans; snapshots
+diagnostic. Join work includes reference descriptor lengths so repeated comparisons of shared
+long names cannot bypass the work bound. The return frame type is validated/cached once per method.
+These limits avoid unbounded max_locals-by-block storage and repeated scans; snapshots
 are made at block boundaries, never for each instruction. StackMapTable validation remains pending.
 
 Reuse checked type/frame values by constant-pool entry or descriptor within each method/class,

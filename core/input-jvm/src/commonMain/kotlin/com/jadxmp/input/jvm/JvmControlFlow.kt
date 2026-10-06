@@ -8,8 +8,8 @@ internal data class JvmAnalysisLimits(
     val maxWork: Long = 10_000_000,
 )
 
-/** Normal edges only. Ordered exception edges and reference/type hierarchy joins are later layers. */
-internal class JvmPrimitiveFlow(private val instructions: List<JvmInstruction>) {
+/** Normal edges only. Ordered exception edges and precise hierarchy joins remain later layers. */
+internal class JvmControlFlow(private val instructions: List<JvmInstruction>) {
     private data class Block(val start: Int, val end: Int, val successors: IntArray)
     private val blocks: List<Block>
 
@@ -70,14 +70,14 @@ internal class JvmPrimitiveFlow(private val instructions: List<JvmInstruction>) 
         // one working frame, even before that frame's operand stack grows.
         var cells = initial.stateCells.toLong() + initial.maxLocals + initial.maxStack
         var work = 0L
-        fun charge(amount: Int) {
-            work += amount.toLong()
+        fun charge(amount: Long) {
+            work += amount
             if (work > limits.maxWork) invalid("analysis work limit exceeded")
         }
         fun retain(state: JvmFrame): JvmFrame {
             cells += state.stateCells
             if (cells > limits.maxFrameCells) invalid("analysis frame storage limit exceeded")
-            charge(state.stateCells)
+            charge(state.stateCells.toLong())
             return state.snapshot()
         }
         fun enqueue(block: Int) {
@@ -89,7 +89,7 @@ internal class JvmPrimitiveFlow(private val instructions: List<JvmInstruction>) 
             val index = pending.removeFirst()
             queued[index] = false
             val state = checkNotNull(states[index])
-            charge(state.stateCells)
+            charge(state.stateCells.toLong())
             val working = state.snapshot()
             val block = blocks[index]
             for (instruction in block.start until block.end) {
@@ -102,7 +102,7 @@ internal class JvmPrimitiveFlow(private val instructions: List<JvmInstruction>) 
                     states[successor] = retain(working)
                     enqueue(successor)
                 } else {
-                    charge(previous.stateCells)
+                    charge(previous.comparisonWork + working.comparisonWork)
                     if (previous.mergeFrom(working)) enqueue(successor)
                 }
             }
@@ -123,5 +123,5 @@ internal class JvmPrimitiveFlow(private val instructions: List<JvmInstruction>) 
         instruction.operand is JvmOperand.Branch || instruction.operand is JvmOperand.Switch ||
             instruction.opcode in 0xac..0xb1 || instruction.opcode == 0xbf
 
-    private fun invalid(message: String): Nothing = throw ByteReaderException("JVM primitive control flow: $message")
+    private fun invalid(message: String): Nothing = throw ByteReaderException("JVM control flow: $message")
 }

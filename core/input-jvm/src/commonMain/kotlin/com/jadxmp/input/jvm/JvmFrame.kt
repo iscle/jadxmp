@@ -113,18 +113,47 @@ internal class JvmFrame(
     /** Storage/scan cost used by bounded control-flow analysis; logical stack entries, not words. */
     val stateCells: Int get() = maxLocals + operands.size
 
+    /** Conservative cost of descriptor comparisons during a join, including shared long names. */
+    val comparisonWork: Long get() {
+        fun descriptorCost(value: JvmFrameValue): Long = when (value) {
+            is JvmFrameValue.Reference -> value.descriptor.length.toLong()
+            is JvmFrameValue.Uninitialized -> value.descriptor.length.toLong()
+            else -> 0
+        }
+        var cost = stateCells.toLong()
+        for (slot in locals) if (slot is JvmLocalSlot.Value) cost += descriptorCost(slot.value)
+        for (value in operands) cost += descriptorCost(value)
+        return cost
+    }
+
     /**
-     * Primitive control-flow join. Stack shapes/types must agree exactly; incompatible locals
-     * become unusable. Reference ancestry joins remain a separate, unsupported analysis layer.
+     * Control-flow join. Primitive stack shapes/types must agree; initialized references join
+     * conservatively at Object while null retains the other reference type. Incompatible locals
+     * become unusable. More precise ancestry joins require a separate hierarchy resolver.
      * Validate the stack first so a rejected join never partly changes its destination.
      */
     fun mergeFrom(other: JvmFrame): Boolean {
         if (maxLocals != other.maxLocals || maxStack != other.maxStack) invalid("incompatible frame bounds")
-        if (operands != other.operands) invalid("incompatible operand stacks at control-flow join")
+        if (operands.size != other.operands.size) invalid("incompatible operand stacks at control-flow join")
+        for (index in operands.indices) {
+            if (JvmReferenceTypes.merge(operands[index], other.operands[index]) == null) {
+                invalid("incompatible operand stacks at control-flow join")
+            }
+        }
         var changed = false
+        for (index in operands.indices) {
+            val merged = checkNotNull(JvmReferenceTypes.merge(operands[index], other.operands[index]))
+            if (merged != operands[index]) { operands[index] = merged; changed = true }
+        }
         for (index in locals.indices) {
-            if (locals[index] != other.locals[index] && locals[index] != JvmLocalSlot.Top) {
-                invalidateLocal(index)
+            val left = locals[index]
+            val right = other.locals[index]
+            if (left != right && left != JvmLocalSlot.Top) {
+                val merged = if (left is JvmLocalSlot.Value && right is JvmLocalSlot.Value)
+                    JvmReferenceTypes.merge(left.value, right.value) else null
+                if (merged == null) invalidateLocal(index)
+                else if (merged != (left as JvmLocalSlot.Value).value) locals[index] = JvmLocalSlot.Value(merged)
+                else continue
                 changed = true
             }
         }

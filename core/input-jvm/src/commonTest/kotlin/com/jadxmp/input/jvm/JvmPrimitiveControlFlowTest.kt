@@ -113,7 +113,7 @@ class JvmPrimitiveControlFlowTest {
         val pool = JvmConstantPool.read(ByteReader(u2(1)), 65)
         val attribute = JvmAttribute("Code", 100, u2(stack) + u2(locals) + i4(code.size) + code + u2(0) + u2(0))
         val member = JvmMember(8, "test", descriptor, listOf(attribute))
-        return JvmPrimitiveNormalizer.normalize("Example", member, JvmMethodDescriptor.parse(descriptor), pool,
+        return JvmRegisterNormalizer.normalize("Example", member, JvmMethodDescriptor.parse(descriptor), pool,
             JvmCodeAttribute.parse(attribute, pool), limits)
     }
     private fun bytes(vararg values: Int) = values.map { it.toByte() }.toByteArray()

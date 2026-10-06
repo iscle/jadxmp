@@ -845,6 +845,13 @@ internal class MethodBodyWriter(
     private fun emitOperandAsType(op: Operand, target: IrType?, minPrec: Int) {
         if (target == IrType.BOOLEAN && op is LiteralOperand && op.type == IrType.INT) {
             code.add(if (op.value == 0L) "false" else "true")
+        } else if (target == IrType.BOOLEAN && operandType(op) == IrType.INT) {
+            // Native ireturn has already applied its low-bit mask; DEX Boolean registers use
+            // nonzero truth. Emit one typed comparison without repeating a call or field read.
+            wrapped(KotlinPrec.EQUALITY, minPrec) {
+                emitOperand(op, KotlinPrec.EQUALITY + 1)
+                code.add(" != 0")
+            }
         } else if (operandType(op) == IrType.BOOLEAN && target is IrType.Primitive &&
             target != IrType.BOOLEAN && target != IrType.VOID
         ) {
