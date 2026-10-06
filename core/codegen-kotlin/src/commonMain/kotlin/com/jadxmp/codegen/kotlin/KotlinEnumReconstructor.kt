@@ -21,19 +21,14 @@ import com.jadxmp.ir.type.IrType
  * **jadx: EnumVisitor (design oracle)** — re-derived independently for the Kotlin backend (the Java
  * backend's [com.jadxmp.codegen.java] `EnumReconstruction` is the design template, not a source).
  *
- * ### Deliberately conservative scope (CLAUDE rule 4 — over-conservative beats wrong)
- * [analyze] returns non-null **only** when every declared `<init>` is a *default* enum constructor
- * (no real parameters ⇒ argument-less entries `A, B, C`). That is the case where dropping the
- * `<clinit>` construction and emitting bare Kotlin enum entries is provably correct and always
- * recompiles. An enum whose constructor takes real arguments would need a reconstructed Kotlin primary
- * constructor + instance-field initialization (coupled to instance-field-init reconstruction, which is
- * a separate concern) to render `A(args)` faithfully; until that exists, such an enum is left to the
- * ordinary class path (no regression) rather than emitting bare entries that cannot call the
- * argument-taking constructor.
+ * User-argument constructors use a separate bounded construction plan. It proves the synthetic
+ * name/ordinal prefix, exact this-chains, entry effect order, and regenerated helper behavior before
+ * secondary constructors omit those descriptor-only parameters. Annotation positions are unrelated.
  */
 internal class KotlinEnumReconstruction private constructor(
     /** Fields hidden from the declaration: the synthetic `$VALUES` backing array. */
     val hiddenFields: Set<IrField>,
+    val construction: KotlinEnumConstructionPlan? = null,
     /** Compiler-synthesized methods hidden: `values()` clone, `valueOf(String)`, the `$values()` builder. */
     val hiddenMethods: Set<IrMethod>,
     /** The `<clinit>` instructions (enum construction + `$VALUES` build + dead code) to not render. */
@@ -45,7 +40,7 @@ internal class KotlinEnumReconstruction private constructor(
         /** The number of synthetic leading `<init>` params (`name`, then `ordinal`). */
         private fun syntheticArgCount(paramOrArgCount: Int): Int = if (paramOrArgCount >= 2) 2 else paramOrArgCount
 
-        fun analyze(cls: IrClass): KotlinEnumReconstruction? {
+        fun analyze(cls: IrClass, budget: KotlinEnumConstructionPlan.Budget = KotlinEnumConstructionPlan.Budget(), outputUnit: IrClass = cls): KotlinEnumReconstruction? {
             if (!KotlinModifiers.has(cls.accessFlags, KotlinModifiers.ENUM)) return null
             if ((cls.superType as? IrType.Object)?.className != ENUM_CLASS) return null
 
@@ -59,10 +54,13 @@ internal class KotlinEnumReconstruction private constructor(
             // cannot prove the construction is gone, so bail.
             if (enumConstantFields.isNotEmpty() && clinit == null) return null
 
-            // Conservative gate: every constructor must be a default (argument-less) enum constructor, so
-            // the entries render as bare `A, B, C` with nothing to reconstruct.
+            // Nontrivial constructors require one complete plan for their descriptors, delegation,
+            // entry argument evaluation, and regenerated helpers. Partial reconstruction is unsafe.
             val constructors = cls.methods.filter { it.name == "<init>" }
-            if (!constructors.all { isDefaultEnumConstructor(it) }) return null
+            val construction = if (constructors.all { isDefaultEnumConstructor(it) }) null else {
+                if (clinit == null) return null
+                KotlinEnumConstructionPlan.analyze(cls, enumConstantFields.toList(), clinit, valuesField, budget, outputUnit) ?: return null
+            }
 
             val statements = clinit?.let { flatten(it) } ?: emptyList()
 
@@ -71,9 +69,9 @@ internal class KotlinEnumReconstruction private constructor(
             // `A = new E$1("A", 0)` — a subclass whose construction we neither suppress (it isn't a
             // `new E`) nor whose override body we can render as a bare entry, so we'd drop the body AND
             // leave a dangling `E$1(…)` in the companion init. Bail to the ordinary path instead (rule 4).
-            if (!allConstantsAreDirectConstructions(statements, cls, enumConstantFields)) return null
+            if (construction == null && !allConstantsAreDirectConstructions(statements, cls, enumConstantFields)) return null
 
-            val suppressed = if (clinit != null) {
+            val suppressed = construction?.consumedInitializers ?: if (clinit != null) {
                 computeSuppressed(statements, cls, clsType, enumConstantFields, valuesField)
             } else {
                 emptySet()
@@ -81,10 +79,10 @@ internal class KotlinEnumReconstruction private constructor(
 
             // A residual (kept) statement must not read a value whose def we suppressed — that would
             // dangle. For a default-ctor enum the residual is normally empty; bail otherwise (rule 4).
-            if (!residualIsClean(statements, suppressed)) return null
+            if (construction == null && !residualIsClean(statements, suppressed)) return null
 
             val hiddenMethods = classifySyntheticMethods(cls, clsType, valuesField)
-            return KotlinEnumReconstruction(setOf(valuesField), hiddenMethods, suppressed)
+            return KotlinEnumReconstruction(setOf(valuesField), construction, hiddenMethods, suppressed)
         }
 
         /**
@@ -135,7 +133,7 @@ internal class KotlinEnumReconstruction private constructor(
             val candidates = cls.fields.filter { f ->
                 KotlinModifiers.has(f.accessFlags, KotlinModifiers.STATIC) &&
                     f.type is IrType.ArrayType &&
-                    (f.type as IrType.ArrayType).arrayRootElement == clsType
+                    (f.type as IrType.ArrayType).element == clsType
             }
             if (candidates.isEmpty()) return null
             if (candidates.size == 1) return candidates[0]

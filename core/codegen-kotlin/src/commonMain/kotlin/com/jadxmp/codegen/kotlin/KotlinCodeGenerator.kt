@@ -74,10 +74,11 @@ class KotlinCodeGenerator {
         val inheritance = KotlinInheritancePlan()
         val invocationBindings = InvocationSourceBinding(cls.root)
         val rawFields = KotlinRawFieldPlan(imports, aliasMap)
+        val enumPlans = EnumPlans(cls)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -95,8 +96,21 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans).emitClass(cls, topLevel = true)
         return code.finish()
+    }
+
+    private class EnumPlans(private val outputUnit: IrClass) {
+        private val budget = KotlinEnumConstructionPlan.Budget()
+        private val plans = mutableMapOf<IrClass, KotlinEnumReconstruction?>()
+        fun get(cls: IrClass): KotlinEnumReconstruction? {
+            if (!KotlinModifiers.has(cls.accessFlags, KotlinModifiers.ENUM)) return null
+            if (plans.containsKey(cls)) return plans[cls]
+            if (!budget.reserve()) return null
+            val plan = KotlinEnumReconstruction.analyze(cls, budget, outputUnit)
+            plans[cls] = plan
+            return plan
+        }
     }
 
     /** The Kotlin declaration keyword a class maps to. */
@@ -113,6 +127,7 @@ class KotlinCodeGenerator {
         private val invocationBindings: InvocationSourceBinding,
         private val constructorNames: KotlinConstructorNamePlan,
         private val rawFields: KotlinRawFieldPlan,
+        private val enumPlans: EnumPlans,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -155,8 +170,10 @@ class KotlinCodeGenerator {
             val isEnum = kind == ClassKind.ENUM
             // A confidently-reconstructable enum: its synthetic `$VALUES`/`values()`/`valueOf` are hidden
             // and its `<clinit>` enum-construction is suppressed (so the entry `val`s are never reassigned).
-            // Non-null only for the conservative subset (all default ctors ⇒ argument-less entries).
-            val enumInfo = if (isEnum) KotlinEnumReconstruction.analyze(cls) else null
+            // A user-argument enum needs the shared entry/header/body proof as well.
+            val enumInfo = if (isEnum) enumPlan(cls) else null
+            if (isEnum && enumInfo == null && cls.methods.any { it.name == "<init>" && it.argTypes.size > 2 })
+                code.emitErrorMarker(cls, "enum constructor/source initialization cannot be reconstructed safely")
 
             // ---- partition members ----
             val instanceFields = ArrayList<IrField>()
@@ -208,7 +225,7 @@ class KotlinCodeGenerator {
                 }
                 // A default enum constructor (only the synthetic name/ordinal + super) is implicit in a
                 // Kotlin `enum class` — never emit it as a `constructor(name, ordinal)`.
-                if (enumInfo != null && m.name == "<init>" && KotlinEnumReconstruction.isDefaultEnumConstructor(m)) {
+                if (enumInfo != null && enumInfo.construction == null && m.name == "<init>" && KotlinEnumReconstruction.isDefaultEnumConstructor(m)) {
                     continue
                 }
                 if (m.name == "<clinit>") {
@@ -240,8 +257,9 @@ class KotlinCodeGenerator {
 
             // ---- emit members ----
             var wrote = false
+            if (isEnum && enumConstants.isEmpty() && hasMembersAfterEntries) code.add(";").newLine()
             if (enumConstants.isNotEmpty()) {
-                emitEnumEntries(cls, enumConstants, hasMembersAfterEntries)
+                emitEnumEntries(cls, enumInfo?.construction?.entries?.keys?.toList() ?: enumConstants, hasMembersAfterEntries)
                 wrote = true
             }
             for (f in instanceFields) {
@@ -560,13 +578,30 @@ class KotlinCodeGenerator {
             }
         }
 
+        private fun enumPlan(cls: IrClass): KotlinEnumReconstruction? = enumPlans.get(cls)
+
         // ---------- enum entries ----------
 
         private fun emitEnumEntries(cls: IrClass, constants: List<IrField>, hasMoreMembers: Boolean) {
             for ((i, c) in constants.withIndex()) {
-                emitFieldAnnotations(c)
-                code.attachDefinition(FieldNodeRef(cls.fullName, c.name))
-                code.add(KotlinIdentifiers.sanitize(c.name))
+                var rendered = false
+                guardMember(c, { "enum entry '${c.name}' argument failed to render" }) {
+                    emitFieldAnnotations(c)
+                    code.attachDefinition(FieldNodeRef(cls.fullName, c.name))
+                    code.add(KotlinIdentifiers.sanitize(c.name))
+                    enumPlan(cls)?.construction?.entries?.get(c)?.let { call ->
+                        val clinit = cls.methods.first { it.name == "<clinit>" }
+                        MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap,
+                            nullability = nullability, invocationBindings = invocationBindings).emitEnumArguments(call, 2)
+                    }
+                    rendered = true
+                }
+                if (!rendered) {
+                    // Keep an explicit failed entry and the remaining class, rather than leaking a
+                    // partially rendered expression or aborting healthy sibling members.
+                    code.attachDefinition(FieldNodeRef(cls.fullName, c.name))
+                    code.add(KotlinIdentifiers.sanitize(c.name))
+                }
                 when {
                     i < constants.lastIndex -> code.add(",")
                     hasMoreMembers -> code.add(";") // terminate the entry list before other members
@@ -651,7 +686,8 @@ class KotlinCodeGenerator {
                     code.add("lateinit var ")
                     emitPropertyNameAndType(cls, field)
                 }
-                isFinal && KotlinConstructorProof.initializes(field) -> {
+                isFinal && (KotlinConstructorProof.initializes(field) ||
+                    enumPlan(cls)?.construction?.initializes(field) == true) -> {
                     code.add(KotlinModifiers.visibility(field.accessFlags)).add("val ")
                     emitPropertyNameAndType(cls, field)
                 }
@@ -831,7 +867,9 @@ class KotlinCodeGenerator {
             val paramNames = resolveParamNames(method, methodNames)
             // `equals(Object)` must be rendered `equals(other: Any?)` to actually override
             // `Any.equals(other: Any?)`; a non-null `Any` parameter overrides nothing and won't compile.
-            emitParamList(method, paramNames, nullableAnyParam0 = overrides && isEqualsObjectSignature(method))
+            val enumDelegation = if (isConstructor && kind == ClassKind.ENUM) enumPlan(cls)?.construction?.constructors?.get(method) else null
+            emitParamList(method, paramNames, nullableAnyParam0 = overrides && isEqualsObjectSignature(method),
+                firstParameter = if (enumDelegation != null) 2 else 0)
 
             if (!isConstructor && method.returnType != IrType.VOID) {
                 // A `Unit` return is Kotlin's default and is omitted; anything else is spelled out.
@@ -856,10 +894,16 @@ class KotlinCodeGenerator {
             // sync between the two.
             val writer = MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
+                suppressed = enumDelegation?.consumed ?: emptySet(),
                 aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
                 staticPropertyContainer = method.isStatic,
             )
-            if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
+            if (enumDelegation != null) {
+                if (enumDelegation.target != null) {
+                    code.add(" : this")
+                    writer.emitEnumArguments(enumDelegation.call, 3)
+                }
+            } else if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
             code.add(" ")
             emitBody(writer)
         }
@@ -915,10 +959,10 @@ class KotlinCodeGenerator {
             method.name == "equals" && method.argTypes.size == 1 &&
                 (method.argTypes[0] as? IrType.Object)?.className == IrType.OBJECT_CLASS
 
-        private fun emitParamList(method: IrMethod, paramNames: List<String>, nullableAnyParam0: Boolean) {
+        private fun emitParamList(method: IrMethod, paramNames: List<String>, nullableAnyParam0: Boolean, firstParameter: Int = 0) {
             code.add("(")
-            for (i in method.argTypes.indices) {
-                if (i > 0) code.add(", ")
+            for (i in firstParameter until method.argTypes.size) {
+                if (i > firstParameter) code.add(", ")
                 code.add(paramNames[i]).add(": ")
                 if (i == 0 && nullableAnyParam0) {
                     code.add("Any?") // the overriding `equals(other: Any?)` signature

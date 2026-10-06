@@ -1677,6 +1677,22 @@ internal class MethodBodyWriter(
             if (firstArgIndex > 0) insn.instanceArg?.let(::operandType) else null,
             (firstArgIndex until insn.argCount).map { operandType(insn.getArg(it)) })
 
+    /** The class plan already proved synthetic-prefix identity and expression evaluation order. */
+    fun emitEnumArguments(call: InvokeInstruction, firstArgument: Int) {
+        inlineRegisters = true
+        try {
+            code.add("(")
+            for (index in firstArgument until call.argCount) {
+                if (index > firstArgument) code.add(", ")
+                val parameter = index - if (call.opcode == IrOpcode.CONSTRUCTOR) 0 else 1
+                emitArgument(call.getArg(index), call.methodRef.paramTypes[parameter], preserveReferenceTypes = true)
+            }
+            code.add(")")
+        } finally {
+            inlineRegisters = false
+        }
+    }
+
     private fun emitArgList(insn: Instruction, firstArgIndex: Int, preserveReferenceTypes: Boolean = false) {
         code.add("(")
         var emitted = 0
