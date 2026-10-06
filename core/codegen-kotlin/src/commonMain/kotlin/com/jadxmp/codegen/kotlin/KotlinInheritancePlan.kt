@@ -15,7 +15,7 @@ import com.jadxmp.ir.region.SequenceRegion
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.type.IrType
 
-/** Per-output proofs for plain erased inheritance; external/generic contracts are not inferred. */
+/** Per-output proofs for plain erased inheritance; only listed JVM Throwable constructor contracts are admitted externally. */
 internal class KotlinInheritancePlan(workLimit: Int = 1_000_000, entryLimit: Int = 100_000) {
     data class Analysis<T>(val value: T, val problem: String? = null)
     private class LimitExceeded : IllegalStateException(LIMIT_MESSAGE)
@@ -100,12 +100,13 @@ internal class KotlinInheritancePlan(workLimit: Int = 1_000_000, entryLimit: Int
         budget.type(superType)
         budget.work(cls.fullName.length + 1)
         if (superType == IrType.OBJECT) return emptyMap()
-        val parent = cls.root.findClass(superType.className) ?: return emptyMap()
+        val parent = cls.root.findClass(superType.className)
+        if (parent == null && !KotlinThrowableProjection.platformConstructor(superType.className, emptyList())) return emptyMap()
         budget.work(cls.methods.size)
         val methods = cls.methods.filter { it.name == "<init>" && !it.contains(AttrFlag.DONT_GENERATE) }
         if (methods.isEmpty() || methods.size > 1024) return emptyMap()
-        budget.work(parent.methods.size + methods.size)
-        val targetMethods = (parent.methods + methods).filter { it.name == "<init>" }
+        budget.work((parent?.methods?.size ?: 0) + methods.size)
+        val targetMethods = (parent?.methods.orEmpty() + methods).filter { it.name == "<init>" }
         if (targetMethods.size > 2048 || targetMethods.sumOf { it.argTypes.size } > 100_000) return emptyMap()
         targetMethods.forEach(budget::method)
         budget.entries(targetMethods.size)
@@ -130,9 +131,15 @@ internal class KotlinInheritancePlan(workLimit: Int = 1_000_000, entryLimit: Int
                 IrType.objectType(cls.fullName) -> cls
                 else -> return emptyMap()
             }
-            val target = targets[owner to call.methodRef.paramTypes]?.singleOrNull() ?: return emptyMap()
-            if (target.contains(AttrFlag.DONT_GENERATE)) return emptyMap()
-            if (owner !== cls && target.accessFlags and (KotlinModifiers.PUBLIC or KotlinModifiers.PROTECTED) == 0) return emptyMap()
+            val target = if (owner == null) {
+                if (!KotlinThrowableProjection.platformConstructor(superType.className, call.methodRef.paramTypes)) return emptyMap()
+                null
+            } else {
+                val loaded = targets[owner to call.methodRef.paramTypes]?.singleOrNull() ?: return emptyMap()
+                if (loaded.contains(AttrFlag.DONT_GENERATE)) return emptyMap()
+                if (owner !== cls && loaded.accessFlags and (KotlinModifiers.PUBLIC or KotlinModifiers.PROTECTED) == 0) return emptyMap()
+                loaded
+            }
             val assignedValues = statements.mapNotNullTo(mutableSetOf()) { it.result?.ssaValue }
             val assignedVariables = assignedValues.mapNotNullTo(mutableSetOf()) { it.localVar }
             fun headerOperand(argument: Operand, depth: Int): Boolean {
@@ -164,7 +171,7 @@ internal class KotlinInheritancePlan(workLimit: Int = 1_000_000, entryLimit: Int
             }
             budget.entries(1)
             calls[method] = call
-            if (owner === cls) delegates[method] = target
+            if (owner === cls) delegates[method] = target ?: return emptyMap()
         }
         // Every chain must terminate in a direct superclass call. Cyclic `this` calls cannot be sourced.
         val proven = mutableSetOf<IrMethod>()

@@ -75,10 +75,11 @@ class KotlinCodeGenerator {
         val invocationBindings = InvocationSourceBinding(cls.root)
         val rawFields = KotlinRawFieldPlan(imports, aliasMap)
         val enumPlans = EnumPlans(cls)
+        val throwable = KotlinThrowableProjection(cls.root, aliasMap)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans, throwable).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -96,7 +97,7 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields, enumPlans, throwable).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -128,6 +129,7 @@ class KotlinCodeGenerator {
         private val constructorNames: KotlinConstructorNamePlan,
         private val rawFields: KotlinRawFieldPlan,
         private val enumPlans: EnumPlans,
+        private val throwable: KotlinThrowableProjection,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -592,7 +594,7 @@ class KotlinCodeGenerator {
                     enumPlan(cls)?.construction?.entries?.get(c)?.let { call ->
                         val clinit = cls.methods.first { it.name == "<clinit>" }
                         MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap,
-                            nullability = nullability, invocationBindings = invocationBindings).emitEnumArguments(call, 2)
+                            nullability = nullability, invocationBindings = invocationBindings, throwable = throwable).emitEnumArguments(call, 2)
                     }
                     rendered = true
                 }
@@ -749,7 +751,7 @@ class KotlinCodeGenerator {
             val store = singleUnconditionalStore(clinit, cls.fullName, field.name) ?: return false
             val writer = MethodBodyWriter(
                 code, imports, clinit, NameGenerator(), emptyList(),
-                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings, throwable = throwable,
             )
             val toSuppress = writer.planStaticFinalInline(store, staticInit.suppressed) ?: return false
             code.add(KotlinModifiers.visibility(field.accessFlags))
@@ -824,12 +826,13 @@ class KotlinCodeGenerator {
                 code.add("@").add(imports.aliasedClass(KotlinConstructorNamePlan.SUPPRESS))
                     .add("(\"CONFLICTING_OVERLOADS\")").newLine()
             }
+            val messageProperty = throwable.declaration(method)
             val synchronized = KotlinJvmModifiers.isSynchronized(method)
             if (synchronized && (isConstructor || method.accessFlags and (KotlinModifiers.ABSTRACT or KotlinModifiers.NATIVE) != 0)) {
                 code.emitErrorMarker(method, "synchronized JVM declaration cannot be emitted with this method kind")
             } else if (synchronized && !method.isStatic) {
                 // JVM annotation preserves implicit acquisition before any compiler-inserted checks.
-                code.add("@").add(imports.aliasedClass(KotlinJvmModifiers.SYNCHRONIZED_ANNOTATION)).newLine()
+                code.add(if (messageProperty) "@get:" else "@").add(imports.aliasedClass(KotlinJvmModifiers.SYNCHRONIZED_ANNOTATION)).newLine()
             }
             val inheritedAnalysis = inheritance.overrideTargets(method)
             inheritedAnalysis.problem?.let { code.emitErrorMarker(method, it) }
@@ -844,7 +847,7 @@ class KotlinCodeGenerator {
             if (inheritedTargets.any { it.accessFlags and KotlinModifiers.PUBLIC != 0 } &&
                 method.accessFlags and KotlinModifiers.PUBLIC == 0)
                 code.emitErrorMarker(method, "loaded override reduces inherited public visibility")
-            val overrides = isOverride(cls, method, kind)
+            val overrides = messageProperty || isOverride(cls, method, kind)
             if (overrides && method.name == "toString" && method.argTypes.isEmpty() &&
                 method.returnType == IrType.STRING && nullability.returnsNullable(method)
             ) code.emitErrorMarker(method, "nullable JVM return cannot implement Kotlin Any.toString contract")
@@ -852,11 +855,11 @@ class KotlinCodeGenerator {
             code.add(KotlinModifiers.visibility(method.accessFlags))
             if (!isConstructor) {
                 code.add(methodModality(cls, method, kind, overrides))
-                code.add("fun ")
+                code.add(if (messageProperty) "val " else "fun ")
                 code.attachDefinition(methodRef(cls, method))
                 // Metadata ref keeps the binary identity; text uses the alias when renamed (empty map ⇒
                 // `sanitize(method.name)`, byte-identical), matching every call site.
-                code.add(KotlinMemberAliases.aliasOf(method, aliasMap))
+                code.add(if (messageProperty) "message" else KotlinMemberAliases.aliasOf(method, aliasMap))
             } else {
                 code.attachDefinition(methodRef(cls, method))
                 code.add("constructor")
@@ -868,7 +871,7 @@ class KotlinCodeGenerator {
             // `equals(Object)` must be rendered `equals(other: Any?)` to actually override
             // `Any.equals(other: Any?)`; a non-null `Any` parameter overrides nothing and won't compile.
             val enumDelegation = if (isConstructor && kind == ClassKind.ENUM) enumPlan(cls)?.construction?.constructors?.get(method) else null
-            emitParamList(method, paramNames, nullableAnyParam0 = overrides && isEqualsObjectSignature(method),
+            if (!messageProperty) emitParamList(method, paramNames, nullableAnyParam0 = overrides && isEqualsObjectSignature(method),
                 firstParameter = if (enumDelegation != null) 2 else 0)
 
             if (!isConstructor && method.returnType != IrType.VOID) {
@@ -895,7 +898,7 @@ class KotlinCodeGenerator {
             val writer = MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
                 suppressed = enumDelegation?.consumed ?: emptySet(),
-                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings, throwable = throwable,
                 staticPropertyContainer = method.isStatic,
             )
             if (enumDelegation != null) {
@@ -904,7 +907,7 @@ class KotlinCodeGenerator {
                     writer.emitEnumArguments(enumDelegation.call, 3)
                 }
             } else if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
-            code.add(" ")
+            code.add(if (messageProperty) " get() " else " ")
             emitBody(writer)
         }
 
@@ -1048,7 +1051,7 @@ class KotlinCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(), suppressed,
-                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings, throwable = throwable,
                 staticPropertyContainer = method.isStatic,
             ).writeBody()
             code.decIndent()
@@ -1104,7 +1107,7 @@ class KotlinCodeGenerator {
                 emit()
             } catch (t: Throwable) {
                 code.restore(checkpoint)
-                code.emitErrorMarker(node, if (t is ConstructorNameScopeException) t.message!! else reason())
+                code.emitErrorMarker(node, if (t is ConstructorNameScopeException || t is ThrowableProjectionException) t.message!! else reason())
             }
         }
 

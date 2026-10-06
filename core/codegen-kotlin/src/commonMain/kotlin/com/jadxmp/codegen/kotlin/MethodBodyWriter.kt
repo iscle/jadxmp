@@ -98,6 +98,7 @@ internal class MethodBodyWriter(
     private val invocationBindings: InvocationSourceBinding = InvocationSourceBinding(method.declaringClass.root),
     // Set only by the declaration emitter for a static body/init in its actual companion/object.
     private val staticPropertyContainer: Boolean = false,
+    private val throwable: KotlinThrowableProjection = KotlinThrowableProjection(method.declaringClass.root, aliasMap),
 ) {
     private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -1463,6 +1464,32 @@ internal class MethodBodyWriter(
             return
         }
 
+        val throwableProjection = throwable.invocation(invoke)
+        if (throwableProjection != null) {
+            val instance = invoke.getArg(0)
+            // A non-null object proves its valid JVM superclass exists. Nullable calls to a loaded
+            // owner need a method-resolution barrier before Kotlin's !!; that barrier is not yet
+            // expressible here. Bootstrap owners have their exact getter contract unconditionally.
+            val knownNonNull = instance is RegisterOperand && isThis(instance) ||
+                instance is InstructionOperand && instance.instruction.opcode == IrOpcode.CONSTRUCTOR
+            if (kind != InvokeKind.SUPER && throwableProjection == KotlinThrowableProjection.Invocation.LOADED_OWNER &&
+                !knownNonNull) throw ThrowableProjectionException("nullable loaded-owner Throwable call cannot preserve JVM linkage")
+            if (kind == InvokeKind.SUPER) {
+                if (target.declaringType != method.declaringClass.superType)
+                    throw ThrowableProjectionException("Throwable getter super owner differs from the immediate superclass")
+                code.add("super")
+            } else {
+                // Pin property lookup to the encoded owner; a narrower receiver may have a namesake.
+                code.add("(")
+                emitOperand(invoke.getArg(0), KotlinPrec.AS)
+                code.add(" as ")
+                emitTypeRef(target.declaringType)
+                code.add("?)!!")
+            }
+            code.attachReference(MethodNodeRef(className(target.declaringType), target.name, emptyList()))
+            code.add(".message")
+            return
+        }
         val boxedAccessor = KotlinJvmBoxedTypes.accessor(invoke)
         if (boxedAccessor != null) {
             emitDereference(invoke.getArg(0))
