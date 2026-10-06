@@ -45,15 +45,22 @@ fun main() {
         error("No smali inputs found under ${Corpus.smaliDir()} (categories=${categories.ifEmpty { "ALL" }})")
     }
 
+    val fixtures = SmaliFixtureContexts.plan(inputs, selectedCategories = categories)
     val board = Scoreboard()
     val assemblyFailed = mutableListOf<String>()
     val referenceFailed = mutableListOf<String>()
+    val candidateContextFailed = mutableListOf<String>()
 
-    for (smali in inputs) {
-        val sample = Corpus.smaliSampleName(smali)
-        val category = Corpus.categoryOf(smali)
+    for (fixture in fixtures) {
+        val sample = fixture.id
+        val category = fixture.category
 
-        val asm = SmaliAssembler.assemble(smali)
+        if (fixture.inputs.size > 1) {
+            println("Verified original context: $sample <- ${fixture.inputs.joinToString { Corpus.smaliSampleName(it) }}")
+            printStandaloneContextDiagnostics(fixture, reference, candidate, recompileClasspath)
+        }
+
+        val asm = SmaliAssembler.assemble(fixture.inputs)
         if (!asm.ok) {
             assemblyFailed += "$sample (${asm.error})"
             continue
@@ -65,15 +72,25 @@ fun main() {
             referenceFailed += "$sample (${it.message ?: it.toString()})"
             continue
         }
-        val refScore = SignalScore.of(refResult, reference.errorMarkers, recompileClasspath)
+        val refProblems = fixture.outputProblems(refResult)
+        refProblems.forEach { println("$sample reference context error: $it") }
+        val refScore = SignalScore.of(refResult, reference.errorMarkers, recompileClasspath).let {
+            it.copy(noErrors = it.noErrors && refProblems.isEmpty())
+        }
+        if (refProblems.isNotEmpty()) referenceFailed += "$sample (${refProblems.joinToString()})"
 
         // A candidate crash is a total decompilation failure (per fault-isolation it should not happen,
         // but if it does it must score as failure, not abort the run).
         val candResult = runCatching { candidate.decompile(sample, dex) }
             .getOrElse { DecompilationResult(inputName = sample, classes = emptyList(), reportedErrors = 1) }
-        val candScore = SignalScore.of(candResult, candidate.errorMarkers, recompileClasspath)
+        val candProblems = fixture.outputProblems(candResult)
+        candProblems.forEach { println("$sample candidate context error: $it") }
+        if (candProblems.isNotEmpty()) candidateContextFailed += "$sample (${candProblems.joinToString()})"
+        val candScore = SignalScore.of(candResult, candidate.errorMarkers, recompileClasspath).let {
+            it.copy(noErrors = it.noErrors && candProblems.isEmpty())
+        }
 
-        if (dumpMatch != null && sample.contains(dumpMatch)) {
+        if (dumpMatch != null && (sample.contains(dumpMatch) || fixture.inputs.any { Corpus.smaliSampleName(it).contains(dumpMatch) })) {
             dumpSample(sample, refResult, refScore, candResult, candScore, recompileClasspath)
         }
 
@@ -82,12 +99,40 @@ fun main() {
             reference = refScore,
             candidate = candScore,
             category = category,
-            invalidInputEvidence = ExpectedInvalidInput.assess(sample, smali.readBytes(), candResult),
+            invalidInputEvidence = fixture.inputs.singleOrNull()?.let { ExpectedInvalidInput.assess(sample, it.readBytes(), candResult) },
         ))
     }
 
-    print(renderSmaliReport(board, inputs.size, assemblyFailed, referenceFailed))
-    requireDifferentialParity(board, inputs.size, assemblyFailed, referenceFailed)
+    print(renderSmaliReport(board, fixtures.size, assemblyFailed, referenceFailed, inputs.size, candidateContextFailed))
+    requireDifferentialParity(board, fixtures.size, assemblyFailed, referenceFailed, candidateContextFailed)
+}
+
+/** Keep the old partial-context result visible; only complete original contexts form parity verdicts. */
+private fun printStandaloneContextDiagnostics(
+    fixture: SmaliFixtureContext,
+    reference: Decompiler,
+    candidate: Decompiler,
+    classpath: List<java.io.File>,
+) {
+    println("STANDALONE CONTEXT DIAGNOSTICS (missing sibling dependencies; not original fixture parity):")
+    for (input in fixture.inputs) {
+        val name = Corpus.smaliSampleName(input)
+        val asm = SmaliAssembler.assemble(input)
+        if (!asm.ok) {
+            println("  $name: assembly failure: ${asm.error}")
+            continue
+        }
+        for (decompiler in listOf(reference, candidate)) {
+            try {
+                val output = decompiler.decompile(name, asm.dex!!)
+                val compilation = AccuracySignals.recompiles(output.classes, classpath)
+                println("  $name ${decompiler.name}: no-error=${AccuracySignals.noErrors(output, decompiler.errorMarkers)} recompiles=${compilation.success}")
+                if (!compilation.success) println("    compiler diagnostics: ${compilation.diagnostics}")
+            } catch (failure: Exception) {
+                println("  $name ${decompiler.name}: measurement failed: ${failure.message}")
+            }
+        }
+    }
 }
 
 private fun dumpSample(
@@ -132,13 +177,18 @@ internal fun renderSmaliReport(
     totalDiscovered: Int,
     assemblyFailed: List<String>,
     referenceFailed: List<String>,
+    physicalInputs: Int = totalDiscovered,
+    candidateContextFailed: List<String> = emptyList(),
 ): String = buildString {
     val scored = board.samples
     appendLine("=== jadxmp smali differential scoreboard (jadx-${ReferenceDecompiler.DEFAULT_JADX_VERSION} vs jadxmp core:api) ===")
-    appendLine("smali files discovered : $totalDiscovered")
+    appendLine("smali files discovered : $physicalInputs")
+    appendLine("fixture contexts       : $totalDiscovered")
     appendLine("assembled + scored     : ${scored.size}")
     appendLine("assembly failures      : ${assemblyFailed.size}")
     appendLine("reference failures     : ${referenceFailed.size}")
+    appendLine("candidate context failures: ${candidateContextFailed.size}")
+    candidateContextFailed.forEach { appendLine("  $it") }
     appendLine()
 
     val verdicts = board.verdictCounts()
@@ -169,7 +219,7 @@ internal fun renderSmaliReport(
     appendLine()
 
     val regressions = board.regressions()
-    val complete = assemblyFailed.isEmpty() && referenceFailed.isEmpty() && scored.size == totalDiscovered
+    val complete = assemblyFailed.isEmpty() && referenceFailed.isEmpty() && candidateContextFailed.isEmpty() && scored.size == totalDiscovered
     appendLine(when {
         !complete -> "GATE: FAIL — incomplete corpus measurement"
         board.hasRegression() -> "GATE: FAIL — ${regressions.size} regression(s)"

@@ -16,10 +16,24 @@ internal fun withCompiledClass(
     additionalClasspath: List<File> = emptyList(),
     action: (Class<*>) -> Unit,
 ) {
+    withCompiledClasses(listOf(source), kotlin, additionalClasspath) { loader -> action(loader.loadClass(source.fullName)) }
+}
+
+internal fun withCompiledClasses(
+    sources: List<DecompiledClass>,
+    kotlin: Boolean,
+    additionalClasspath: List<File> = emptyList(),
+    action: (ClassLoader) -> Unit,
+) {
     val dir = Files.createTempDirectory("jadxmp-compare-execution").toFile()
     try {
-        val file = dir.resolve("${source.simpleName}.${if (kotlin) "kt" else "java"}")
-        file.writeText(source.source)
+        val files = sources.map { source ->
+            dir.resolve(source.fullName.replace('.', '/') + if (kotlin) ".kt" else ".java").apply {
+                parentFile.mkdirs()
+                writeText(source.source)
+            }
+        }
+        val sourceText = sources.joinToString("\n\n") { it.source }
         val output = dir.resolve("classes").apply { mkdirs() }
         val diagnostics = ByteArrayOutputStream()
         if (kotlin) {
@@ -27,19 +41,20 @@ internal fun withCompiledClass(
             val classpath = (additionalClasspath + stdlib).joinToString(File.pathSeparator) { it.absolutePath }
             val exit = K2JVMCompiler().exec(
                 PrintStream(diagnostics), "-no-stdlib", "-no-reflect", "-classpath", classpath,
-                "-jvm-target", "21", "-d", output.absolutePath, file.absolutePath,
+                "-jvm-target", "21", "-d", output.absolutePath, *files.map { it.absolutePath }.toTypedArray(),
             )
-            assertEquals(ExitCode.OK, exit, "$diagnostics\n${source.source}")
+            assertEquals(ExitCode.OK, exit, "$diagnostics\n$sourceText")
         } else {
             val exit = ToolProvider.getSystemJavaCompiler().run(
-                null, null, diagnostics, "-proc:none", "-d", output.absolutePath, file.absolutePath,
+                null, null, diagnostics, "-proc:none", "-d", output.absolutePath,
                 "-classpath", additionalClasspath.joinToString(File.pathSeparator) { it.absolutePath },
+                *files.map { it.absolutePath }.toTypedArray(),
             )
-            assertEquals(0, exit, "$diagnostics\n${source.source}")
+            assertEquals(0, exit, "$diagnostics\n$sourceText")
         }
         val urls = (listOf(output) + additionalClasspath).map { it.toURI().toURL() }.toTypedArray()
         URLClassLoader(urls, DecompiledClass::class.java.classLoader).use { loader ->
-            action(loader.loadClass(source.fullName))
+            action(loader)
         }
     } finally {
         dir.deleteRecursively()

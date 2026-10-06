@@ -10,10 +10,9 @@ import java.nio.file.Files
  * assembler (and default API level 27) jadx itself uses, so the dex we hand to both decompilers is
  * exactly what jadx's own smali tests would produce.
  *
- * Assembly is **per file**: each `.smali` is a complete standalone class, and references to sibling
- * test classes become ordinary external type-refs in the dex (unresolved at assembly time, which is
- * legal) — so a one-class dex decompiles identically-in-context on both sides. Per-file granularity
- * also isolates a bad sample and gives the scoreboard one row per smali file.
+ * Inputs may be a single class or a verified original fixture group. The caller owns composition;
+ * related classes must be assembled together when the original test requires their shared context.
+ * This assembler never invents missing dependency declarations or changes member access flags.
  */
 object SmaliAssembler {
 
@@ -25,7 +24,11 @@ object SmaliAssembler {
         val ok: Boolean get() = dex != null
     }
 
-    fun assemble(smaliFile: File, apiLevel: Int = DEFAULT_API_LEVEL): Result {
+    fun assemble(smaliFile: File, apiLevel: Int = DEFAULT_API_LEVEL): Result = assemble(listOf(smaliFile), apiLevel)
+
+    fun assemble(smaliFiles: List<File>, apiLevel: Int = DEFAULT_API_LEVEL): Result {
+        if (smaliFiles.isEmpty()) return Result(null, "no smali sources")
+        if (smaliFiles.distinctBy { it.canonicalFile }.size != smaliFiles.size) return Result(null, "duplicate smali sources")
         val outDex = Files.createTempFile("jadxmp-smali", ".dex").toFile()
         return try {
             val options = SmaliOptions().apply {
@@ -35,7 +38,7 @@ object SmaliAssembler {
             // smali prints parse/compile diagnostics to stderr; silence it so a bad sample doesn't
             // flood the scoreboard output (we surface a concise per-file error instead).
             val assembled = suppressingStdErr {
-                runCatching { Smali.assemble(options, listOf(smaliFile.absolutePath)) }
+                runCatching { Smali.assemble(options, smaliFiles.map { it.absolutePath }) }
             }
             when {
                 assembled.isFailure -> Result(null, assembled.exceptionOrNull()?.let { it.message ?: it.toString() } ?: "assemble threw")

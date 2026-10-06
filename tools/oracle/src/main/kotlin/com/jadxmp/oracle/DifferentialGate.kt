@@ -6,11 +6,13 @@ internal fun requireDifferentialParity(
     discovered: Int,
     assemblyFailures: List<String>,
     referenceFailures: List<String>,
+    candidateContextFailures: List<String> = emptyList(),
 ) {
     val problems = buildList {
         if (discovered == 0) add("no corpus inputs discovered")
         if (assemblyFailures.isNotEmpty()) add("${assemblyFailures.size} assembly failure(s)")
         if (referenceFailures.isNotEmpty()) add("${referenceFailures.size} reference failure(s)")
+        if (candidateContextFailures.isNotEmpty()) add("candidate context failure(s): ${candidateContextFailures.joinToString()}")
         if (board.samples.size != discovered) add("only ${board.samples.size}/$discovered samples scored")
         val missingCandidates = board.samples.filter { it.candidate == null }
         if (missingCandidates.isNotEmpty()) add("missing candidate scores: ${missingCandidates.joinToString { it.sample }}")

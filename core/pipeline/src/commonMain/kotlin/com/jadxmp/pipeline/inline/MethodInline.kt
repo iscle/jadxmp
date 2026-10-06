@@ -1,12 +1,12 @@
 package com.jadxmp.pipeline.inline
 
 import com.jadxmp.input.AccessFlags
-import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.insn.InvokeInstruction
 import com.jadxmp.ir.insn.InvokeKind
 import com.jadxmp.ir.insn.IrOpcode
 import com.jadxmp.ir.insn.MethodRef
 import com.jadxmp.ir.insn.RegisterOperand
+import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrMethod
 import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
@@ -15,41 +15,41 @@ import com.jadxmp.pipeline.decode.MethodDecoder
 import com.jadxmp.pipeline.ssa.MethodParams
 
 /**
- * Inlines **simple synthetic/bridge forwarder methods** into their call sites and drops the forwarder.
+ * Rewrites calls through **simple synthetic/bridge forwarder methods** when their contracts agree.
  * **jadx: MethodInlineVisitor** (restricted to the provably-identity static-forwarder case).
  *
  * A forwarder is the compiler glue the Java/Kotlin compiler emits for generic-erasure bridges and
  * accessor thunks: a `synthetic`/`bridge` method whose whole body is a single `invoke` of another
  * method with the same signature and the same arguments, returning that call's result. Such a method
- * has **no observable behaviour of its own** — calling it is identical to calling its target — so:
+ * may have rewritable call sites once its implicit monitor, initialization and access contracts are checked:
  *
- *  - every call site (in any class of the loaded model) is rewritten to call the forwarded target
+ *  - each proven call site is rewritten to call the forwarded target
  *    directly, and
- *  - the forwarder itself is marked [AttrFlag.DONT_GENERATE] so it is not emitted.
+ *  - the forwarder declaration remains available for inherited symbolic references, method handles
+ *    and callers outside the loaded model. Local call-site proof never implies global removability.
  *
- * Together these are behaviour-identical (same target, same arguments, same result) and remove only
- * synthetic glue — never a method with real behaviour or a caller we cannot see.
+ * The checks preserve the executed target, arguments, initialization trigger and access contract.
+ * This is source reconstruction of synthetic glue, not a promise of identical reflection metadata
+ * or stack traces.
  *
  * ## Faithfulness / safety envelope (deliberately narrow)
  * The current instruction-shape checks require all of these:
  *  - it is `static`, not `synchronized`, and marked `synthetic` and/or `bridge`;
  *  - its body decodes (no decode error, no `try`/handler) to exactly one `invoke-static` followed by a
  *    `return`, and nothing else;
+ *  - the resolved target is a public static method declared in the same class, preserving both
+ *    the class-initialization trigger and accessibility from external callers;
+ *  - changing an inherited symbolic owner does not expose a non-public declaring or enclosing class;
  *  - the target's signature is **identical** (same return type and parameter types) — so no covariant
  *    cast is being erased away;
  *  - the `invoke`'s arguments are exactly the method's incoming parameter registers, in order (an
  *    identity argument mapping — no reordering, dropping, or injected constants);
  *  - for a non-void forwarder the returned register is the call's own result.
  *
- * Anything outside this envelope (an instance method, a real body, a covariant/renamed signature, a
- * permuted argument list) is left completely untouched. Forwarder **chains** are followed to the
- * terminal real method (with a cycle/budget guard) so a caller is never rewritten onto another
- * about-to-be-dropped forwarder, and a forwarder that only resolves through a cycle is not dropped.
- *
- * Known limitation: the cross-class case still lacks a declaring-class initialization proof. Even
- * with no explicit side effects in the body, replacing the call can skip initialization of the
- * forwarder's class. This is tracked as a separate correctness repair in docs/PARITY-STATUS.md;
- * the instruction-shape checks below are not a complete semantic proof.
+ * Anything outside this envelope (an instance method, a cross-class/accessor thunk, a real body,
+ * a covariant/renamed signature or permuted argument list) is left completely untouched.
+ * Forwarder **chains** are followed to the terminal real method (with a cycle/budget guard) so a caller is never rewritten onto another
+ * intermediate forwarder, and a forwarder that only resolves through a cycle is left untouched.
  *
  * Works off a lightweight re-decode of each candidate body (like `ThrowsInference`), so it is
  * independent of whether the target's class has been lowered yet and of pass ordering. Runs after CFG
@@ -62,12 +62,8 @@ class MethodInliner(private val root: IrRoot) {
     /** Memoized forwarder analysis, local to one method's processing (no cross-method shared state). */
     private val forwarderCache = HashMap<IrMethod, MethodRef?>()
 
-    /** Process one method: drop it if it is itself a forwarder, and inline any forwarder it calls. */
+    /** Rewrite proved call sites; declarations remain available to inherited or unseen references. */
     fun process(method: IrMethod) {
-        // Drop side: a forwarder whose chain resolves to a real terminal is pure glue — do not emit it.
-        if (terminalTarget(method) != null) {
-            method.add(AttrFlag.DONT_GENERATE)
-        }
         // Caller side: rewrite each call to a forwarder into a direct call to the terminal target.
         for (block in method.blocks) {
             val insns = block.instructions
@@ -76,6 +72,7 @@ class MethodInliner(private val root: IrRoot) {
                 if (invoke.opcode != IrOpcode.INVOKE || invoke.invokeKind != InvokeKind.STATIC) continue
                 val callee = resolve(invoke.methodRef) ?: continue
                 val terminal = terminalTarget(callee) ?: continue
+                if (terminal.declaringType != invoke.methodRef.declaringType && !isPublicOwner(terminal)) continue
                 if (terminal == invoke.methodRef) continue // already direct (defensive)
                 val replacement = InvokeInstruction(
                     methodRef = terminal,
@@ -92,7 +89,7 @@ class MethodInliner(private val root: IrRoot) {
 
     /**
      * The terminal real method a forwarder [method] ultimately forwards to, or null if [method] is not
-     * a safely-droppable/inlinable forwarder (not a forwarder, or its chain cycles / exceeds budget).
+     * a safely-inlinable forwarder (not a forwarder, or its chain cycles / exceeds budget).
      */
     private fun terminalTarget(method: IrMethod): MethodRef? {
         var ref = forwarderTargetOf(method) ?: return null
@@ -131,6 +128,17 @@ class MethodInliner(private val root: IrRoot) {
         if (ret.opcode != IrOpcode.RETURN) return null
 
         val target = invoke.methodRef
+        // invokestatic initializes the *resolved declaring class*, not necessarily its symbolic
+        // owner. Removing a cross-class (or unresolved/inherited) thunk can skip initialization of
+        // its class, superclass and default-method interfaces, including their failures.
+        // Keep inherited symbolic target aliases explicit until their source-level access contract
+        // can also be represented. This pass only redirects to a directly named declaration.
+        if (target.declaringType != IrType.objectType(method.declaringClass.fullName)) return null
+        val declaration = resolve(target) ?: return null
+        if (declaration.declaringClass !== method.declaringClass) return null
+        // Accessor thunks may expose a private/package/protected target to another class. Without
+        // a caller-specific accessibility proof, only a public static target can replace that API.
+        if (!declaration.isStatic || declaration.accessFlags and AccessFlags.PUBLIC == 0) return null
         // Pure same-signature forwarding: identical return + parameter types (no covariant erasure).
         if (target.returnType != method.returnType) return null
         if (target.paramTypes != method.argTypes) return null
@@ -155,18 +163,40 @@ class MethodInliner(private val root: IrRoot) {
         return target
     }
 
+    private fun isPublicOwner(ref: MethodRef): Boolean {
+        val className = (ref.declaringType as? IrType.Object)?.className ?: return false
+        var cls: IrClass? = root.findClass(className) ?: return false
+        val visited = HashSet<IrClass>()
+        // An inherited public member can be exposed through a public subclass of a hidden owner.
+        // Rewriting that call to the declaring class must not introduce an inaccessible type name.
+        while (cls != null) {
+            if (visited.size >= HIERARCHY_BUDGET || !visited.add(cls)) return false
+            if (cls.accessFlags and AccessFlags.PUBLIC == 0) return false
+            cls = cls.outerClass
+        }
+        return true
+    }
+
     private fun resolve(ref: MethodRef): IrMethod? {
         val className = (ref.declaringType as? IrType.Object)?.className ?: return null
-        val cls = root.findClass(className) ?: return null
-        // Match on the full signature (incl. return type) so a static method overloaded on return type
-        // alone — legal in bytecode though not producible by javac/kotlinc — can't resolve to the wrong one.
-        return cls.methods.firstOrNull {
-            it.name == ref.name && it.argTypes == ref.paramTypes && it.returnType == ref.returnType
+        var cls = root.findClass(className) ?: return null
+        val visited = HashSet<IrClass>()
+        // invokestatic may name a subclass while resolution finds the declaration in a superclass.
+        // Static interface methods are not inherited; unknown/cyclic/deep hierarchies stay explicit.
+        while (visited.size < HIERARCHY_BUDGET && visited.add(cls)) {
+            cls.methods.firstOrNull {
+                it.name == ref.name && it.argTypes == ref.paramTypes && it.returnType == ref.returnType
+            }?.let { return it }
+            if (cls.accessFlags and AccessFlags.INTERFACE != 0) return null
+            val parent = (cls.superType as? IrType.Object)?.className ?: return null
+            cls = root.findClass(parent) ?: return null
         }
+        return null
     }
 
     private companion object {
         /** Bound on forwarder-chain following (real chains are 1–2 deep; guards against pathological input). */
         const val CHAIN_BUDGET = 32
+        const val HIERARCHY_BUDGET = 64
     }
 }

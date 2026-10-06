@@ -3,8 +3,6 @@ package com.jadxmp.oracle
 import org.assertj.core.api.Assertions
 import java.io.File
 import java.security.MessageDigest
-import java.nio.file.Files
-import java.util.concurrent.TimeUnit
 
 internal enum class OriginalFixtureStatus { COMPILE_FAILED, COMPILED_NO_CHECK, CHECK_PASSED, CHECK_FAILED, CHECK_MISSING, CHECK_TIMEOUT }
 
@@ -28,24 +26,7 @@ internal object UpstreamJavaInventory {
         }
     }
 
-    fun verifyReference(reference: File) {
-        check(git(reference, "rev-parse", "HEAD") == ReferenceDecompiler.DEFAULT_JADX_VERSION) { "Reference checkout differs from the original pin" }
-        check(git(reference, "status", "--porcelain", "--untracked-files=all").isEmpty()) { "Reference checkout must be clean" }
-    }
-
-    private fun git(directory: File, vararg arguments: String): String {
-        val output = Files.createTempFile("jadxmp-reference-git", ".txt").toFile()
-        var process: Process? = null
-        try {
-            process = ProcessBuilder(listOf("git", "-C", directory.absolutePath) + arguments)
-                .redirectOutput(output).redirectError(ProcessBuilder.Redirect.DISCARD).start()
-            check(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0) { "Reference Git verification failed" }
-            return output.readText().trim()
-        } finally {
-            process?.let { if (it.isAlive) it.destroyForcibly() }
-            output.delete()
-        }
-    }
+    fun verifyReference(reference: File) = PinnedReference.verify(reference)
 }
 
 private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

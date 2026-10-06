@@ -3,6 +3,30 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
+## Latest fixture-context and forwarding validation
+
+The smali gate covers **211 physical sources in 209 fixture contexts**: **201 parity
+(200 with a shared passing signal, one tied failure), five improvements, zero regressions,
+two existing divergences and one required invalid-input diagnostic**. There are zero assembly
+or reference failures. Kotlin compiles **83 of 209 contexts**, including **80 without reported
+or context errors**, three flagged compilations, 113 compiler failures and 13 empty outputs.
+These counts use a different denominator from the historical per-file snapshots below.
+
+The original pinned `TestMethodInline` test loads A, B and C together. The harness now assembles
+that exact, hash-verified group for both decompilers, compiles every output and requires all three
+top-level classes. Every other source remains a singleton context. Both reports retain standalone
+A/B/C measurements and compiler diagnostics: isolated B still fails candidate compilation because
+C is absent. No dependency stub or new exception hides that result. The complete original context
+also passes execution checks for reference Java, candidate Java and candidate Kotlin.
+
+Synthetic forwarding now preserves declaring-class initialization and access boundaries. Calls
+can simplify only to resolved public static targets in the same declaring class. Changing an inherited
+symbolic owner also requires public declaring/enclosing classes. Forwarding declarations remain
+available to inherited and unseen callers. Runtime tests
+cover parent/default-interface/owner/target initialization order, failed initialization and retries,
+inherited references and private accessors. These checks do not prove general reflection,
+method-handle or stack-trace equivalence for method reconstruction.
+
 ## Reference and architecture
 
 The original checkout was cloned at jadx commit
@@ -135,9 +159,9 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    to calls and the evaluation order of folded arguments, including array-store operand order.
    Java/Kotlin execution tests check exception types and side-effect traces; these are not a general
    semantic proof of all transformations. Synchronized synthetic forwarders now retain their monitors,
-   but the inliner's cross-class forwarding still needs a class-initialization proof: replacing a call
-   can skip the forwarding class's initialization. A separate execution-tested repair is queued.
-2. Kotlin has 127 inputs with compiler errors or no output, plus three compilable outputs carrying
+   and the initialization/access repair above retains unsafe forwarding calls and all forwarding
+   declarations. Broader method reconstruction still requires semantic proofs.
+2. Kotlin has 126 fixture contexts with compiler errors or no output, plus three compilable outputs carrying
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Upstream Java embedded `check()` fixtures are now inventoried: 443 extracted and 112 passing

@@ -18,15 +18,11 @@ import com.jadxmp.pipeline.support.Insn
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertTrue
 
 /**
- * The synthetic-bridge forwarder inline+drop pass ([MethodInliner]).
- *
- * Mirrors `corpus/smali/inline/TestMethodInline`: `inline.other.B.bridgeMth()` is a `bridge synthetic`
- * static forwarder to `inline.other.C.test()`, called from `inline.A.useMth()`. The positive test pins
- * that the forwarder is dropped and its call site rewritten to the target; the negatives pin that a
- * non-synthetic forwarder and a non-trivial synthetic method are both left completely untouched.
+ * Synthetic static forwarder call-site simplification. Declarations remain available to inherited
+ * symbolic references and other callers; initialization, monitor and accessibility contracts gate
+ * every rewrite. The original cross-owner B→C fixture is retained rather than blindly inlined.
  */
 class MethodInlineTest {
 
@@ -65,25 +61,95 @@ class MethodInlineTest {
         AccessFlags.STATIC or AccessFlags.SYNTHETIC or AccessFlags.BRIDGE
 
     @Test
-    fun syntheticForwarderIsDroppedAndItsCallSiteRewrittenToTheTarget() {
+    fun crossOwnerForwarderRetainsClassInitializationAndCallTarget() {
         val root = IrRoot()
         val b = addClass(root, "inline.other.B")
         val a = addClass(root, "inline.A")
         val bridge = addMethod(b, "bridgeMth", staticSyntheticBridge, forwarderBody(cTestRef))
         val caller = addMethod(a, "useMth", AccessFlags.STATIC, forwarderBody(bBridgeRef))
         buildCfg(caller)
-
         MethodInliner(root).process(bridge)
         MethodInliner(root).process(caller)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE), "calling the bridge initializes its declaring class")
+        assertEquals("bridgeMth", invokesOf(caller).single().methodRef.name)
+    }
 
-        // Drop: the synthetic forwarder is not emitted.
-        assertTrue(bridge.contains(AttrFlag.DONT_GENERATE), "synthetic forwarder must be dropped")
+    @Test
+    fun sameOwnerPublicDeclaredTargetCanStillBeInlined() {
+        val root = IrRoot()
+        val b = addClass(root, "inline.other.B")
+        val a = addClass(root, "inline.A")
+        val target = FakeMethodRef("Linline/other/B;", "target", "V", emptyList())
+        addMethod(b, "target", AccessFlags.PUBLIC or AccessFlags.STATIC,
+            FakeCodeReader(0, listOf(Insn(Opcode.RETURN_VOID, 0))))
+        val bridge = addMethod(b, "bridgeMth", staticSyntheticBridge, forwarderBody(target))
+        val caller = addMethod(a, "useMth", AccessFlags.STATIC, forwarderBody(bBridgeRef))
+        buildCfg(caller)
+        MethodInliner(root).process(bridge)
+        MethodInliner(root).process(caller)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE), "local rewrites do not prove global declaration removability")
+        assertEquals("target", invokesOf(caller).single().methodRef.name)
+    }
 
-        // Inline: the caller now invokes C.test() directly, not the dropped bridge.
-        val call = invokesOf(caller).single()
-        val target = call.methodRef.declaringType as IrType.Object
-        assertEquals("inline.other.C", target.className, "call site rewritten to the forwarded target class")
-        assertEquals("test", call.methodRef.name, "call site rewritten to the forwarded target method")
+    @Test
+    fun inheritedSymbolicCallerMustNotLoseItsForwarderDeclaration() {
+        val root = IrRoot()
+        val owner = IrClass(root, "inline.other.B", AccessFlags.PUBLIC, IrType.OBJECT).also(root::addClass)
+        IrClass(root, "inline.Child", AccessFlags.PUBLIC, IrType.objectType(owner.fullName)).also(root::addClass)
+        val callerClass = addClass(root, "inline.Caller")
+        val target = FakeMethodRef("Linline/other/B;", "target", "V", emptyList())
+        addMethod(owner, "target", AccessFlags.PUBLIC or AccessFlags.STATIC,
+            FakeCodeReader(0, listOf(Insn(Opcode.RETURN_VOID, 0))))
+        val bridge = addMethod(owner, "bridgeMth", staticSyntheticBridge or AccessFlags.PUBLIC, forwarderBody(target))
+        val inherited = FakeMethodRef("Linline/Child;", "bridgeMth", "V", emptyList())
+        val caller = addMethod(callerClass, "call", AccessFlags.PUBLIC or AccessFlags.STATIC, forwarderBody(inherited))
+        buildCfg(caller)
+        MethodInliner(root).process(bridge)
+        MethodInliner(root).process(caller)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE), "an inherited symbolic call still needs the declared bridge")
+        assertEquals(owner.fullName, (invokesOf(caller).single().methodRef.declaringType as IrType.Object).className)
+        assertEquals("target", invokesOf(caller).single().methodRef.name)
+    }
+
+    @Test
+    fun inheritedPublicMethodMustNotExposeItsPackagePrivateDeclaringClass() {
+        val root = IrRoot()
+        val owner = addClass(root, "inline.other.Hidden")
+        IrClass(root, "inline.other.PublicChild", AccessFlags.PUBLIC, IrType.objectType(owner.fullName)).also(root::addClass)
+        val callerClass = addClass(root, "outside.Caller")
+        val target = FakeMethodRef("Linline/other/Hidden;", "target", "V", emptyList())
+        addMethod(owner, "target", AccessFlags.PUBLIC or AccessFlags.STATIC,
+            FakeCodeReader(0, listOf(Insn(Opcode.RETURN_VOID, 0))))
+        val bridge = addMethod(owner, "bridgeMth", staticSyntheticBridge or AccessFlags.PUBLIC, forwarderBody(target))
+        val inherited = FakeMethodRef("Linline/other/PublicChild;", "bridgeMth", "V", emptyList())
+        val caller = addMethod(callerClass, "call", AccessFlags.PUBLIC or AccessFlags.STATIC, forwarderBody(inherited))
+        buildCfg(caller)
+        MethodInliner(root).process(bridge)
+        MethodInliner(root).process(caller)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE))
+        assertEquals("inline.other.PublicChild", (invokesOf(caller).single().methodRef.declaringType as IrType.Object).className)
+    }
+
+    @Test
+    fun symbolicSameOwnerWithoutDeclaredTargetDoesNotProveInitializationIdentity() {
+        val root = IrRoot()
+        val b = addClass(root, "inline.other.B")
+        val target = FakeMethodRef("Linline/other/B;", "inherited", "V", emptyList())
+        val bridge = addMethod(b, "bridgeMth", staticSyntheticBridge, forwarderBody(target))
+        MethodInliner(root).process(bridge)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE), "resolution could find the method in a superclass")
+    }
+
+    @Test
+    fun privateTargetKeepsAccessorInsteadOfMakingExternalCallerIllegal() {
+        val root = IrRoot()
+        val b = addClass(root, "inline.other.B")
+        val target = FakeMethodRef("Linline/other/B;", "hidden", "V", emptyList())
+        addMethod(b, "hidden", AccessFlags.PRIVATE or AccessFlags.STATIC,
+            FakeCodeReader(0, listOf(Insn(Opcode.RETURN_VOID, 0))))
+        val bridge = addMethod(b, "bridgeMth", staticSyntheticBridge, forwarderBody(target))
+        MethodInliner(root).process(bridge)
+        assertFalse(bridge.contains(AttrFlag.DONT_GENERATE))
     }
 
     @Test

@@ -80,6 +80,7 @@ fun main() {
         },
     )
 
+    val fixtures = SmaliFixtureContexts.plan(inputs, selectedCategories = categories)
     val assemblyFailed = mutableListOf<String>()
     val byStatus = linkedMapOf<KotlinRecompileStatus, MutableList<String>>()
     KotlinRecompileStatus.entries.forEach { byStatus[it] = mutableListOf() }
@@ -89,9 +90,26 @@ fun main() {
     // against by pairing the recompile signal with jadxmp's own no-error signal (rule 2).
     val flaggedButRecompiles = mutableListOf<String>()
 
-    for (smali in inputs) {
-        val sample = Corpus.smaliSampleName(smali)
-        val asm = SmaliAssembler.assemble(smali)
+    for (fixture in fixtures) {
+        val sample = fixture.id
+        if (fixture.inputs.size > 1) {
+            println("Verified original context: $sample <- ${fixture.inputs.joinToString { Corpus.smaliSampleName(it) }}")
+            println("KOTLIN STANDALONE CONTEXT DIAGNOSTICS (missing sibling dependencies; excluded from context totals):")
+            for (input in fixture.inputs) {
+                val name = Corpus.smaliSampleName(input)
+                try {
+                    val standalone = SmaliAssembler.assemble(input)
+                    if (!standalone.ok) { println("  $name: assembly failure: ${standalone.error}"); continue }
+                    val output = jadxmpKotlin.decompileKotlin(name, standalone.dex!!)
+                    val compiled = KotlinAccuracySignals.recompiles(output.classes, recompileClasspath)
+                    println("  $name: ${compiled.status}, reported-errors=${output.reportedErrors}")
+                    if (!compiled.success) println("    compiler diagnostics: ${compiled.errors}")
+                } catch (failure: Exception) {
+                    println("  $name: measurement failed: ${failure.message}")
+                }
+            }
+        }
+        val asm = SmaliAssembler.assemble(fixture.inputs)
         if (!asm.ok) {
             assemblyFailed += "$sample (${asm.error})"
             continue
@@ -99,6 +117,8 @@ fun main() {
         // A jadxmp crash is a total failure, scored as an empty result (→ NO_OUTPUT), never an abort.
         val result = runCatching { jadxmpKotlin.decompileKotlin(sample, asm.dex!!) }
             .getOrElse { DecompilationResult(inputName = sample, classes = emptyList(), reportedErrors = 1) }
+        val contextProblems = fixture.outputProblems(result)
+        contextProblems.forEach { println("$sample context error: $it") }
         val recompile = KotlinAccuracySignals.recompiles(result.classes, recompileClasspath)
         if (System.getProperty("jadxmp.kotlin.diagnostics").toBoolean() && !recompile.success) {
             println("\n--- Kotlin failure: $sample (${recompile.status}) ---")
@@ -108,10 +128,11 @@ fun main() {
         byStatus.getValue(recompile.status) += sample
         // Cross-check the recompile PASS against jadxmp's own no-error signal: a sample that compiles but
         // carries jadxmp-reported errors is compile-but-flagged, never an evidenced Kotlin win.
-        if (recompile.success && result.reportedErrors > 0) flaggedButRecompiles += sample
+        if (recompile.success && (result.reportedErrors > 0 || contextProblems.isNotEmpty())) flaggedButRecompiles += sample
+
     }
 
-    print(renderKotlinReport(inputs.size, assemblyFailed, byStatus, flaggedButRecompiles))
+    print(renderKotlinReport(fixtures.size, assemblyFailed, byStatus, flaggedButRecompiles, inputs.size))
 }
 
 private fun renderKotlinReport(
@@ -119,6 +140,7 @@ private fun renderKotlinReport(
     assemblyFailed: List<String>,
     byStatus: Map<KotlinRecompileStatus, List<String>>,
     flaggedButRecompiles: List<String>,
+    physicalInputs: Int = totalDiscovered,
 ): String = buildString {
     val clean = byStatus[KotlinRecompileStatus.CLEAN].orEmpty()
     val warnings = byStatus[KotlinRecompileStatus.WARNINGS].orEmpty()
@@ -129,7 +151,8 @@ private fun renderKotlinReport(
     val pass = clean.size + warnings.size
 
     appendLine("=== jadxmp Kotlin self-measurement scoreboard (kotlinc recompile — NOT a diff vs jadx) ===")
-    appendLine("smali files discovered : $totalDiscovered")
+    appendLine("smali files discovered : $physicalInputs")
+    appendLine("fixture contexts       : $totalDiscovered")
     appendLine("assembled + scored     : $scored")
     appendLine("assembly failures      : ${assemblyFailed.size}")
     appendLine()
@@ -149,10 +172,10 @@ private fun renderKotlinReport(
     appendLine("  recompiles (clean+warn): $pass / $measured measured  (excludes ${unavailable.size} skipped)")
     appendLine(
         "    of which jadxmp-flagged: $flaggedCount   " +
-            "(reportedErrors>0 / carry a // JADXMP ERROR marker — compile but NOT evidenced-correct)",
+            "(reported or context errors — compile but NOT evidenced-correct)",
     )
     appendLine(
-        "  evidenced Kotlin (compiles AND zero jadxmp-reported errors): $evidenced / $measured measured",
+        "  evidenced Kotlin (compiles AND zero reported/context errors): $evidenced / $measured measured",
     )
     appendLine()
 

@@ -99,6 +99,23 @@ Gradle process for regressions, assembly/reference failures, or missing/incomple
 and retains the log even on failure. `kotlinScoreboard` remains an informational compilation report;
 its known failures are not suppressed or presented as production readiness.
 
+Smali fixture boundaries follow verified original test composition. `SmaliFixtureContexts` binds
+`inline/TestMethodInline` to the original test and A/B/C source hashes at the pinned commit: the
+original test loads all three together. Each physical source occurs exactly once in the authoritative
+plan (currently 211 sources, 209 contexts); all other inputs remain singleton contexts. Missing,
+duplicate, changed or additional group members fail before measurement. Both backends receive the
+same assembled context, every generated source is compiled, and missing required top-level classes
+or duplicate outputs count as context errors. Context errors on either side fail the Java gate
+regardless of the other side's accuracy signals.
+
+Reports always retain the grouped members' standalone measurements and compiler diagnostics as
+partial-context evidence outside the context totals. In particular, a retained B forwarder cannot
+compile alone without C; the complete original fixture compiles and executes. Grouping adds no
+classpath stubs and changes neither divergence nor invalid-input policy. The original invalid-return
+fixture remains a singleton with its required diagnostic and visible compilation failure. Any new
+group requires its own original-composition evidence and review; directory membership alone is
+insufficient.
+
 `javaFixtureScoreboard` is an enforced source → javac → D8 → decompile → recompile →
 `check()` gate for both Java and Kotlin output. Each trusted `corpus/java` source must have a
 passing original check; failed compilation, a missing rebuilt check, process failure, timeout, or
