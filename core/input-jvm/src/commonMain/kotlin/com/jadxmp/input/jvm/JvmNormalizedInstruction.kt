@@ -41,12 +41,13 @@ internal class JvmNormalizedInstruction(
     override val indexType: IndexType get() = when (indexedOperand) {
         is JvmIndexedOperand.StringRef -> IndexType.STRING_REF
         is JvmIndexedOperand.TypeRef -> IndexType.TYPE_REF
+        is JvmIndexedOperand.FieldValue -> IndexType.FIELD_REF
         null -> IndexType.NONE
     }
     override val index: Int get() = indexedOperand?.index ?: -1
     override fun indexAsString(): String = (indexedOperand as? JvmIndexedOperand.StringRef)?.value ?: missing()
     override fun indexAsType(): String = (indexedOperand as? JvmIndexedOperand.TypeRef)?.value ?: missing()
-    override fun indexAsField(): FieldRef = missing()
+    override fun indexAsField(): FieldRef = (indexedOperand as? JvmIndexedOperand.FieldValue)?.value ?: missing()
     override fun indexAsMethod(): MethodRef = missing()
     override fun indexAsProto(protoIndex: Int): MethodProto = missing()
     override fun indexAsCallSite(): CallSite = missing()
@@ -58,5 +59,6 @@ internal class JvmNormalizedInstruction(
 internal sealed interface JvmIndexedOperand {
     val index: Int
     data class StringRef(override val index: Int, val value: String) : JvmIndexedOperand
+    data class FieldValue(override val index: Int, val value: FieldRef) : JvmIndexedOperand
     data class TypeRef(override val index: Int, val value: String) : JvmIndexedOperand
 }

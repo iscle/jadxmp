@@ -133,6 +133,7 @@ internal class MethodBodyWriter(
     // in this body. [AliasMap.EMPTY] (the default) ⇒ the byte-identical no-deobfuscation path.
     private val aliasMap: AliasMap = AliasMap.EMPTY,
     private val invocationBindings: InvocationSourceBinding = InvocationSourceBinding(method.declaringClass.root),
+    private val ownedFields: JavaOwnedStaticFields = JavaOwnedStaticFields(aliasMap),
 ) {
     private val types = JavaTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -163,6 +164,7 @@ internal class MethodBodyWriter(
     // name — used to render enum-constant constructor arguments outside the `<clinit>` variable scope,
     // where the source registers have no declaration. Only enabled during [emitEnumConstantArgs].
     private var inlineRegisters = false
+    private var ordinaryBody = false
 
     // Whether the enclosing class renders as a reconstructed enum (so its `<init>` params have the
     // synthetic `name`/`ordinal` stripped in the declaration). Computed at most once, and only when a
@@ -202,6 +204,7 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        ordinaryBody = true
         if (MissingMethodBody.isRequired(method)) {
             // Keep the diagnostic at the declaration and never turn a load failure into a no-op.
             // Java requires a static initializer to be able to complete normally syntactically.
@@ -565,6 +568,34 @@ internal class MethodBodyWriter(
         emitCoerced(insn.getArg(insn.argCount - 1), field?.type, Prec.LOWEST)
     }
 
+    private fun emitStaticFieldOwner(field: FieldRef): Boolean {
+        // Header/enum arguments have forward-reference rules unlike ordinary bodies. Foreign and
+        // constant/final fields retain their existing resolver; this proof changes only owned mutable fields.
+        if (ordinaryBody && !inlineRegisters) when (val owned = ownedFields.lookup(method.declaringClass, field)) {
+            is JavaOwnedStaticFields.Result.Owned -> {
+                if (!names.isUsed(owned.name)) return false
+                val qualifier = ownedFields.simpleQualifier(method.declaringClass)
+                if (qualifier != null) {
+                    code.add("((")
+                    code.attachReference(com.jadxmp.codegen.ClassNodeRef(method.declaringClass.fullName))
+                    code.add(qualifier).add(") null)")
+                    return true
+                }
+                val reason = "owned static field binding is shadowed in an unresolved source scope"
+                flagError(method, reason)
+                code.add("/* JADXMP ERROR: ").add(reason).add(" */ ")
+            }
+            JavaOwnedStaticFields.Result.Unavailable -> {
+                val reason = "owned static field binding work limit exceeded"
+                flagError(method, reason)
+                code.add("/* JADXMP ERROR: ").add(reason).add(" */ ")
+            }
+            JavaOwnedStaticFields.Result.NotApplicable -> Unit
+        }
+        emitTypeRef(field.declaringType)
+        return true
+    }
+
     private fun emitStaticPut(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         // The qualifier is dropped ONLY for an assignment to the enclosing class's own blank `static
@@ -575,8 +606,7 @@ internal class MethodBodyWriter(
         // simple name and silently capturing the assignment.
         if (field == null || !isOwnBlankFinal(field)) {
             if (field != null) {
-                emitTypeRef(field.declaringType)
-                code.add(".")
+                if (emitStaticFieldOwner(field)) code.add(".")
             }
         }
         emitFieldName(field)
@@ -1096,8 +1126,7 @@ internal class MethodBodyWriter(
             return
         }
         if (field != null) {
-            emitTypeRef(field.declaringType)
-            code.add(".")
+            if (emitStaticFieldOwner(field)) code.add(".")
         }
         emitFieldName(field)
     }

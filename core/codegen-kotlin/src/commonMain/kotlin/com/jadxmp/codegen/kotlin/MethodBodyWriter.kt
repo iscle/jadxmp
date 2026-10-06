@@ -96,6 +96,8 @@ internal class MethodBodyWriter(
     private val aliasMap: AliasMap = AliasMap.EMPTY,
     private val nullability: KotlinReferenceNullability = KotlinReferenceNullability(method.declaringClass.root),
     private val invocationBindings: InvocationSourceBinding = InvocationSourceBinding(method.declaringClass.root),
+    // Set only by the declaration emitter for a static body/init in its actual companion/object.
+    private val staticPropertyContainer: Boolean = false,
 ) {
     private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -106,6 +108,7 @@ internal class MethodBodyWriter(
     // name — used to render a hoisted `static final` initializer outside the `<clinit>` variable scope,
     // where the source registers have no declaration. Only enabled during [emitStaticFinalInit].
     private var inlineRegisters = false
+    private var ordinaryBody = false
 
     // The <clinit>'s TERMINAL return-void, if any: the fall-off `return` that is illegal inside a Kotlin
     // companion `init { … }` block (and enum residual init). Only this exact instruction is suppressed —
@@ -237,6 +240,7 @@ internal class MethodBodyWriter(
     // ---------- body entry ----------
 
     fun writeBody() {
+        ordinaryBody = true
         // @Synchronized on a companion method locks the companion, not the original JVM Class.
         // An inline synchronized call preserves nonlocal returns and releases on every throw path.
         if (method.isStatic && KotlinJvmModifiers.isSynchronized(method)) {
@@ -806,10 +810,37 @@ internal class MethodBodyWriter(
             projectedWrapper = field != null && !KotlinJvmBoxedTypes.hasGeneratedField(root, field))
     }
 
+    private fun emitStaticFieldOwner(field: FieldRef) {
+        val type = field.declaringType
+        if (!ordinaryBody || inlineRegisters) { emitClassName(type); return }
+        when (imports.ownedMutableField(method.declaringClass, field)) {
+            KotlinImports.Ownership.NOT_APPLICABLE -> { emitClassName(type); return }
+            KotlinImports.Ownership.UNAVAILABLE -> {
+                val reason = "owned static field binding work limit exceeded"
+                flagError(method, reason)
+                code.add("/* JADXMP ERROR: ").add(reason).add(" */ ")
+                emitClassName(type)
+                return
+            }
+            KotlinImports.Ownership.OWNED -> Unit
+        }
+        if (staticPropertyContainer) { code.add("this"); return }
+        val incomplete = !imports.hasCompleteNameScope(method.declaringClass)
+        if (incomplete) {
+            val reason = "owned static field binding is shadowed in an unresolved source scope"
+            flagError(method, reason)
+            code.add("/* JADXMP ERROR: ").add(reason).add(" */ ")
+        }
+        classNameForRef(type)?.let { code.attachReference(com.jadxmp.codegen.ClassNodeRef(it)) }
+        // A complete hierarchy can still contain a type named like this owner. The reserved
+        // import alias excludes all loaded type/member/local names from that scope.
+        code.add(types.aliasedFieldOwner(type))
+    }
+
     private fun emitStaticPut(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         if (field != null) {
-            emitClassName(field.declaringType)
+            emitStaticFieldOwner(field)
             code.add(".")
         }
         emitFieldName(field)
@@ -1381,7 +1412,7 @@ internal class MethodBodyWriter(
     private fun emitStaticGet(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         if (field != null) {
-            emitClassName(field.declaringType)
+            emitStaticFieldOwner(field)
             code.add(".")
         }
         emitFieldName(field)

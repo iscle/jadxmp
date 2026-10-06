@@ -52,6 +52,14 @@ internal class KotlinTypeRenderer(
         else -> render(type)
     }
 
+    /** An import alias is unambiguous even when a local/property captures the ordinary owner. */
+    fun aliasedFieldOwner(type: IrType): String = when (type) {
+        is IrType.Object -> imports.aliasedClass(root?.findClass(type.className)?.let {
+            KotlinSourceName.sourceQualifiedName(it, aliasMap)
+        } ?: aliasedClassName(type.className).replace('$', '.'), type.className)
+        else -> error("static field owner is not a class: $type")
+    }
+
     /** Kotlin's view of an external Java descriptor, retaining wrapper/array nulls without reboxing. */
     fun renderJvmProjection(type: IrType): String = when {
         KotlinJvmBoxedTypes.isWrapper(type) -> imports.aliasedClass(KotlinJvmBoxedTypes.projectedName(type)!!)

@@ -17,6 +17,7 @@ internal object JvmClassAdapter {
         checkAttributes(file.attributes)
         val metadata = JvmClassMetadata.read(file)
         val owner = "L${file.name};"
+        val fieldDeclarations = JvmDeclaredFields(file.name, file.fields)
         val descriptors = mutableMapOf<String, JvmMethodDescriptor>()
         val fields = file.fields.map { field ->
             checkAttributes(field.attributes)
@@ -57,7 +58,7 @@ internal object JvmClassAdapter {
                     // Type-use annotations may live inside Code (for local variables/casts), not
                     // on the declaration. They require the same explicit unsupported diagnostic.
                     checkAttributes(parsedCode.attributes)
-                    JvmRegisterNormalizer.normalize(file.name, method, descriptor, file.constants, parsedCode)
+                    JvmRegisterNormalizer.normalize(file.name, method, descriptor, file.constants, parsedCode, fields = fieldDeclarations)
                 }
             }
             object : MethodData {

@@ -847,6 +847,7 @@ class KotlinCodeGenerator {
             val writer = MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
                 aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+                staticPropertyContainer = method.isStatic,
             )
             if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
             code.add(" ")
@@ -993,6 +994,7 @@ class KotlinCodeGenerator {
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(), suppressed,
                 aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+                staticPropertyContainer = method.isStatic,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()

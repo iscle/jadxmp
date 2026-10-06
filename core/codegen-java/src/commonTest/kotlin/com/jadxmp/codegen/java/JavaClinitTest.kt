@@ -61,7 +61,7 @@ class JavaClinitTest {
     }
 
     @Test
-    fun nonFinalStaticPutInClinitStaysQualified() {
+    fun nonFinalStaticPutInClinitUsesItsProvenOwnField() {
         val cls = irClass("a.Foo")
         cls.fields.add(IrField(cls, "COUNTER", IrType.INT, staticNonFinal))
         cls.method("<clinit>", accessFlags = clinitFlags) {
@@ -69,7 +69,7 @@ class JavaClinitTest {
         }
         assertThatCode(generate(cls))
             .containsOne("static {")
-            .containsOne("Foo.COUNTER = 7;") // assignable static keeps its qualifier
+            .containsOne("COUNTER = 7;") // exact owned field, no local capture
             .doesNotContain("return")
     }
 
@@ -84,7 +84,7 @@ class JavaClinitTest {
             body(staticPut(fieldRefOf("count", IrType.INT), intLit(5)), ret())
         }
         assertThatCode(generate(cls))
-            .containsOne("Foo.count = 5;")
+            .containsOne("((Foo) null).count = 5;")
             .containsOne("(int count)")
     }
 

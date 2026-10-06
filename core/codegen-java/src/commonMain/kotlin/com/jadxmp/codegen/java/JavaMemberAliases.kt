@@ -74,7 +74,7 @@ internal object JavaMemberAliases {
     }
 
     /** Field-name aliases for every field of [cls], keyed by field identity, in declaration order. */
-    private fun buildFieldAliases(cls: IrClass, aliasMap: AliasMap): Map<IrField, String> {
+    internal fun buildFieldAliases(cls: IrClass, aliasMap: AliasMap): Map<IrField, String> {
         val used = HashSet<String>()
         val result = HashMap<IrField, String>()
         for (f in cls.fields) {

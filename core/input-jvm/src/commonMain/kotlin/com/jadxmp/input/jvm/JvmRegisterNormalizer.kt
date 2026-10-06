@@ -22,7 +22,8 @@ internal object JvmRegisterNormalizer {
         constants: JvmConstantPool,
         code: JvmCodeAttribute,
         limits: JvmAnalysisLimits = JvmAnalysisLimits(),
-    ): CodeReader = Lowering(owner, member, descriptor, constants, code, limits).run()
+        fields: JvmDeclaredFields? = null,
+    ): CodeReader = Lowering(owner, member, descriptor, constants, code, limits, fields).run()
 
     private class Lowering(
         private val owner: String,
@@ -31,6 +32,7 @@ internal object JvmRegisterNormalizer {
         private val constants: JvmConstantPool,
         private val code: JvmCodeAttribute,
         private val limits: JvmAnalysisLimits,
+        fields: JvmDeclaredFields?,
     ) {
         private val isStatic = member.accessFlags and 8 != 0
         private val incomingWords = descriptor.argumentSlots + if (isStatic) 0 else 1
@@ -46,6 +48,8 @@ internal object JvmRegisterNormalizer {
         private var operandWork = 0L
         private val constantOperands = JvmConstantOperands(constants, ::chargeOperandWork, ::reference)
         private val arrayAllocations = JvmArrayAllocations(constantOperands, ::chargeOperandWork, ::reference)
+        private val fieldOperands = JvmFieldOperands(constants, owner, fields, ::chargeOperandWork)
+        private val ownerType by lazy { reference("L$owner;") }
         private val arrayOperands = JvmArrayOperands(::chargeOperandWork, ::reference)
         private val returnFrameType = if (descriptor.returnType == "V") null else valueType(descriptor.returnType)
         private val instructions = mutableListOf<JvmNormalizedInstruction>()
@@ -209,6 +213,7 @@ internal object JvmRegisterNormalizer {
                     emit(if (opcode == 0xa5) Opcode.IF_EQ else Opcode.IF_NE, intArrayOf(lhs, rhs),
                         target = (raw.operand as JvmOperand.Branch).target)
                 }
+                in 0xb2..0xb5 -> fieldAccess(opcode)
                 0xbc, 0xbd -> {
                     val allocation = if (opcode == 0xbc) arrayAllocations.primitive((raw.operand as JvmOperand.ArrayType).type)
                         else arrayAllocations.reference((raw.operand as JvmOperand.Constant).index)
@@ -283,6 +288,50 @@ internal object JvmRegisterNormalizer {
                     emit(Opcode.RETURN_VOID)
                 }
                 else -> fail("unsupported register normalization opcode 0x${opcode.toString(16)}")
+            }
+        }
+
+        private fun fieldAccess(opcode: Int) {
+            val static = opcode == 0xb2 || opcode == 0xb3
+            val store = opcode == 0xb3 || opcode == 0xb5
+            val field = fieldOperands.field((raw.operand as JvmOperand.Constant).index, static).operand
+            val type = valueType(field.value.type)
+            val value = if (!store) -1 else if (type is JvmFrameValue.Reference) {
+                val (actual, register) = popReference()
+                if (actual != JvmFrameValue.NullValue && actual != type && type != JvmReferenceTypes.OBJECT) {
+                    fail("JVM field value assignability requires unresolved hierarchy: $actual to $type")
+                }
+                register
+            } else pop(type)
+            val receiver = if (static) null else popReference().also { (actual, _) ->
+                if (actual != JvmFrameValue.NullValue && actual != ownerType) {
+                    fail("JVM field receiver requires exact declared owner: $actual to $ownerType")
+                }
+            }
+            val result = if (store) -1 else push(type)
+            if (receiver?.first == JvmFrameValue.NullValue) {
+                // The exact current-class declaration was resolved above; no foreign linking
+                // failure can precede this NPE. Value-producing effects already ran. Still publish
+                // the verifier's frame transfer so original continuation bytecode is validated.
+                emit(Opcode.THROW, intArrayOf(receiver.second))
+                return
+            }
+            if (store) {
+                when (field.value.type) {
+                    "B" -> emit(Opcode.INT_TO_BYTE, intArrayOf(value, value))
+                    "C" -> emit(Opcode.INT_TO_CHAR, intArrayOf(value, value))
+                    "S" -> emit(Opcode.INT_TO_SHORT, intArrayOf(value, value))
+                    "Z" -> {
+                        emit(Opcode.AND_INT_LIT, intArrayOf(value, value), 1)
+                        emit(Opcode.INT_TO_BOOLEAN, intArrayOf(value, value))
+                    }
+                }
+                emit(if (static) Opcode.SPUT else Opcode.IPUT,
+                    if (static) intArrayOf(value) else intArrayOf(value, checkNotNull(receiver).second), indexedOperand = field)
+            } else {
+                emit(if (static) Opcode.SGET else Opcode.IGET,
+                    if (static) intArrayOf(result) else intArrayOf(result, checkNotNull(receiver).second), indexedOperand = field)
+                if (field.value.type == "Z") emit(Opcode.BOOLEAN_TO_INT, intArrayOf(result, result))
             }
         }
 

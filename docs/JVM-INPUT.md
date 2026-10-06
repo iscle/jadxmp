@@ -106,6 +106,41 @@ but follows size-expression exceptions/effects; component class initialization r
 `multianewarray` is explicitly deferred: every supplied dimension must be evaluated and checked even
 when an earlier dimension is zero, and a source closure must not postpone later checks or effects.
 
+Native field lowering currently covers mutable fields declared directly on the current class.
+A class-level bounded declaration table checks exact name/descriptor identity and rejects names
+with multiple descriptors; cached FIELD_REF operands retain the real constant-pool index and
+symbolic owner. Every use charges owner/name/type text work. Actual static flags are checked;
+foreign, inherited, final and ConstantValue accesses diagnose rather than guess resolution or
+silently inline away initialization. Instance receivers require the exact owner or null; reference
+stores require exact/null/Object assignment proof. Byte/char/short stores narrow only their consumed
+snapshot, Boolean stores retain the low bit, and Boolean reads explicitly become computational Int.
+Wide snapshots, volatile flags, reference identity and effects before null failure are tested through
+both outputs. Known-null own-field accesses throw after operand effects; original continuation
+frames are still validated. Static initializer read/write order is also executed.
+Shared emission has a bounded, exact-owned mutable-static-field path, independent of input format.
+In ordinary Java bodies, an unshadowed declared field is referenced directly. A captured local name
+requires a proved current-declaration qualifier or an explicit diagnostic. Kotlin static bodies and
+initializers use `this.field` only in their actual companion/object property container; instance
+bodies require complete source scope and a reserved import alias, including when an inherited type
+shares the owner name. Enum arguments, constructor headers and hoisted initializers
+do not use these body-only forms. Native and DEX execution controls cover local/property collisions,
+renames, initialization, receiver/value effects, and unloaded ancestors with both field and nested-type
+shadows. An unsupported Kotlin instance scope retains its diagnostic and compilation failure while
+healthy siblings remain intact.
+
+Foreign fields, final/ConstantValue accesses and declaration contexts retain their existing emission
+path. This is not a general solution to owner-name binding: foreign owners can still be captured by
+unloaded inherited names. See [field binding limits](FIELD-BINDING-LIMITS.md) for the concrete pending evidence.
+The final/ConstantValue native exclusions above remain unchanged.
+
+Unmodified javac fixtures retain the existing constructor diagnostic; tests allocate default-state
+receivers without invoking either constructor and claim method execution only. Kotlin's existing
+property emission changes public field ABI to private backing fields/accessors; reflection controls
+record this as a limitation, not binary-field parity. The pinned reference fails recompilation for
+raw narrowing/Boolean field stores and inlines a raw external ConstantValue read, losing its original
+class-initialization effect. Both measurements remain explicit; unsupported candidate accesses keep
+diagnostics and healthy sibling methods. No corpus policy is changed.
+
 The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, object creation and `multianewarray`, method-type/method-handle/dynamic constants, constructors,
 jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 

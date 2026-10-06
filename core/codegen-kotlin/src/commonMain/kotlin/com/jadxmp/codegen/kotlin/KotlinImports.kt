@@ -4,6 +4,7 @@ import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.ImportCollector
 import com.jadxmp.codegen.NameGenerator
+import com.jadxmp.codegen.OwnedFieldTypes
 import com.jadxmp.ir.insn.Instruction
 import com.jadxmp.ir.insn.InstructionOperand
 import com.jadxmp.ir.insn.RegisterOperand
@@ -14,6 +15,7 @@ import com.jadxmp.ir.type.IrType
 internal class KotlinImports(
     packageName: String, private val cls: IrClass, private val aliasMap: AliasMap,
     private val constructorNames: KotlinConstructorNamePlan = KotlinConstructorNamePlan(cls, aliasMap),
+    private var ownFieldWork: Long = 10_000_000,
 ) {
     private val constructorOwners = mutableMapOf<String, String>()
     private val nameScope = KotlinNameScope()
@@ -38,6 +40,10 @@ internal class KotlinImports(
     private val aliasedReferenceOwners = mutableMapOf<String, String>()
     private val monitorOwners = linkedSetOf<String>()
 
+    private data class OwnField(val type: IrType, val eligible: Boolean)
+    private val ownFields = mutableMapOf<IrClass, Map<String, OwnField?>>()
+    enum class Ownership { OWNED, NOT_APPLICABLE, UNAVAILABLE }
+
     init {
         fun reserve(name: String?) {
             if (name != null) reservedNames.add(KotlinIdentifiers.sanitize(name).removeSurrounding("`"))
@@ -51,6 +57,7 @@ internal class KotlinImports(
             val current = classes.removeFirst()
             if (!seenClasses.add(current)) continue
             reserve(KotlinSourceName.sourceSimpleName(current, aliasMap))
+            recordOwnFields(current)
             current.fields.forEach { reserve(KotlinMemberAliases.aliasOf(it, aliasMap)) }
             for (method in current.methods) {
                 if (method.isStatic && KotlinJvmModifiers.isSynchronized(method)) {
@@ -119,6 +126,40 @@ internal class KotlinImports(
         // Pass-one text is discarded. Allocate all discovered owners once, after ordinary imports
         // and declarations have reserved their names; repeated rebuilding would be quadratic.
         return fullName
+    }
+
+    private fun ownCharge(amount: Long): Boolean {
+        if (amount > ownFieldWork) { ownFieldWork = 0; return false }
+        ownFieldWork -= amount
+        return true
+    }
+
+    private fun recordOwnFields(context: IrClass) {
+        if (!ownCharge(context.fields.size.toLong() + 1)) return
+        val fields = mutableMapOf<String, OwnField?>()
+        for (field in context.fields) {
+            val type = field.type
+            if (!ownCharge(field.name.length.toLong() + 1)) return
+            val eligible = field.accessFlags and 0x0008 != 0 && field.accessFlags and 0x0010 == 0 && field.constValue == null
+            fields[field.name] = if (field.name in fields) null else OwnField(type, eligible)
+        }
+        ownFields[context] = fields
+    }
+
+    /** Exact owned mutable metadata only; unrelated/static-final resolution remains unchanged. */
+    fun ownedMutableField(context: IrClass, reference: com.jadxmp.ir.insn.FieldRef): Ownership {
+        val owner = (reference.declaringType as? IrType.Object)?.className ?: return Ownership.NOT_APPLICABLE
+        if (!ownCharge(owner.length.toLong() + context.fullName.length + 1)) return Ownership.UNAVAILABLE
+        if (owner != context.fullName) return Ownership.NOT_APPLICABLE
+        if (!ownCharge(reference.name.length.toLong() + 1)) return Ownership.UNAVAILABLE
+        val fields = ownFields[context] ?: return Ownership.UNAVAILABLE
+        val field = fields[reference.name] ?: return Ownership.NOT_APPLICABLE
+        if (!field.eligible) return Ownership.NOT_APPLICABLE
+        return when (OwnedFieldTypes.equal(reference.type, field.type, ::ownCharge)) {
+            null -> Ownership.UNAVAILABLE
+            true -> Ownership.OWNED
+            false -> Ownership.NOT_APPLICABLE
+        }
     }
 
     fun aliasedFunction(fullName: String): String {

@@ -63,10 +63,11 @@ class JavaCodeGenerator {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = ImportCollector(packageName)
         val invocationBindings = InvocationSourceBinding(cls.root)
+        val ownedFields = JavaOwnedStaticFields(aliasMap)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, invocationBindings).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, invocationBindings, ownedFields).emitClass(cls, topLevel = true)
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -79,7 +80,7 @@ class JavaCodeGenerator {
             for (imp in importList) code.add("import ").add(JavaIdentifiers.sanitizeQualified(imp)).add(";").newLine()
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, invocationBindings).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, invocationBindings, ownedFields).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -103,6 +104,7 @@ class JavaCodeGenerator {
         private val root: IrRoot? = null,
         private val commentMap: CommentMap = CommentMap.EMPTY,
         private val invocationBindings: InvocationSourceBinding,
+        private val ownedFields: JavaOwnedStaticFields,
     ) {
         private val types = JavaTypeRenderer(imports, aliasMap, root)
 
@@ -308,7 +310,7 @@ class JavaCodeGenerator {
             val writer = clinit?.let {
                 MethodBodyWriter(
                     code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns,
-                    aliasMap = aliasMap, invocationBindings = invocationBindings,
+                    aliasMap = aliasMap, invocationBindings = invocationBindings, ownedFields = ownedFields,
                 )
             }
             // A resolved plan (folded `new T[]{…}` arrays + backward inter-constant NAME references +
@@ -337,7 +339,7 @@ class JavaCodeGenerator {
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(),
                 e.suppressedClinitInsns, e.constantResultFields, ctx.refRewrites, aliasMap,
-                invocationBindings = invocationBindings,
+                invocationBindings = invocationBindings, ownedFields = ownedFields,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -378,7 +380,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames, suppressed,
-                enumRewrites = ctx.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings,
+                enumRewrites = ctx.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings, ownedFields = ownedFields,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -559,7 +561,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
-                enumRewrites = ctx?.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings,
+                enumRewrites = ctx?.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings, ownedFields = ownedFields,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()

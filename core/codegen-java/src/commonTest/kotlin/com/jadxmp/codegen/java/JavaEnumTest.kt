@@ -338,7 +338,7 @@ class JavaEnumTest {
             .containsOne("ON;") // one constant, then the static field/block follow
             .containsOne("public static int COUNT;")
             .containsOne("static {")
-            .containsOne("Mode.COUNT = 42;") // residual (non-enum) static init preserved
+            .containsOne("COUNT = 42;") // exact own field binding survives unloaded Enum type-name scope
             .doesNotContain("new Mode(") // enum construction suppressed inside the static block
     }
 
