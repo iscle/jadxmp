@@ -10,13 +10,13 @@ import com.jadxmp.ir.insn.RegisterOperand
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.type.IrType
 
-/** Kotlin-specific static-owner aliases layered over ordinary shared class imports. */
+/** Collision-safe aliases for JVM references and their Kotlin signature projections layered over ordinary shared class imports. */
 internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasMap) {
     private val ordinary = ImportCollector(packageName)
-    private var staticAliases: Map<String, String>
+    private var classAliases: Map<String, String>
     private val reservedNames = linkedSetOf<String>()
     private var discoveryComplete = false
-    private val usedStaticOwners = linkedSetOf<String>()
+    private val usedAliasedClasses = linkedSetOf<String>()
 
     init {
         fun reserve(name: String?) {
@@ -57,30 +57,36 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
                 (type as? IrType.Object)?.className?.let(cls.root::findClass)?.let(classes::add)
             }
         }
-        staticAliases = allocateAliases()
+        classAliases = allocateAliases()
     }
 
     /** Finalize after the discarded render has discovered all referenced types, including raw/default-package types. */
     fun finishDiscovery() {
-        staticAliases = allocateAliases()
+        classAliases = allocateAliases()
         discoveryComplete = true
     }
 
     private fun allocateAliases(): Map<String, String> {
         val names = NameGenerator()
         reservedNames.forEach(names::reserve)
-        return KotlinJvmStaticInvocationProjection.ownerNames.associateWith { owner ->
-            names.unique("Jvm" + owner.substringAfterLast('.'))
+        return (KotlinJvmStaticInvocationProjection.ownerNames + KotlinJvmBoxedTypes.aliasedOwners + KotlinJvmBoxedTypes.projectedOwners).associateWith { owner ->
+            names.unique((if (owner.startsWith("kotlin.")) "Kotlin" else "Jvm") + owner.substringAfterLast('.'))
         }
     }
 
-    fun staticOwner(fullName: String): String {
-        usedStaticOwners.add(fullName)
-        return staticAliases.getValue(fullName)
+    fun aliasedClass(fullName: String): String {
+        usedAliasedClasses.add(fullName)
+        return classAliases.getValue(fullName)
     }
 
-    fun reserveStaticAliases(names: NameGenerator) {
-        staticAliases.values.forEach(names::reserve)
+    /** An aliased Kotlin import removes the corresponding implicit simple-name import. */
+    fun builtinName(simpleName: String): String {
+        val fullName = "kotlin.$simpleName"
+        return if (fullName in usedAliasedClasses) classAliases.getValue(fullName) else simpleName
+    }
+
+    fun reserveAliases(names: NameGenerator) {
+        classAliases.values.forEach(names::reserve)
     }
 
     fun useClass(fullName: String): String {
@@ -94,7 +100,7 @@ internal class KotlinImports(packageName: String, cls: IrClass, aliasMap: AliasM
     }
 
     fun imports(): List<Pair<String, String?>> {
-        val aliased = usedStaticOwners.map { it to staticAliases.getValue(it) }
+        val aliased = usedAliasedClasses.map { it to classAliases.getValue(it) }
         val plain = ordinary.imports().map { it to null }
         return (plain + aliased).sortedBy { it.first }
     }

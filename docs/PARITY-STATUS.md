@@ -73,12 +73,19 @@ additional reference and parser tests.
 
 ## Kotlin validation after the combined snapshot
 
-The latest 211-input Kotlin compilation run reports **83 compiling, 80 without decompiler error
-markers, three compiling with error markers, 115 compiler errors and 13 empty outputs**. This is a
-compilation measurement, not whole-corpus semantic equivalence. Relative to the array-nullability
-snapshot (81 compiling, 76 unflagged), `others/TestIncorrectFieldSignature` and
-`trycatch/TestFinally3` newly compile; no previously compiling input fails. Additional unflagged
-gains include shared pipeline repairs and are not attributed solely to the Kotlin backend.
+The latest 211-input Kotlin compilation run reports **84 compiling, 81 without decompiler error
+markers, three compiling with error markers, 114 compiler errors and 13 empty outputs**. This is a
+compilation measurement, not whole-corpus semantic equivalence. The boxed-reference batch newly
+compiles `invoke/TestConstructorWithMoves.smali`, with no previously compiling input lost. The
+preceding reference-nullability batch gained `others/TestIncorrectFieldSignature` and
+`trycatch/TestFinally3`; additional unflagged gains include shared pipeline repairs.
+
+All eight JVM wrapper types retain reference declarations, constructors and identity. External Java
+wrapper parameters/results and arrays use nullable Kotlin boundary casts without reboxing or array
+copies; generated declarations keep their exact reference types. Exact numeric accessor projection
+preserves virtual dispatch. Independent JVM/JS/Wasm backend tests and three compiled execution
+matrices cover nulls, overloads, constructors, fields, arrays, custom Number dispatch and import
+collisions. These checks supplement the corpus compilation measurement.
 
 Reference parameters, fields, copied values and unknown external reference results now retain
 nullable JVM behavior. Execution checks cover prefix/catch effects, receiver/argument order,
@@ -120,8 +127,8 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    to calls and the evaluation order of folded arguments, including array-store operand order.
    Java/Kotlin execution tests check exception types and side-effect traces; these are not a general
    semantic proof of all transformations.
-2. Kotlin has 128 inputs with compiler errors or no output, plus three compilable outputs carrying
-   error markers. Broader generic/override nullability, boxed wrappers, Java varargs, class/field reconstruction and
+2. Kotlin has 127 inputs with compiler errors or no output, plus three compilable outputs carrying
+   error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
    execution coverage is missing; the smali gate still measures no-error and recompilation only.

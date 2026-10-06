@@ -136,7 +136,7 @@ internal class MethodBodyWriter(
     private var exprDepth = 0
 
     init {
-        imports.reserveStaticAliases(names)
+        imports.reserveAliases(names)
         for (p in paramNames) names.reserve(p)
     }
 
@@ -735,6 +735,7 @@ internal class MethodBodyWriter(
     private fun emitMaterializedOperands(
         operands: List<Operand>,
         expectedTypes: List<IrType?> = emptyList(),
+        projectedArguments: Boolean = false,
         action: (List<String>) -> Unit,
     ) {
         val temporaries = operands.indices.map { names.unique(if (it == 0) "receiver" else "argument") }
@@ -746,7 +747,7 @@ internal class MethodBodyWriter(
         openBrace()
         for (index in 1 until operands.size) {
             code.add("val ").add(temporaries[index]).add(" = ")
-            emitArgument(operands[index], expectedTypes.getOrNull(index))
+            emitArgument(operands[index], expectedTypes.getOrNull(index), projectedWrapper = projectedArguments)
             code.newLine()
         }
         action(temporaries)
@@ -760,7 +761,8 @@ internal class MethodBodyWriter(
     private fun emitInstancePut(insn: Instruction) {
         val field = (insn as? FieldInstruction)?.fieldRef
         if (nullability.isNullable(method, insn.getArg(0))) {
-            emitMaterializedOperands(insn.args, listOf(null, field?.type)) { values ->
+            emitMaterializedOperands(insn.args, listOf(null, field?.type),
+                projectedArguments = field != null && !KotlinJvmBoxedTypes.hasGeneratedField(root, field)) { values ->
                 code.add(values[0]).add("!!.")
                 emitFieldName(field)
                 code.add(" = ").add(values[1])
@@ -771,7 +773,8 @@ internal class MethodBodyWriter(
         code.add(".")
         emitFieldName(field)
         code.add(" = ")
-        emitOperandAsType(insn.getArg(insn.argCount - 1), field?.type, KotlinPrec.LOWEST)
+        emitArgument(insn.getArg(insn.argCount - 1), field?.type,
+            projectedWrapper = field != null && !KotlinJvmBoxedTypes.hasGeneratedField(root, field))
     }
 
     private fun emitStaticPut(insn: Instruction) {
@@ -782,7 +785,8 @@ internal class MethodBodyWriter(
         }
         emitFieldName(field)
         code.add(" = ")
-        emitOperandAsType(insn.getArg(insn.argCount - 1), field?.type, KotlinPrec.LOWEST)
+        emitArgument(insn.getArg(insn.argCount - 1), field?.type,
+            projectedWrapper = field != null && !KotlinJvmBoxedTypes.hasGeneratedField(root, field))
     }
 
     private fun emitFieldName(field: FieldRef?) {
@@ -811,7 +815,7 @@ internal class MethodBodyWriter(
                 val def = if (inlineRegisters) inlinableDef(op) else null
                 if (def != null) emitInsnExpr(def, minPrec) else emitRegister(op)
             }
-            is LiteralOperand -> code.add(KotlinLiterals.format(op))
+            is LiteralOperand -> code.add(KotlinLiterals.format(op, imports::builtinName))
             is InstructionOperand -> emitInsnExpr(op.instruction, minPrec)
         }
     }
@@ -1099,8 +1103,8 @@ internal class MethodBodyWriter(
                 code.add(".size")
             }
             IrOpcode.ARRAY_GET -> emitArrayGet(insn)
-            IrOpcode.INSTANCE_GET -> emitInstanceGet(insn)
-            IrOpcode.STATIC_GET -> emitStaticGet(insn)
+            IrOpcode.INSTANCE_GET -> emitJvmFieldResult(insn) { emitInstanceGet(insn) }
+            IrOpcode.STATIC_GET -> emitJvmFieldResult(insn) { emitStaticGet(insn) }
             IrOpcode.INVOKE, IrOpcode.CONSTRUCTOR -> emitInvokeExpression(insn)
             else -> emitUnknownExpr(insn)
         }
@@ -1367,12 +1371,21 @@ internal class MethodBodyWriter(
             return
         }
 
+        val boxedAccessor = KotlinJvmBoxedTypes.accessor(invoke)
+        if (boxedAccessor != null) {
+            emitDereference(invoke.getArg(0))
+            code.add(".")
+            code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
+            code.add(boxedAccessor).add("()")
+            return
+        }
         if (emitProjectedInvoke(invoke)) return
         val receiver = invoke.instanceArg
         if (kind != InvokeKind.STATIC && kind != InvokeKind.SUPER && receiver != null &&
             nullability.isNullable(method, receiver)
         ) {
-            emitMaterializedOperands(invoke.args, listOf(null) + target.paramTypes) { values ->
+            emitMaterializedOperands(invoke.args, listOf(null) + target.paramTypes,
+                projectedArguments = !KotlinJvmBoxedTypes.hasGeneratedDeclaration(root, target)) { values ->
                 code.add(values[0]).add("!!.")
                 code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
                 code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
@@ -1386,7 +1399,7 @@ internal class MethodBodyWriter(
             kind == InvokeKind.STATIC -> {
                 if (staticProjection != null) {
                     code.attachReference(ClassNodeRef(staticProjection.ownerName))
-                    code.add(imports.staticOwner(staticProjection.ownerName))
+                    code.add(imports.aliasedClass(staticProjection.ownerName))
                 } else emitClassName(target.declaringType)
             }
             kind == InvokeKind.SUPER -> code.add("super")
@@ -1559,17 +1572,23 @@ internal class MethodBodyWriter(
     private fun emitArgList(insn: Instruction, firstArgIndex: Int, preserveReferenceTypes: Boolean = false) {
         code.add("(")
         var emitted = 0
+        val projectedWrapper = insn is InvokeInstruction && !KotlinJvmBoxedTypes.hasGeneratedDeclaration(root, insn.methodRef)
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
             val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
             val argument = insn.getArg(i)
-            emitArgument(argument, expectedType, preserveReferenceTypes)
+            emitArgument(argument, expectedType, preserveReferenceTypes, projectedWrapper)
             emitted++
         }
         code.add(")")
     }
 
-    private fun emitArgument(argument: Operand, expectedType: IrType?, preserveReferenceTypes: Boolean = false) {
+    private fun emitArgument(argument: Operand, expectedType: IrType?, preserveReferenceTypes: Boolean = false, projectedWrapper: Boolean = false) {
+        if (projectedWrapper && expectedType != null && KotlinJvmBoxedTypes.needsProjection(expectedType)) {
+            emitOperand(argument, KotlinPrec.AS)
+            code.add(" as ").add(types.renderJvmProjection(expectedType)).add("?")
+            return
+        }
         if (expectedType != null && isReferenceType(expectedType) &&
             (preserveReferenceTypes || isNullOperand(argument))
         ) {
@@ -1583,22 +1602,29 @@ internal class MethodBodyWriter(
     }
 
     private fun emitInvokeExpression(insn: Instruction) {
-        val invoke = insn as? InvokeInstruction
-        val ref = invoke?.methodRef
-        // Kotlin projects these Java factory results to Int!/Char!, while source declarations still
-        // retain Integer/Character. A reference cast reconciles the spelling without unboxing/reboxing
-        // (which could change identity). Only these non-null factories qualify; arbitrary wrapper
-        // returns may be null and must not acquire a throwing non-null cast.
-        val boxedFactory = invoke?.invokeKind == InvokeKind.STATIC && ref?.name == "valueOf" &&
-            ref.returnType == ref.declaringType &&
-            (ref.declaringType == IrType.objectType("java.lang.Integer") ||
-                ref.declaringType == IrType.objectType("java.lang.Character"))
-        if (boxedFactory) code.add("(")
-        emitInvoke(insn)
-        if (boxedFactory) {
+        val target = (insn as? InvokeInstruction)?.methodRef
+        val result = target?.returnType?.takeIf {
+            insn.opcode != IrOpcode.CONSTRUCTOR && !KotlinJvmBoxedTypes.hasGeneratedDeclaration(root, target)
+        }
+        emitJvmReferenceResult(result) { emitInvoke(insn) }
+    }
+
+    private fun emitJvmFieldResult(insn: Instruction, emit: () -> Unit) {
+        val field = (insn as? FieldInstruction)?.fieldRef
+        val result = field?.type?.takeIf { !KotlinJvmBoxedTypes.hasGeneratedField(root, field) }
+        emitJvmReferenceResult(result, emit)
+    }
+
+    private fun emitJvmReferenceResult(type: IrType?, emit: () -> Unit) {
+        // Java wrapper descriptors appear as primitive-facing platform types in Kotlin. Nullable
+        // reference casts reconcile that spelling without unboxing/reboxing or copying wrapper arrays.
+        val projected = type != null && KotlinJvmBoxedTypes.needsProjection(type)
+        if (projected) code.add("(")
+        emit()
+        if (projected) {
             code.add(" as ")
-            emitTypeRef(ref.returnType)
-            code.add(")")
+            emitTypeRef(type!!)
+            code.add("?)")
         }
     }
 

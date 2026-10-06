@@ -26,15 +26,15 @@ internal object KotlinLiterals {
     private const val CANONICAL_FLOAT_NAN: Int = 0x7fc00000
     private const val CANONICAL_DOUBLE_NAN: Long = 0x7ff8000000000000L
 
-    fun format(op: LiteralOperand): String {
+    fun format(op: LiteralOperand, builtinName: (String) -> String = { it }): String {
         val v = op.value
         return when (op.type.primitiveKind()) {
             TypeKind.BOOLEAN -> if (v != 0L) "true" else "false"
             TypeKind.CHAR -> charLiteral(v.toInt())
             TypeKind.BYTE, TypeKind.SHORT, TypeKind.INT -> v.toInt().toString()
-            TypeKind.LONG -> longLiteral(v)
-            TypeKind.FLOAT -> floatLiteral(Float.fromBits(v.toInt()))
-            TypeKind.DOUBLE -> doubleLiteral(Double.fromBits(v))
+            TypeKind.LONG -> longLiteral(v, builtinName)
+            TypeKind.FLOAT -> floatLiteral(Float.fromBits(v.toInt()), builtinName)
+            TypeKind.DOUBLE -> doubleLiteral(Double.fromBits(v), builtinName)
             else -> {
                 if (op.type.isReferenceLike()) {
                     // TODO(N2): a *nonzero* reference-typed literal has no valid source form (it is a raw
@@ -49,7 +49,7 @@ internal object KotlinLiterals {
     }
 
     // Kotlin parses the sign separately: the positive magnitude of MIN_VALUE is out of Long range.
-    private fun longLiteral(value: Long): String = if (value == Long.MIN_VALUE) "Long.MIN_VALUE" else "${value}L"
+    private fun longLiteral(value: Long, builtinName: (String) -> String): String = if (value == Long.MIN_VALUE) "${builtinName("Long")}.MIN_VALUE" else "${value}L"
 
     fun stringLiteral(value: String): String {
         val sb = StringBuilder(value.length + 2)
@@ -88,30 +88,32 @@ internal object KotlinLiterals {
      * reconstructed exactly with `Float.fromBits`, since Kotlin has no hex-float literal and
      * `Float.toString` is platform-unspecified.
      */
-    private fun floatLiteral(f: Float): String {
+    private fun floatLiteral(f: Float, builtinName: (String) -> String): String {
+        val owner = builtinName("Float")
         when {
             // A non-canonical NaN bit pattern must round-trip exactly (consistency with fromBits below),
             // so only the canonical NaN collapses to the named constant.
-            f.isNaN() -> return if (f.toRawBits() == CANONICAL_FLOAT_NAN) "Float.NaN" else "Float.fromBits(${f.toRawBits()})"
-            f == Float.POSITIVE_INFINITY -> return "Float.POSITIVE_INFINITY"
-            f == Float.NEGATIVE_INFINITY -> return "Float.NEGATIVE_INFINITY"
+            f.isNaN() -> return if (f.toRawBits() == CANONICAL_FLOAT_NAN) "$owner.NaN" else "$owner.fromBits(${f.toRawBits()})"
+            f == Float.POSITIVE_INFINITY -> return "$owner.POSITIVE_INFINITY"
+            f == Float.NEGATIVE_INFINITY -> return "$owner.NEGATIVE_INFINITY"
         }
-        if (f == 0.0f) return if (f.toRawBits() == 0) "0.0f" else "Float.fromBits(${f.toRawBits()})"
+        if (f == 0.0f) return if (f.toRawBits() == 0) "0.0f" else "$owner.fromBits(${f.toRawBits()})"
         val asLong = f.toLong()
         if (asLong in FLOAT_EXACT_LONG_RANGE && asLong.toFloat() == f) return "$asLong.0f"
-        return "Float.fromBits(${f.toRawBits()})"
+        return "$owner.fromBits(${f.toRawBits()})"
     }
 
-    private fun doubleLiteral(d: Double): String {
+    private fun doubleLiteral(d: Double, builtinName: (String) -> String): String {
+        val owner = builtinName("Double")
         when {
-            d.isNaN() -> return if (d.toRawBits() == CANONICAL_DOUBLE_NAN) "Double.NaN" else "Double.fromBits(${longLiteral(d.toRawBits())})"
-            d == Double.POSITIVE_INFINITY -> return "Double.POSITIVE_INFINITY"
-            d == Double.NEGATIVE_INFINITY -> return "Double.NEGATIVE_INFINITY"
+            d.isNaN() -> return if (d.toRawBits() == CANONICAL_DOUBLE_NAN) "$owner.NaN" else "$owner.fromBits(${longLiteral(d.toRawBits(), builtinName)})"
+            d == Double.POSITIVE_INFINITY -> return "$owner.POSITIVE_INFINITY"
+            d == Double.NEGATIVE_INFINITY -> return "$owner.NEGATIVE_INFINITY"
         }
-        if (d == 0.0) return if (d.toRawBits() == 0L) "0.0" else "Double.fromBits(${longLiteral(d.toRawBits())})"
+        if (d == 0.0) return if (d.toRawBits() == 0L) "0.0" else "$owner.fromBits(${longLiteral(d.toRawBits(), builtinName)})"
         val asLong = d.toLong()
         if (asLong in DOUBLE_EXACT_LONG_RANGE && asLong.toDouble() == d) return "$asLong.0"
-        return "Double.fromBits(${longLiteral(d.toRawBits())})"
+        return "$owner.fromBits(${longLiteral(d.toRawBits(), builtinName)})"
     }
 
     private fun IrType.primitiveKind(): TypeKind? = (this as? IrType.Primitive)?.kind

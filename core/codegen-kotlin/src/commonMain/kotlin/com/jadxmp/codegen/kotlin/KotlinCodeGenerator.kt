@@ -579,7 +579,7 @@ class KotlinCodeGenerator {
                     code.add(KotlinModifiers.visibility(field.accessFlags))
                     code.add("var ")
                     emitPropertyNameAndType(cls, field)
-                    code.add(" = ").add(KotlinLiterals.format(LiteralOperand(0L, field.type)))
+                    code.add(" = ").add(KotlinLiterals.format(LiteralOperand(0L, field.type), imports::builtinName))
                 }
                 !isFinal && nullability.fieldIsNullable(field) -> {
                     code.add(KotlinModifiers.visibility(field.accessFlags)).add("var ")
@@ -634,7 +634,7 @@ class KotlinCodeGenerator {
                 field.constValue != null
 
         private fun renderFieldConst(const: IrFieldConst): String = when (const) {
-            is IrFieldConst.Primitive -> KotlinLiterals.format(LiteralOperand(const.bits, const.type))
+            is IrFieldConst.Primitive -> KotlinLiterals.format(LiteralOperand(const.bits, const.type), imports::builtinName)
             is IrFieldConst.Str -> KotlinLiterals.stringLiteral(const.value)
         }
 
@@ -740,7 +740,7 @@ class KotlinCodeGenerator {
             }
 
             val methodNames = NameGenerator()
-            imports.reserveStaticAliases(methodNames)
+            imports.reserveAliases(methodNames)
             val paramNames = resolveParamNames(method, methodNames)
             // `equals(Object)` must be rendered `equals(other: Any?)` to actually override
             // `Any.equals(other: Any?)`; a non-null `Any` parameter overrides nothing and won't compile.

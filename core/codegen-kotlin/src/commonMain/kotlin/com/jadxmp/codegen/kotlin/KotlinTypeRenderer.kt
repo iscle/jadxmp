@@ -46,10 +46,21 @@ internal class KotlinTypeRenderer(
 
     /** The class name (short or FQN) for [type], without generics; also registers the import. */
     fun classNameOf(type: IrType): String = when (type) {
-        is IrType.Object -> if (type.isRootObject) "Any" else KotlinIdentifiers.sanitizeQualified(imports.useClass(aliasedClassName(type.className)))
+        is IrType.Object -> if (type.isRootObject) "Any" else objectName(type.className)
         is IrType.ArrayType -> render(type) // an array's "class" is the array type itself in Kotlin
         else -> render(type)
     }
+
+    /** Kotlin's view of an external Java descriptor, retaining wrapper/array nulls without reboxing. */
+    fun renderJvmProjection(type: IrType): String = when {
+        KotlinJvmBoxedTypes.isWrapper(type) -> imports.aliasedClass(KotlinJvmBoxedTypes.projectedName(type)!!)
+        type is IrType.ArrayType && type.element !is IrType.Primitive -> "Array<${renderJvmProjection(type.element)}?>"
+        else -> render(type)
+    }
+
+    private fun objectName(className: String): String =
+        if (className in KotlinJvmBoxedTypes.aliasedOwners) imports.aliasedClass(className)
+        else KotlinIdentifiers.sanitizeQualified(imports.useClass(aliasedClassName(className)))
 
     private fun renderArray(type: IrType.ArrayType): String {
         val element = type.element
@@ -64,7 +75,7 @@ internal class KotlinTypeRenderer(
 
     private fun renderObject(type: IrType.Object): String {
         if (type.isRootObject) return "Any"
-        val name = KotlinIdentifiers.sanitizeQualified(imports.useClass(aliasedClassName(type.className)))
+        val name = objectName(type.className)
         if (type.generics.isNotEmpty()) {
             return name + type.generics.joinToString(", ", "<", ">") { render(it) }
         }
@@ -116,7 +127,7 @@ internal class KotlinTypeRenderer(
         return "Int"
     }
 
-    private fun primitiveName(kind: TypeKind): String = when (kind) {
+    private fun primitiveName(kind: TypeKind): String = imports.builtinName(when (kind) {
         TypeKind.BOOLEAN -> "Boolean"
         TypeKind.CHAR -> "Char"
         TypeKind.BYTE -> "Byte"
@@ -127,7 +138,7 @@ internal class KotlinTypeRenderer(
         TypeKind.DOUBLE -> "Double"
         TypeKind.VOID -> "Unit"
         TypeKind.OBJECT, TypeKind.ARRAY -> "Any"
-    }
+    })
 
     private fun primitiveArrayName(kind: TypeKind): String = when (kind) {
         TypeKind.BOOLEAN -> "BooleanArray"
