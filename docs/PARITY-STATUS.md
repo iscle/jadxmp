@@ -3,16 +3,22 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
-## Current expanded measurement (engine `51e11d1`)
+## Current expanded measurement (engine `2ea7e4d`)
 
-[Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37421011776) completed the JVM,
+[Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37423333166) completed the JVM,
 JS and Wasm engine tests and all accuracy reports against the unchanged original jadx pin.
+All four desktop packaging jobs and the web build/deployment also succeeded; this verifies
+the build workflow, not interactive behavior of the packaged applications.
 The metadata-free report contains all **612 input rows**, including original failures and
 unsupported extractions. Of 431 eligible inputs, Java compiles **292** and Kotlin **231**;
 rebuilt checks pass for **70/112** Java and **38/112** Kotlin cases. The other 319 eligible
 inputs have no evaluated original check. **137 Java reference-better cases remain**.
 
-Compared with the complete `5942949` report, the only measured signal change is Kotlin
+All 612 rows have unchanged provenance, classifications and accuracy signals compared with
+`51e11d1`. The public mutable field ABI repair has targeted execution coverage, including an
+unchanged precompiled Java caller, but adds no compilation or check gains in this expanded report.
+
+Between the complete `5942949` and `51e11d1` reports, the only measured signal change is Kotlin
 `others/TestWrongCode2.java`: compilation fails before the constructor/name-collision fix and
 succeeds afterward, with warnings. This fixture has no evaluated original check. Its
 `CONFLICTING_OVERLOADS` suppression warning explicitly says future compiler behavior is not
@@ -300,7 +306,7 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Expanded upstream round trips expose 137 Java reference-better cases, with only 70 Java and
-   38 Kotlin passing rebuilt checks out of 112 passing originals at engine `51e11d1`. These failures,
+   38 Kotlin passing rebuilt checks out of 112 passing originals at engine `2ea7e4d`. These failures,
    unsupported extractions and compiler profiles remain unresolved. The smali gate still measures
    no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, typed array access,
