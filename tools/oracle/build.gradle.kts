@@ -56,7 +56,7 @@ dependencies {
 
     implementation(projects.core.pipeline) // Preserve pipeline cancellation in failure-isolated measurement.
     testImplementation(projects.core.codegenKotlin)
-    testImplementation(projects.core.inputJvm)
+    implementation(projects.core.inputJvm) // Explicit declaration-only classpath measurement profile.
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -145,6 +145,7 @@ tasks.register<JavaExec>("upstreamJavaRoundTrips") {
     maxHeapSize = "2g"
     systemProperty("jadxmp.upstream.report", layout.buildDirectory.file("reports/upstream-java-roundtrips.tsv").get().asFile.absolutePath)
     System.getProperty("jadxmp.upstream.filter")?.let { systemProperty("jadxmp.upstream.filter", it) }
+    System.getProperty("jadxmp.upstream.metadata")?.let { systemProperty("jadxmp.upstream.metadata", it) }
     outputs.upToDateWhen { false }
     notCompatibleWithConfigurationCache("measurement must verify the pinned checkout and use fresh decompilers")
 }

@@ -3,6 +3,13 @@ package com.jadxmp.oracle
 import com.jadxmp.api.Decompiler as JadxmpEngine
 import com.jadxmp.api.DecompilerArgs
 import com.jadxmp.api.OutputFormat
+import com.jadxmp.api.plugin.PassPlugin
+import com.jadxmp.api.plugin.PluginRegistry
+import com.jadxmp.ir.generics.GenericAttributes
+import com.jadxmp.ir.generics.GenericDeclarationIndex
+import com.jadxmp.ir.node.IrRoot
+import com.jadxmp.pipeline.pass.PassContext
+import com.jadxmp.pipeline.pass.RootPass
 
 /**
  * The **Kotlin-output side** of jadxmp for the self-measurement scoreboard.
@@ -17,7 +24,7 @@ import com.jadxmp.api.OutputFormat
  * contract (reference vs candidate), and Kotlin output has no reference side (jadx has no production Kotlin
  * backend). This is pure self-measurement, so it exposes a standalone [decompileKotlin] instead.
  */
-class KotlinJadxmpDecompiler {
+class KotlinJadxmpDecompiler(private val externalDeclarations: GenericDeclarationIndex? = null) {
 
     val name: String = "jadxmp-kotlin"
 
@@ -36,7 +43,18 @@ class KotlinJadxmpDecompiler {
      * (never null). The scoreboard's `!= null` wiring probe therefore reads "wired".
      */
     fun decompileKotlin(name: String, bytes: ByteArray): DecompilationResult {
-        val engine = JadxmpEngine(DecompilerArgs(outputFormat = OutputFormat.KOTLIN))
+        val defaults = PluginRegistry.default()
+        val plugins = if (externalDeclarations == null) emptyList() else listOf(object : PassPlugin {
+            override val id = "external-declaration-catalog"
+            override fun rootPasses() = listOf(object : RootPass {
+                override val name = "ExternalDeclarationCatalog"
+                override fun run(root: IrRoot, context: PassContext) {
+                    root[GenericAttributes.EXTERNAL_DECLARATIONS] = externalDeclarations
+                }
+            })
+        })
+        val engine = JadxmpEngine(DecompilerArgs(outputFormat = OutputFormat.KOTLIN,
+            registry = PluginRegistry(defaults.inputPlugins, plugins)))
         engine.load(name, bytes)
         val result = engine.decompileAll()
         val classes = result.classes.map { DecompiledClass(it.fullName, it.code) }

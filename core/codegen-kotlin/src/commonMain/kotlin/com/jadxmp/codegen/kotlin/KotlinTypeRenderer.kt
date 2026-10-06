@@ -2,6 +2,7 @@ package com.jadxmp.codegen.kotlin
 
 import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.ClassNodeRef
+import com.jadxmp.ir.generics.GenericAttributes
 import com.jadxmp.ir.node.IrRoot
 import com.jadxmp.ir.type.IrType
 import com.jadxmp.ir.type.TypeKind
@@ -85,7 +86,11 @@ internal class KotlinTypeRenderer(
         // "unknown argument" rendering. This applies only in TYPE positions (via [render]); a bare-name
         // position (a static receiver, a constructor callee, `X::class`) goes through [classNameOf], which
         // never adds projections, because `List<*>.of(..)` / `Map<*, *>(..)` are illegal there.
-        val requiredArgs = KOTLIN_MAPPED_GENERIC_ARITY[type.className]
+        // Generated program declarations still use erased source headers. A same-named library
+        // entry must never make their references generic; external metadata is source-only input.
+        val requiredArgs = if (root?.findClass(type.className) != null) 0 else
+            root?.get(GenericAttributes.EXTERNAL_DECLARATIONS)?.findClass(type.className)?.parameters?.size
+                ?: KOTLIN_MAPPED_GENERIC_ARITY[type.className]
         if (requiredArgs != null && requiredArgs > 0) {
             return name + (1..requiredArgs).joinToString(", ", "<", ">") { "*" }
         }

@@ -23,9 +23,10 @@ internal object UpstreamRoundTripReport {
         }
     }
 
-    fun summary(rows: List<UpstreamRoundTripRow>, discovered: Int, filter: String?): String = buildString {
+    fun summary(rows: List<UpstreamRoundTripRow>, discovered: Int, filter: String?, metadataEvidence: List<String> = emptyList()): String = buildString {
         appendLine("=== Expanded upstream Java round-trip measurement ===")
         appendLine("status=COMPLETE")
+        append(metadataHeader(metadataEvidence))
         appendLine("baseline=${ReferenceDecompiler.DEFAULT_JADX_VERSION}; javac release=11; AssertJ=3.27.7; D8=9.1.31")
         appendLine("discovered=$discovered selected=${rows.size} scope=${filter ?: "ALL"}")
         appendLine("This expands measured coverage; it does not replace or relax the existing accuracy gates.")
@@ -45,6 +46,9 @@ internal object UpstreamRoundTripReport {
         appendLine("Compilation and shared passing signals are not whole-corpus semantic equivalence.")
     }
 
+    fun metadataHeader(evidence: List<String>): String =
+        evidence.ifEmpty { listOf("metadata_profile=none") }.joinToString("\n", postfix = "\n", transform = ::cell)
+
     private fun cell(value: String): String = value.replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
 }
 
@@ -54,6 +58,7 @@ internal class UpstreamRoundTripJournal(
     private val discovered: Int,
     selected: List<String>,
     private val filter: String?,
+    private val metadataEvidence: List<String> = emptyList(),
 ) {
     private val expected = selected.toSet()
     private val rows = linkedMapOf<String, UpstreamRoundTripRow>()
@@ -69,6 +74,7 @@ internal class UpstreamRoundTripJournal(
         require(selected.isNotEmpty() && expected.size == selected.size) { "Empty or duplicate fixture selection" }
         report.parentFile?.mkdirs()
         report.writeText("status=INCOMPLETE discovered=$discovered selected=${selected.size}\n" +
+            UpstreamRoundTripReport.metadataHeader(metadataEvidence) +
             UpstreamRoundTripReport.table(emptyList()))
     }
 
@@ -80,7 +86,7 @@ internal class UpstreamRoundTripJournal(
 
     fun finish(): String {
         check(rows.keys == expected) { "Incomplete fixture measurement: ${rows.size}/${expected.size}" }
-        val summary = UpstreamRoundTripReport.summary(rows.values.toList(), discovered, filter)
+        val summary = UpstreamRoundTripReport.summary(rows.values.toList(), discovered, filter, metadataEvidence)
         val completed = File.createTempFile("upstream-complete-", ".tsv", report.absoluteFile.parentFile)
         try {
             completed.writeText(summary + "\n" + UpstreamRoundTripReport.table(rows.values.toList()))
@@ -109,9 +115,14 @@ fun main() {
     val filter = System.getProperty("jadxmp.upstream.filter")?.trim()?.takeIf { it.isNotEmpty() }
     val selected = all.filter { filter == null || it.relativeTo(base).invariantSeparatorsPath.contains(filter) }
     check(selected.isNotEmpty()) { "No original source fixtures selected by $filter" }
+    val profile = when (val requested = System.getProperty("jadxmp.upstream.metadata", "none")) {
+        "none" -> null
+        ClasspathMetadataProfile.ID -> ClasspathMetadataProfile.load(UpstreamJavaInventory.fixtureClasspath)
+        else -> error("Unknown metadata profile: $requested")
+    }
     val journal = UpstreamRoundTripJournal(report, all.size,
-        selected.map { it.relativeTo(base).invariantSeparatorsPath }, filter)
-    val runner = UpstreamJavaRoundTrips()
+        selected.map { it.relativeTo(base).invariantSeparatorsPath }, filter, profile?.evidence.orEmpty())
+    val runner = UpstreamJavaRoundTrips(kotlin = KotlinJadxmpDecompiler(profile?.index)::decompileKotlin)
     selected.forEachIndexed { index, file ->
         val name = file.relativeTo(base).invariantSeparatorsPath
         println("Measuring ${index + 1}/${selected.size}: $name")

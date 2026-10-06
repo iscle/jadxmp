@@ -36,3 +36,32 @@ Validation includes all-target parser/model/provider tests, malformed/deep/wide 
 isolation, and actual javac class-file ingestion. The native catalog test checks generic bounds, erased
 identities, method shadowing, arrays, external nested-scope rejection and original null/identity execution.
 These prove the metadata foundation, not complete generic source reconstruction or dependency discovery.
+
+## Explicit Kotlin classpath profile
+
+Kotlin raw reference types can consult a supplied validated catalog for their generic arity, rendering
+unknown parameters as stars (for example `AbstractFloatAssert<*>`). This applies to type positions only;
+constructor names, static owners and class literals remain bare names. Generated program definitions take
+precedence and remain erased while executable generic reconstruction is disabled. Stars do not invent
+compatible arguments for generic setters or infer a source contract; unsupported calls can still fail to
+compile. External declarations never become generated program classes.
+
+The expanded upstream runner defaults to `metadata_profile=none`, preserving its existing measurement
+configuration. An opt-in profile uses the exact AssertJ JAR already on the original/rebuilt compilation
+classpath:
+
+```bash
+./gradlew :tools:oracle:upstreamJavaRoundTrips \
+  -Djadxmp.upstream.metadata=fixture-classpath-v1
+```
+
+The report records the profile consumer (candidate Kotlin only), artifact name/SHA-256/byte count,
+class admission/rejection diagnostics and skipped versioned/module entries. Reference Java and candidate
+Java remain unchanged. Reports using different profiles are separate measurements; profile-assisted gains
+must not be presented as improvements to the metadata-free baseline.
+
+The JVM-only tool hashes the same bounded archive bytes it parses and uses declaration readers only.
+Limits are 16 explicit JARs, 20,000 archive entries, 4 MiB per expanded entry (including skipped resources),
+128 MiB per archive and total expanded data, 200,000 members and 16 million aggregate signature characters.
+No dependency discovery, reflection-based type reconstruction or fixture-specific declaration stubs are
+used. Unsupported metadata remains visible in the report and absent from the validated index.
