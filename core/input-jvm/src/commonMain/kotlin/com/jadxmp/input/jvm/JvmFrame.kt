@@ -5,7 +5,7 @@ import com.jadxmp.io.ByteReaderException
 /**
  * Bounded frame primitives for later JVM abstract execution (JVMS 4.10 and 6.5). Mutations validate
  * before changing state; snapshots own independent local/stack storage. This does not perform
- * control-flow merges, hierarchy checks, instruction transfer, or StackMapTable verification.
+ * hierarchy checks, instruction transfer, or StackMapTable verification.
  */
 internal class JvmFrame(
     val maxLocals: Int,
@@ -108,6 +108,31 @@ internal class JvmFrame(
         for (index in locals.indices) copy.locals[index] = locals[index]
         copy.operands.addAll(operands)
         copy.stackWords = stackWords
+    }
+
+    /** Storage/scan cost used by bounded control-flow analysis; logical stack entries, not words. */
+    val stateCells: Int get() = maxLocals + operands.size
+
+    /**
+     * Primitive control-flow join. Stack shapes/types must agree exactly; incompatible locals
+     * become unusable. Reference ancestry joins remain a separate, unsupported analysis layer.
+     * Validate the stack first so a rejected join never partly changes its destination.
+     */
+    fun mergeFrom(other: JvmFrame): Boolean {
+        if (maxLocals != other.maxLocals || maxStack != other.maxStack) invalid("incompatible frame bounds")
+        if (operands != other.operands) invalid("incompatible operand stacks at control-flow join")
+        var changed = false
+        for (index in locals.indices) {
+            if (locals[index] != other.locals[index] && locals[index] != JvmLocalSlot.Top) {
+                invalidateLocal(index)
+                changed = true
+            }
+        }
+        if (other.thisUninitialized && !thisUninitialized) {
+            thisUninitialized = true
+            changed = true
+        }
+        return changed
     }
 
     /**

@@ -22,15 +22,19 @@ structurally decoded instructions are not yet normalized decompiler input.
 
 Frame primitives model typed logical stack values, wide local slots, stack permutations, independent
 snapshots, and constructor alias transitions. They validate local and stack bounds without depending
-on the IR or pipeline. A whole-method frame analyzer, type merges and StackMapTable checks are still
-pending; these primitives do not constitute a bytecode verifier. The proposed
+on the IR or pipeline. Primitive joins conservatively invalidate incompatible locals and require
+matching stack shapes/types. Reference/exception analysis and StackMapTable checks are still
+pending; these primitives do not constitute a complete bytecode verifier. The proposed
 stages and shared input-contract prerequisites are recorded in [docs/JVM-INPUT.md](../../docs/JVM-INPUT.md).
 
-The first register normalizer handles straight-line primitive methods, eagerly producing the shared
-CodeReader model. It copies high-register parameters into contiguous JVM local slots and preserves
-local-load snapshots, category-two values and floating-point constant bits. Unsupported control flow,
-handlers, calls and reference operations produce explicit method failures. JVM tests compare normalized-register execution with real javac
-methods for overflow, mixed wide parameters, post-increment, signed zero and NaN; this is a bounded
+The register normalizer handles primitive methods with integer branches, loops and dense/sparse
+switches, eagerly producing the shared CodeReader model. It copies high-register parameters into contiguous JVM local slots and preserves
+local-load snapshots, category-two values and floating-point constant bits. Bounded block-level
+frame analysis precedes one-time emission; branch targets skip the parameter prologue and resolve
+removed NOP/pop instructions. Switch default destinations remain explicit. Handlers, calls, reference
+operations, legacy subroutines and unreachable bytecode regions produce explicit method failures.
+JVM tests compare normalized-register execution with real javac methods for branches, loops,
+switches, overflow, mixed wide parameters, post-increment, signed zero and NaN; this is a bounded
 normalization slice, not general JVM decompilation or complete bytecode verification.
 Direct JVM class-byte tests also verify implicit byte/char/short return narrowing and boolean low-bit
 masking, which must be explicit in normalized register instructions.

@@ -3,12 +3,14 @@ package com.jadxmp.input.jvm
 import com.jadxmp.input.CodeReader
 import com.jadxmp.input.DebugInfo
 import com.jadxmp.input.Instruction
+import com.jadxmp.input.InlineSwitchPayload
+import com.jadxmp.input.InstructionPayload
 import com.jadxmp.input.Opcode
 import com.jadxmp.input.TryBlock
 import com.jadxmp.io.ByteReaderException
 
 /**
- * First native lowering slice: straight-line primitive methods only. Eagerly validates before
+ * Native lowering slice for primitive methods with normal control flow. Eagerly validates before
  * returning a reader, so its frame-size getter is safe during model construction. Unsupported
  * instructions/handlers fail the method explicitly; nothing is silently translated as a NOP.
  */
@@ -19,7 +21,8 @@ internal object JvmPrimitiveNormalizer {
         descriptor: JvmMethodDescriptor,
         constants: JvmConstantPool,
         code: JvmCodeAttribute,
-    ): CodeReader = Lowering(owner, member, descriptor, constants, code).run()
+        limits: JvmAnalysisLimits = JvmAnalysisLimits(),
+    ): CodeReader = Lowering(owner, member, descriptor, constants, code, limits).run()
 
     private class Lowering(
         private val owner: String,
@@ -27,6 +30,7 @@ internal object JvmPrimitiveNormalizer {
         private val descriptor: JvmMethodDescriptor,
         private val constants: JvmConstantPool,
         private val code: JvmCodeAttribute,
+        private val limits: JvmAnalysisLimits,
     ) {
         private val isStatic = member.accessFlags and 8 != 0
         private val incomingWords = descriptor.argumentSlots + if (isStatic) 0 else 1
@@ -37,11 +41,11 @@ internal object JvmPrimitiveNormalizer {
         private val scratchBase = stackBase + code.maxStack
         private val parameterBase = scratchBase + 4
         private val registerCount = parameterBase + incomingWords
-        private val frame = JvmFrame(code.maxLocals, code.maxStack)
+        private var frame = JvmFrame(code.maxLocals, code.maxStack)
         private val referenceTypes = mutableMapOf<String, JvmFrameValue.Reference>()
         private val numericConstants = mutableMapOf<Int, Constant>()
-        private val instructions = mutableListOf<Instruction>()
-        private var terminated = false
+        private val instructions = mutableListOf<JvmNormalizedInstruction>()
+        private var emitting = true
         private lateinit var raw: JvmInstruction
 
         fun run(): CodeReader {
@@ -61,22 +65,38 @@ internal object JvmPrimitiveNormalizer {
                 seedParameter(local, value)
                 local += value.words
             }
-            for (instruction in decoded) {
-                raw = instruction
-                if (terminated) fail("instructions after return need control-flow analysis")
-                try {
-                    lower()
-                } catch (error: ByteReaderException) {
-                    throw ByteReaderException("JVM ${member.name}${member.descriptor} at ${raw.offset}: ${error.message}")
-                }
+            val flow = JvmPrimitiveFlow(decoded)
+            emitting = false
+            val incoming = flow.analyze(frame, limits, ::transfer)
+            emitting = true
+            val positions = mutableMapOf<Int, Int>()
+            flow.emit(incoming) { working, instruction ->
+                // Entry copies have already been emitted. Even raw PC zero jumps into the body.
+                // A removed NOP/pop maps to the next emitted instruction, not an absent ordinal.
+                positions[instruction.offset] = instructions.size
+                transfer(working, instruction)
             }
-            if (!terminated) fail("method falls through without a return")
-            return PrimitiveCodeReader(registerCount, code.codeOffset, instructions.toList())
+            fun position(offset: Int): Int {
+                val result = positions[offset] ?: fail("missing branch target at bytecode $offset")
+                if (result >= instructions.size) fail("branch target has no emitted instruction at bytecode $offset")
+                return result
+            }
+            return PrimitiveCodeReader(registerCount, code.codeOffset, instructions.map { it.resolveTargets(::position) })
+        }
+
+        private fun transfer(working: JvmFrame, instruction: JvmInstruction) {
+            frame = working
+            raw = instruction
+            try {
+                lower()
+            } catch (error: ByteReaderException) {
+                throw ByteReaderException("JVM ${member.name}${member.descriptor} at ${raw.offset}: ${error.message}")
+            }
         }
 
         private fun lower() {
             when (val opcode = raw.opcode) {
-                0x00 -> Unit // No branch/handler targets exist in this straight-line slice.
+                0x00 -> Unit // The position map redirects targets to the next emitted instruction.
                 in 0x02..0x08 -> constant(JvmFrameValue.IntValue, (opcode - 3).toLong())
                 0x09, 0x0a -> constant(JvmFrameValue.LongValue, (opcode - 9).toLong())
                 in 0x0b..0x0d -> constant(JvmFrameValue.FloatValue, (opcode - 0x0b).toFloat().toRawBits().toLong())
@@ -113,6 +133,24 @@ internal object JvmPrimitiveNormalizer {
                     JvmFrameValue.FloatValue, JvmFrameValue.FloatValue, JvmFrameValue.IntValue)
                 0x97, 0x98 -> binary(if (opcode == 0x97) Opcode.CMPL_DOUBLE else Opcode.CMPG_DOUBLE,
                     JvmFrameValue.DoubleValue, JvmFrameValue.DoubleValue, JvmFrameValue.IntValue)
+                in 0x99..0x9e -> {
+                    val value = pop(JvmFrameValue.IntValue)
+                    emit(ZERO_BRANCHES[opcode - 0x99], intArrayOf(value), target = (raw.operand as JvmOperand.Branch).target)
+                }
+                in 0x9f..0xa4 -> {
+                    val rhs = pop(JvmFrameValue.IntValue)
+                    val lhs = pop(JvmFrameValue.IntValue)
+                    emit(INTEGER_BRANCHES[opcode - 0x9f], intArrayOf(lhs, rhs), target = (raw.operand as JvmOperand.Branch).target)
+                }
+                0xa7, 0xc8 -> emit(Opcode.GOTO, target = (raw.operand as JvmOperand.Branch).target)
+                0xaa, 0xab -> {
+                    val key = pop(JvmFrameValue.IntValue)
+                    if (emitting) {
+                        val table = raw.operand as JvmOperand.Switch
+                        emit(Opcode.SWITCH, intArrayOf(key), payload = InlineSwitchPayload(
+                            table.cases.map { it.key }.toIntArray(), table.cases.map { it.target }.toIntArray(), table.defaultTarget))
+                    }
+                }
                 in 0xac..0xaf -> {
                     val type = TYPES[opcode - 0xac]
                     if (descriptor.returnType == "V") fail("value return in void method")
@@ -127,12 +165,10 @@ internal object JvmPrimitiveNormalizer {
                         "Z" -> emit(Opcode.AND_INT_LIT, intArrayOf(result, result), 1)
                     }
                     emit(Opcode.RETURN, intArrayOf(result))
-                    terminated = true
                 }
                 0xb1 -> {
                     if (descriptor.returnType != "V") fail("void return in value method")
                     emit(Opcode.RETURN_VOID)
-                    terminated = true
                 }
                 else -> fail("unsupported primitive normalization opcode 0x${opcode.toString(16)}")
             }
@@ -231,10 +267,13 @@ internal object JvmPrimitiveNormalizer {
             if (actual != expected) fail("expected $expected but found $actual")
         }
 
-        private fun emit(opcode: Opcode, registers: IntArray = intArrayOf(), literal: Long = 0) {
+        private fun emit(opcode: Opcode, registers: IntArray = intArrayOf(), literal: Long = 0,
+            target: Int = -1, payload: InstructionPayload? = null,
+        ) {
+            if (!emitting) return
             instructions += JvmNormalizedInstruction(instructions.size, code.codeOffset + raw.offset,
                 opcode, registers, literal, if (raw.wide) 0xc4 else raw.opcode,
-                JvmOpcodeNames.name(raw))
+                JvmOpcodeNames.name(raw), target, payload)
         }
 
         private fun move(type: JvmFrameValue) = when {
@@ -255,6 +294,9 @@ internal object JvmPrimitiveNormalizer {
         override val debugInfo: DebugInfo? get() = null
         override fun visitInstructions(visitor: (Instruction) -> Unit) = instructions.forEach(visitor)
     }
+
+    private val ZERO_BRANCHES = listOf(Opcode.IF_EQZ, Opcode.IF_NEZ, Opcode.IF_LTZ, Opcode.IF_GEZ, Opcode.IF_GTZ, Opcode.IF_LEZ)
+    private val INTEGER_BRANCHES = listOf(Opcode.IF_EQ, Opcode.IF_NE, Opcode.IF_LT, Opcode.IF_GE, Opcode.IF_GT, Opcode.IF_LE)
 
     private data class Constant(val type: JvmFrameValue, val bits: Long)
     private data class Conversion(val opcode: Opcode, val from: JvmFrameValue, val to: JvmFrameValue)

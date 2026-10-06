@@ -136,7 +136,7 @@ class JvmPrimitiveNormalizerTest {
     }
 
     @Test fun rejectsUnsupportedShapesWithoutReturningPartialReader() {
-        for (code in listOf(bytes(0xa7, 0, 0), bytes(0x01, 0xb0), bytes(0xb8, 0, 1, 0xb1),
+        for (code in listOf(bytes(0xa8, 0, 0), bytes(0x01, 0xb0), bytes(0xb8, 0, 1, 0xb1),
             bytes(0x2a, 0xb0), bytes(0xbb, 0, 1, 0xb0))) {
             assertFailsWith<ByteReaderException> { fixture("()V", 1, 4, code) }
         }

@@ -15,6 +15,29 @@ class JvmFrameTest {
     private val long = JvmFrameValue.LongValue
     private val double = JvmFrameValue.DoubleValue
 
+    @Test fun mergesPrimitiveLocalsConservativelyWithoutLeavingOrphanedWideWords() {
+        val left = JvmFrame(3, 2)
+        left.store(0, long)
+        left.store(2, a)
+        left.push(JvmFrameValue.IntValue)
+        val right = left.snapshot()
+        right.store(1, JvmFrameValue.IntValue)
+        assertTrue(left.mergeFrom(right))
+        assertEquals(JvmLocalSlot.Top, left.slot(0))
+        assertEquals(JvmLocalSlot.Top, left.slot(1))
+        assertEquals(a, left.local(2))
+        assertFalse(left.mergeFrom(right))
+        assertEquals(listOf(JvmFrameValue.IntValue), left.stack)
+    }
+
+    @Test fun rejectsIncompatibleStackMergesWithoutMutatingExistingState() {
+        val left = frame(listOf(JvmFrameValue.IntValue))
+        val before = left.stack
+        assertFailsWith<ByteReaderException> { left.mergeFrom(frame(listOf(JvmFrameValue.FloatValue))) }
+        assertFailsWith<ByteReaderException> { left.mergeFrom(frame(emptyList())) }
+        assertEquals(before, left.stack)
+    }
+
     @Test fun supportsAllTwelveDupFormsWithoutLosingValueIdentity() {
         val forms = listOf(
             Form(JvmStackOperation.DUP, listOf(a), listOf(a, a)),

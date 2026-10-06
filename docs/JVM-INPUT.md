@@ -3,10 +3,11 @@
 The current `core:input-jvm` foundation parses class-file envelopes, constant pools, bounded Code
 attributes and raw JVM instructions. A separate frame-primitives batch adds typed stack/local
 storage and permutations, snapshots, and constructor alias transitions; it passed independent
-review. A straight-line primitive normalizer now produces the shared CodeReader model and has passed
-independent review. The module is not registered with `core:api`; general native JVM decompilation is
-incomplete. Whole-method frame analysis, general register lowering, and remaining input-contract
-changes below are **proposed, not implemented**.
+review. The primitive normalizer produces the shared CodeReader model; its straight-line slice has
+passed independent review. A bounded primitive control-flow extension has also passed independent
+review and JVM/JS/Wasm tests. The module is not registered with `core:api`; general native JVM decompilation is
+incomplete. Reference/exception frame analysis, general register lowering, and remaining
+input-contract changes below are **proposed, not implemented**.
 The fused-result and explicit inline-switch prerequisites have landed separately.
 
 The shared input contract now carries format-neutral `ClassNesting` and member modifiers. DEX
@@ -48,8 +49,20 @@ The implemented primitive normalizer validates eagerly before returning its Code
 its register count cannot trigger a deferred lowering failure. It supports primitive constants,
 loads/stores, iinc, stack permutations, arithmetic, conversions, comparisons and returns. Incoming
 parameters occupy the high-register bank; raw bytecode positions remain in instruction file offsets,
-while normalized instruction offsets are unique ordinals. Branches, handlers, calls, references and
-constructors currently produce explicit unsupported-method diagnostics.
+while normalized instruction offsets are unique ordinals. Integer branches, goto/goto_w, primitive
+joins/loops and both switch forms are implemented. Handlers, calls, reference operations,
+constructors, jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
+
+`JvmPrimitiveFlow` discovers basic blocks and computes their incoming frames with a worklist.
+The same primitive transfer functions validate analysis and emission; analysis emits nothing,
+and each block is emitted once after convergence. Logical stack types must agree exactly at joins;
+incompatible locals become unusable, including overlapping wide slots. Incoming parameter copies
+run once, while back edges to raw PC zero enter after that prologue. Original NOP/pop targets map
+to the next emitted instruction. Inline switches retain explicit case and default destinations.
+Dense retained frame storage is limited to 4,000,000 cells per method, including initial/working
+frame capacity; scan/transfer work is limited to 10,000,000 units. Exhaustion produces a method
+diagnostic. These limits avoid unbounded max_locals-by-block storage and repeated scans; snapshots
+are made at block boundaries, never for each instruction. StackMapTable validation remains pending.
 
 Reuse checked type/frame values by constant-pool entry or descriptor within each method/class,
 including future constructor initialization transitions. Repeated worklist visits must not rescan
@@ -165,6 +178,7 @@ exception types and identity, not only compiler acceptance.
    registration, native JVM corpus execution through both emitters, and the pinned differential gate.
 
 The frame-primitives slice is implemented and independently reviewed; straight-line primitive
-lowering is implemented and independently reviewed. The whole-method analyzer and general lowering
+lowering is implemented and independently reviewed. Primitive normal-flow analysis and lowering
+are implemented and independently reviewed. Reference/exception analysis and general lowering
 remain future work. Full native JVM support remains incomplete until the later stages and their
 runtime checks pass.
