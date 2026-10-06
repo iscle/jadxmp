@@ -6,8 +6,10 @@ package com.jadxmp.codegen
  * decimal expansion, without host floating-point arithmetic, formatting or platform libraries.
  *
  * Only the positive canonical quiet NaN is representable here; other NaN signs/payloads return null
- * so callers can diagnose lost bit identity. Infinities and canonical NaNs use constant arithmetic,
- * avoiding a potentially shadowed Float/Double owner. Ordinary expression literal policy is separate.
+ * so callers can diagnose lost bit identity. Infinities use constant arithmetic. Canonical NaNs use
+ * the platform's canonical constant: folding 0/0 produces a host-dependent NaN sign in K2. Callers
+ * must resolve its owner through their source-scope/import plan; the default fully qualified spelling
+ * is suitable only where its package root cannot be shadowed. Ordinary literal policy is separate.
  *
  * A call retains at most 128 base-10^9 limbs, performs at most 90 bounded limb multiplication passes
  * (each at most 128 limbs), and returns at most [MAX_SOURCE_LENGTH] characters. Emitters processing
@@ -16,28 +18,36 @@ package com.jadxmp.codegen
 object FloatingConstantLiteral {
     const val MAX_SOURCE_LENGTH: Int = 1078
 
-    fun float(bits: Int): String? {
+    fun float(bits: Int, ownerName: (String) -> String = { it }): String? {
         val fraction = bits and 0x007fffff
         val exponent = (bits ushr 23) and 0xff
         val negative = bits < 0
         if (exponent == 0xff) {
-            if (fraction != 0) return if (bits == 0x7fc00000) "(0.0f / 0.0f)" else null
+            if (fraction != 0) return if (bits == 0x7fc00000) canonicalNaN("java.lang.Float", ownerName) else null
             return if (negative) "(-1.0f / 0.0f)" else "(1.0f / 0.0f)"
         }
         val mantissa = if (exponent == 0) fraction.toLong() else (fraction or 0x00800000).toLong()
         return finite(mantissa, if (exponent == 0) -149 else exponent - 150, negative) + "f"
     }
 
-    fun double(bits: Long): String? {
+    fun double(bits: Long, ownerName: (String) -> String = { it }): String? {
         val fraction = bits and 0x000fffffffffffffL
         val exponent = ((bits ushr 52) and 0x7ff).toInt()
         val negative = bits < 0
         if (exponent == 0x7ff) {
-            if (fraction != 0L) return if (bits == 0x7ff8000000000000L) "(0.0 / 0.0)" else null
+            if (fraction != 0L) return if (bits == 0x7ff8000000000000L) canonicalNaN("java.lang.Double", ownerName) else null
             return if (negative) "(-1.0 / 0.0)" else "(1.0 / 0.0)"
         }
         val mantissa = if (exponent == 0) fraction else fraction or 0x0010000000000000L
         return finite(mantissa, if (exponent == 0) -1074 else exponent - 1075, negative)
+    }
+
+    private fun canonicalNaN(owner: String, resolve: (String) -> String): String {
+        val name = resolve(owner)
+        require(name.isNotEmpty() && name.length <= MAX_SOURCE_LENGTH - 4) {
+            "canonical NaN owner exceeds the floating constant source bound"
+        }
+        return "$name.NaN"
     }
 
     private fun finite(significand: Long, binaryExponent: Int, negative: Boolean): String {

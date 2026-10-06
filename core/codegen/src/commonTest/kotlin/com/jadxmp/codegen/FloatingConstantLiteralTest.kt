@@ -2,6 +2,7 @@ package com.jadxmp.codegen
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -18,9 +19,9 @@ class FloatingConstantLiteralTest {
         assertEquals("-1.5", FloatingConstantLiteral.double(-4613937818241073152L))
     }
 
-    @Test fun infinitiesAndOnlyPositiveCanonicalNanHavePureArithmeticConstants() {
-        assertEquals("(0.0f / 0.0f)", FloatingConstantLiteral.float(0x7fc00000))
-        assertEquals("(0.0 / 0.0)", FloatingConstantLiteral.double(0x7ff8000000000000L))
+    @Test fun infinitiesUseArithmeticAndCanonicalNanUsesAnExplicitOwner() {
+        assertEquals("java.lang.Float.NaN", FloatingConstantLiteral.float(0x7fc00000))
+        assertEquals("java.lang.Double.NaN", FloatingConstantLiteral.double(0x7ff8000000000000L))
         assertEquals("(1.0f / 0.0f)", FloatingConstantLiteral.float(0x7f800000))
         assertEquals("(-1.0f / 0.0f)", FloatingConstantLiteral.float(-0x800000))
         assertEquals("(1.0 / 0.0)", FloatingConstantLiteral.double(0x7ff0000000000000L))
@@ -63,4 +64,21 @@ class FloatingConstantLiteralTest {
             assertTrue(source.length <= FloatingConstantLiteral.MAX_SOURCE_LENGTH)
         }
     }
+    @Test fun canonicalNanOwnerIsResolvedLazilyAndCannotExceedTheSourceBound() {
+        val owners = mutableListOf<String>()
+        val resolve: (String) -> String = { owners.add(it); "Safe" + it.substringAfterLast('.') }
+        assertEquals("SafeFloat.NaN", FloatingConstantLiteral.float(0x7fc00000, resolve))
+        assertEquals("SafeDouble.NaN", FloatingConstantLiteral.double(0x7ff8000000000000L, resolve))
+        assertEquals(listOf("java.lang.Float", "java.lang.Double"), owners)
+        val forbidden: (String) -> String = { error("non-NaN must not resolve a symbol") }
+        assertEquals("1.0f", FloatingConstantLiteral.float(0x3f800000, forbidden))
+        assertEquals("(1.0 / 0.0)", FloatingConstantLiteral.double(0x7ff0000000000000L, forbidden))
+        assertNull(FloatingConstantLiteral.float(-0x400000, forbidden))
+        assertNull(FloatingConstantLiteral.double(-0x8000000000000L, forbidden))
+        assertFailsWith<IllegalArgumentException> {
+            FloatingConstantLiteral.float(0x7fc00000) { "x".repeat(FloatingConstantLiteral.MAX_SOURCE_LENGTH) }
+        }
+        assertFailsWith<IllegalArgumentException> { FloatingConstantLiteral.double(0x7ff8000000000000L) { "" } }
+    }
+
 }

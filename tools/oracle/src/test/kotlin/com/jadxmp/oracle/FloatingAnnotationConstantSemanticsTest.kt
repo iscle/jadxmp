@@ -62,4 +62,45 @@ class FloatingAnnotationConstantSemanticsTest {
             }
         }
     }
+    @Test fun resolvedCanonicalNanOwnersAvoidShadowedSourceNames() {
+        for (kotlin in listOf(false, true)) {
+            val resolve: (String) -> String = { owner ->
+                (if (kotlin) "Canonical" else "") + owner.substringAfterLast('.')
+            }
+            val f = FloatingConstantLiteral.float(0x7fc00000, resolve)!!
+            val d = FloatingConstantLiteral.double(0x7ff8000000000000L, resolve)!!
+            val declaration = DecompiledClass("owners.Values", if (kotlin) """
+                package owners
+                import java.lang.Float as CanonicalFloat
+                import java.lang.Double as CanonicalDouble
+                class java
+                class Float
+                class Double
+                @Retention(AnnotationRetention.RUNTIME)
+                annotation class Values(val java: Int = 0, val Float: Int = 0, val Double: Int = 0,
+                    val f: kotlin.Float = $f, val d: kotlin.Double = $d)
+                @Values(f = $f, d = $d) class Use
+            """.trimIndent() else """
+                package owners;
+                import java.lang.Float;
+                import java.lang.Double;
+                import java.lang.annotation.Retention;
+                import java.lang.annotation.RetentionPolicy;
+                class java {}
+                @Retention(RetentionPolicy.RUNTIME)
+                public @interface Values { float f() default $f; double d() default $d; }
+                @Values(f = $f, d = $d) class Use {}
+            """.trimIndent())
+            withCompiledClass(declaration, kotlin) { type ->
+                val use = type.classLoader.loadClass("owners.Use").declaredAnnotations.single { it.annotationClass.java == type }
+                val floatMember = type.getMethod("f")
+                val doubleMember = type.getMethod("d")
+                assertEquals(0x7fc00000, (floatMember.defaultValue as Float).toRawBits())
+                assertEquals(0x7fc00000, (floatMember.invoke(use) as Float).toRawBits())
+                assertEquals(0x7ff8000000000000L, (doubleMember.defaultValue as Double).toRawBits())
+                assertEquals(0x7ff8000000000000L, (doubleMember.invoke(use) as Double).toRawBits())
+            }
+        }
+    }
+
 }
