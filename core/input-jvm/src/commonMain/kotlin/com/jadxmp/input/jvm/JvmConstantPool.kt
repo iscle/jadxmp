@@ -26,7 +26,10 @@ internal sealed interface JvmConstant {
  * checks each expected tag without recursive expansion, so cycles cannot cause stack overflow.
  * Bootstrap indices are deliberately retained for validation against the class attributes later.
  */
-internal class JvmConstantPool private constructor(private val entries: List<JvmConstant?>) {
+internal class JvmConstantPool private constructor(
+    private val entries: List<JvmConstant?>,
+    val majorVersion: Int,
+) {
     // Each UTF8 entry is scanned at most once per semantic context. Repeating references to a
     // 65 KiB string must not turn a small class file into billions of validation steps.
     private val validated = IntArray(entries.size)
@@ -171,7 +174,7 @@ internal class JvmConstantPool private constructor(private val entries: List<Jvm
                     index++
                 }
             }
-            return JvmConstantPool(entries).also { it.validate(majorVersion) }
+            return JvmConstantPool(entries, majorVersion).also { it.validate(majorVersion) }
         }
     }
 }

@@ -55,8 +55,9 @@ goto/goto_w, primitive/reference joins/loops and both switch forms are implement
 local indexes), null constants and exact/null/Object reference returns preserve value identity.
 Null/reference joins retain the known type; distinct initialized references conservatively join
 at Object. Narrower return assignability that needs unavailable hierarchy information is diagnosed.
-Handlers, calls, casts, allocations, reference constant-pool operations,
-constructors, jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
+Native checkcast/instanceof and String/Class ldc/ldc_w now lower through the shared typed index
+contracts. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
+jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
 `JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.
 The same typed transfer functions validate analysis and emission; analysis emits nothing,
@@ -76,6 +77,23 @@ including future constructor initialization transitions. Repeated worklist visit
 long shared descriptors. Do not use an unbounded global cache. The primitive slice parses method
 descriptors once and caches numeric constants/reference frame types; extend the parser's hostile
 shared-string tests to the whole-method analyzer when that stage lands.
+
+The type-operation slice resolves supported constant-pool operands eagerly, caches them by index,
+and canonicalizes class descriptors/frame values by underlying UTF8 entry and the method's type
+intern table. A separate ten-million-unit per-method work budget charges index resolutions and
+unique referenced string lengths. Repeated instructions, worklist visits and aliased pool entries do
+not rescan long descriptors. Ldc category/tag checks include the version-49 minimum for loadable
+class constants ([JVMS 4.4-C](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.4)).
+
+Runtime tests compare original javac input and both rebuilt languages for cast/null/array identity,
+ClassCastException, integer instanceof consumers, string interning and class-literal identity.
+Target initialization remains deferred; deleting a referenced component class after compilation
+proves null casts/tests succeed without resolving it, while non-null operations retain the linkage
+error. Kotlin reference-array instanceof uses the exact array Class after a once-only operand
+capture and null branch, preserving [JVMS 6.5 semantics](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.instanceof).
+The pinned reference's removal of an unused throwing cast is explicitly measured separately from
+the candidate requirement to match original execution. This slice does not establish hierarchy
+verification, exception lowering, general native input parity or production readiness.
 
 ## Class-only adapter and facade boundary
 

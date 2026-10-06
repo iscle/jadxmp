@@ -43,7 +43,7 @@ internal object JvmRegisterNormalizer {
         private val registerCount = parameterBase + incomingWords
         private var frame = JvmFrame(code.maxLocals, code.maxStack)
         private val referenceTypes = mutableMapOf<String, JvmFrameValue.Reference>()
-        private val numericConstants = mutableMapOf<Int, Constant>()
+        private val constantOperands = JvmConstantOperands(constants, limits.maxConstantWork, ::reference)
         private val returnFrameType = if (descriptor.returnType == "V") null else valueType(descriptor.returnType)
         private val instructions = mutableListOf<JvmNormalizedInstruction>()
         private var emitting = true
@@ -154,6 +154,17 @@ internal object JvmRegisterNormalizer {
                     emit(if (opcode == 0xa5) Opcode.IF_EQ else Opcode.IF_NE, intArrayOf(lhs, rhs),
                         target = (raw.operand as JvmOperand.Branch).target)
                 }
+                0xc0, 0xc1 -> {
+                    val target = constantOperands.type((raw.operand as JvmOperand.Constant).index)
+                    val source = popReference().second
+                    if (opcode == 0xc0) {
+                        val destination = push(target.frameType)
+                        check(destination == source) // CHECK_CAST reads and overwrites this stack word.
+                        emit(Opcode.CHECK_CAST, intArrayOf(destination), indexedOperand = target.operand)
+                    } else {
+                        emit(Opcode.INSTANCE_OF, intArrayOf(push(JvmFrameValue.IntValue), source), indexedOperand = target.operand)
+                    }
+                }
                 0xc6, 0xc7 -> {
                     val value = popReference().second
                     emit(if (opcode == 0xc6) Opcode.IF_EQZ else Opcode.IF_NEZ, intArrayOf(value),
@@ -203,17 +214,15 @@ internal object JvmRegisterNormalizer {
 
         private fun loadConstant(opcode: Int) {
             val index = (raw.operand as JvmOperand.Constant).index
-            val constant = numericConstants.getOrPut(index) {
-                when (val value = constants.entry(index)) {
-                    is JvmConstant.IntegerValue -> Constant(JvmFrameValue.IntValue, value.value.toLong())
-                    is JvmConstant.FloatBits -> Constant(JvmFrameValue.FloatValue, value.bits.toLong())
-                    is JvmConstant.LongValue -> Constant(JvmFrameValue.LongValue, value.value)
-                    is JvmConstant.DoubleBits -> Constant(JvmFrameValue.DoubleValue, value.bits)
-                    else -> fail("non-numeric ldc requires reference or dynamic-constant lowering")
-                }
+            val constant = constantOperands.constant(index)
+            if ((opcode == 0x14) != (constant.frameType.words == 2)) fail("ldc constant has the wrong category")
+            when (constant) {
+                is JvmConstantOperands.Constant.Numeric -> constant(constant.frameType, constant.bits)
+                is JvmConstantOperands.Constant.StringValue -> emit(Opcode.CONST_STRING,
+                    intArrayOf(push(constant.frameType)), indexedOperand = constant.operand)
+                is JvmConstantOperands.Constant.ClassValue -> emit(Opcode.CONST_CLASS,
+                    intArrayOf(push(constant.frameType)), indexedOperand = constant.operand)
             }
-            if ((opcode == 0x14) != (constant.type.words == 2)) fail("ldc constant has the wrong category")
-            constant(constant.type, constant.bits)
         }
 
         private fun constant(type: JvmFrameValue, bits: Long) {
@@ -319,12 +328,12 @@ internal object JvmRegisterNormalizer {
         }
 
         private fun emit(opcode: Opcode, registers: IntArray = intArrayOf(), literal: Long = 0,
-            target: Int = -1, payload: InstructionPayload? = null,
+            target: Int = -1, payload: InstructionPayload? = null, indexedOperand: JvmIndexedOperand? = null,
         ) {
             if (!emitting) return
             instructions += JvmNormalizedInstruction(instructions.size, code.codeOffset + raw.offset,
                 opcode, registers, literal, if (raw.wide) 0xc4 else raw.opcode,
-                JvmOpcodeNames.name(raw), target, payload)
+                JvmOpcodeNames.name(raw), target, payload, indexedOperand)
         }
 
         private fun move(type: JvmFrameValue) = when {
@@ -349,7 +358,6 @@ internal object JvmRegisterNormalizer {
     private val ZERO_BRANCHES = listOf(Opcode.IF_EQZ, Opcode.IF_NEZ, Opcode.IF_LTZ, Opcode.IF_GEZ, Opcode.IF_GTZ, Opcode.IF_LEZ)
     private val INTEGER_BRANCHES = listOf(Opcode.IF_EQ, Opcode.IF_NE, Opcode.IF_LT, Opcode.IF_GE, Opcode.IF_GT, Opcode.IF_LE)
 
-    private data class Constant(val type: JvmFrameValue, val bits: Long)
     private data class Conversion(val opcode: Opcode, val from: JvmFrameValue, val to: JvmFrameValue)
     private val TYPES = listOf(JvmFrameValue.IntValue, JvmFrameValue.LongValue, JvmFrameValue.FloatValue, JvmFrameValue.DoubleValue)
     private val STACK_OPERATIONS = listOf(JvmStackOperation.POP, JvmStackOperation.POP2, JvmStackOperation.DUP,

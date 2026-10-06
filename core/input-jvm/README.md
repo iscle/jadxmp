@@ -17,9 +17,9 @@ constant-pool strings are validated once per syntax context to prevent work ampl
 The Code attribute decoder bounds bytecode to the JVM's 65,535-byte limit and retains ordered
 exception handlers and nested attributes. The instruction decoder handles every defined opcode,
 including `wide`, both switch forms and signed branches. It validates branch and handler boundaries,
-reserved instruction bytes, payload lengths and switch key ordering. Constant-pool operand kinds,
-frame/stack types, local bounds and version-specific instruction legality remain separate work;
-structurally decoded instructions are not yet normalized decompiler input.
+reserved instruction bytes, payload lengths and switch key ordering. The register normalizer separately checks constant-pool operand kinds, frame/stack types, local
+bounds and supported instruction versions. A successful structural decode alone does not establish
+valid bytecode or complete normalization.
 
 Frame primitives model typed logical stack values, wide local slots, stack permutations, independent
 snapshots, and constructor alias transitions. They validate local and stack bounds without depending
@@ -36,8 +36,12 @@ frame analysis precedes one-time emission; branch targets skip the parameter pro
 removed NOP/pop instructions. Switch default destinations remain explicit. Native reference/null
 loads and stores (including wide local indexes) preserve snapshots and identity. Reference returns
 accept exact/null/Object assignment; narrower assignment needs unavailable hierarchy information
-and is diagnosed. Handlers, calls, casts, allocations, reference constant-pool loads, legacy
-subroutines and unreachable bytecode regions produce explicit method failures.
+and is diagnosed. Native checkcast/instanceof and String/Class ldc/ldc_w now use checked typed
+constant-pool operands. A per-method ten-million-unit operand work budget charges resolution and
+unique UTF8 lengths; aliases share validated descriptors/frame types. Wrong tags/categories and
+class literals before class-file version 49 are diagnosed. Handlers, calls, allocations, dynamic/
+method-type/method-handle constants, legacy subroutines and unreachable bytecode regions still
+produce explicit method failures.
 JVM tests compare normalized-register execution with real javac methods for branches, loops,
 switches, overflow, mixed wide parameters, post-increment, signed zero and NaN; this is a bounded
 normalization slice, not general JVM decompilation or complete bytecode verification.
@@ -57,11 +61,16 @@ method scope. Unknown attributes retain their bytes and remain ignorable as spec
 Module descriptors, contradictory class forms and duplicate declarations are rejected.
 
 Native facade tests compile actual javac class bytes directly through both source emitters, recompile
-the output and execute branch/loop/switch and numeric edge cases without D8. Constructors, calls,
-casts, reference constant-pool loads and exception handlers remain unsupported, so this is partial
-native input. Reference execution tests compare original javac classes, the pinned jadx Java output
+the output and execute branch/loop/switch, numeric and type-operation edge cases without D8.
+Constructors, calls and exception handlers remain unsupported, so this is partial native input. Reference execution tests compare original javac classes, the pinned jadx Java output
 and candidate Java/Kotlin for nulls, identity, arrays and loops. Shared long descriptor comparisons
-count against the analysis budget.
+count against the analysis budget. Type-operation tests cover null and failed casts, exact array
+types, integer consumers of instanceof, string interning and class-object identity. They verify
+that type operations do not initialize their target and null casts/tests do not resolve a missing
+array component class. Kotlin reference-array checks use the exact array Class after evaluating
+the operand once and handling null; an erased `is Array<*>` check would be incorrect. The original
+pinned jadx drops one unused throwing cast; that measured mismatch remains explicit in the test
+while both candidate languages must retain the original ClassCastException.
 The default input registry remains unchanged. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the
 original Class rather than Companion, and volatile/transient backing-field annotations. Dedicated

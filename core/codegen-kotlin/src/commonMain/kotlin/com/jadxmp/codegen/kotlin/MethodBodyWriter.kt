@@ -1089,9 +1089,22 @@ internal class MethodBodyWriter(
                 if (nullability.isNullable(method, insn.getArg(0))) code.add("?")
             }
             IrOpcode.INSTANCE_OF -> wrapped(KotlinPrec.NAMED_CHECK, minPrec) {
-                emitOperand(insn.getArg(0), KotlinPrec.NAMED_CHECK)
-                code.add(" is ")
-                emitTypeRef(referencedType(insn) ?: IrType.OBJECT)
+                val target = referencedType(insn) ?: IrType.OBJECT
+                if (target is IrType.ArrayType && target.element !is IrType.Primitive) {
+                    // Kotlin rejects `is Array<String>` and `is Array<*>` loses the JVM component
+                    // check. Capture once before resolving the exact array Class; null instanceof
+                    // must return false without class resolution (JVMS 6.5.instanceof).
+                    val value = names.unique("arrayInstance")
+                    code.add("when (val ").add(value).add(" = ")
+                    emitOperand(insn.getArg(0), KotlinPrec.LOWEST)
+                    code.add(") { null -> false; else -> ")
+                    emitClassName(target)
+                    code.add("::class.java.isInstance(").add(value).add(") }")
+                } else {
+                    emitOperand(insn.getArg(0), KotlinPrec.NAMED_CHECK)
+                    code.add(" is ")
+                    emitTypeRef(target)
+                }
             }
             IrOpcode.CMP -> emitCompare(insn, minPrec)
             IrOpcode.IF -> emitIfExpr(insn as IfInstruction, minPrec)
