@@ -17,7 +17,10 @@ class NativeJvmInputSemanticsTest {
     @Test fun nativeClassToJavaSourceMatchesOriginalJvmExecution() = verify(false)
     @Test fun nativeClassToKotlinSourceMatchesOriginalJvmExecution() = verify(true)
 
-    private fun verify(kotlin: Boolean) = withOriginal("NativePrimitives", """
+    @Test fun defaultFacadeLoadsNativeJavaInputWithoutCustomPlugins() = verify(false, useDefaultRegistry = true)
+    @Test fun defaultFacadeLoadsNativeKotlinInputWithoutCustomPlugins() = verify(true, useDefaultRegistry = true)
+
+    private fun verify(kotlin: Boolean, useDefaultRegistry: Boolean = false) = withOriginal("NativePrimitives", """
         public interface NativePrimitives {
             static int snapshot(int value) { return value++; }
             static long mixed(int a, long b, int c) { return b + a - c; }
@@ -31,7 +34,7 @@ class NativeJvmInputSemanticsTest {
             static int sparse(int x) { switch (x) { case -100: return 4; case 1000: return 8; default: return 13; } }
         }
     """.trimIndent()) { original, bytes ->
-        val result = decompile("NativePrimitives.class", bytes, kotlin)
+        val result = decompile("NativePrimitives.class", bytes, kotlin, useDefaultRegistry)
         assertEquals(0, result.errorCount, result.classes.joinToString { it.code })
         val generated = result.classes.single()
         withCompiledClass(DecompiledClass(generated.fullName, generated.code), kotlin) { cls ->
@@ -80,14 +83,14 @@ class NativeJvmInputSemanticsTest {
         }
     }
 
-    private fun decompile(name: String, bytes: ByteArray, kotlin: Boolean): com.jadxmp.api.DecompilationResult {
+    private fun decompile(name: String, bytes: ByteArray, kotlin: Boolean, useDefaultRegistry: Boolean = false): com.jadxmp.api.DecompilationResult {
         val plugin = object : InputPlugin {
             override val id = "native-jvm-test"
             override fun tryLoad(name: String, bytes: ByteArray) = JvmInput.loadClass(name, bytes)
         }
         val engine = Decompiler(DecompilerArgs(
             outputFormat = if (kotlin) OutputFormat.KOTLIN else OutputFormat.JAVA,
-            registry = PluginRegistry(listOf(plugin)),
+            registry = if (useDefaultRegistry) PluginRegistry.default() else PluginRegistry(listOf(plugin)),
         ))
         assertEquals(1, engine.load(name, bytes))
         return engine.decompileAll()

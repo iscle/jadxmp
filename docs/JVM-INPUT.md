@@ -5,7 +5,7 @@ attributes and raw JVM instructions. A separate frame-primitives batch adds type
 storage and permutations, snapshots, and constructor alias transitions; it passed independent
 review. The primitive normalizer produces the shared CodeReader model; its straight-line slice has
 passed independent review. A bounded primitive control-flow extension has also passed independent
-review and JVM/JS/Wasm tests. The module is not registered with `core:api`; general native JVM decompilation is
+review and JVM/JS/Wasm tests. Single-class input is registered with `core:api` by default; general native JVM decompilation is
 incomplete. Precise reference hierarchy/exception analysis, remaining opcode lowering, and remaining
 input-contract changes below are **proposed, not implemented**.
 The fused-result and explicit inline-switch prerequisites have landed separately.
@@ -17,8 +17,8 @@ owner never falls back to a different name-derived owner. JVM declaration metada
 `SourceFile`, the current class's `InnerClasses` entry and `EnclosingMethod` (including initializer
 contexts with method index zero). `NestHost`/`NestMembers` are not lexical enclosure. Names and
 enclosing-method references are retained for later reconstruction; emitting source names and updating
-all references together remains separate work. A class-only adapter and opt-in facade integration
-are implemented and independently reviewed; archive loading/default registration remain pending.
+all references together remains separate work. A class-only adapter and default facade integration are implemented. Class-only archive loading
+remains pending.
 
 The engine remains clean-room and multiplatform. Format decisions follow the
 [JVMS class-file specification](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
@@ -98,6 +98,10 @@ verification, exception lowering, general native input parity or production read
 ## Class-only adapter and facade boundary
 
 `JvmInput.loadClass(name, bytes)` parses one class into the existing CodeLoader/ClassData model.
+The default registry's `JvmInputPlugin` recognizes the four-byte class magic before the DEX plugin,
+so mislabeled class uploads work while unrelated `.class` files remain unclaimed. Recognized parse
+failures reach the facade's existing diagnostic/reload path. The bundle and DEX plugins continue
+handling their existing containers; class-only JARs are not yet loaded.
 It maps native descriptors, lexical metadata, member modifiers and typed ConstantValue initializers
 without manufacturing Dalvik metadata. Method descriptors are cached within the class; a declaration
 work budget of ten million referenced characters bounds repeated string hashing/materialization.
@@ -117,8 +121,9 @@ serialization. Compiler-generated enum members with unrepresentable modifiers ar
 this does not establish arbitrary modifier or JVM ABI parity. Unknown attributes remain ignorable and retain raw bytes. Executable BootstrapMethods
 metadata remains deferred with unsupported dynamic-call bodies. This is not a complete class verifier.
 The first end-to-end execution fixture uses an interface with static primitive methods to avoid
-pretending constructor lowering is already supported. It passes real javac bytes through a test input
-plugin, the facade/pipeline and both emitters, then recompiles and executes the generated sources.
+pretending constructor lowering is already supported. It passes real javac bytes through both an explicit test input
+plugin and the default registry, then through the facade/pipeline and both emitters before recompiling
+and executing the generated sources.
 No D8 conversion or upstream engine implementation enters this native path.
 
 ## Frame representation
@@ -225,8 +230,9 @@ exception types and identity, not only compiler acceptance.
    result writes that must not commit; nested and overlapping handlers; catch-all ordering;
    normal entry into a handler PC; constructors inside protected ranges. Preserve caught-object
    identity and verify handler-visible prethrow state.
-6. **Integration:** method/class metadata, StackMapTable validation, archive loading, facade
-   registration, native JVM corpus execution through both emitters, and the pinned differential gate.
+6. **Integration:** method/class metadata, StackMapTable validation, archive loading,
+   native JVM corpus execution through both emitters, and the pinned differential gate. Single-class
+   default facade registration is implemented.
 
 The frame-primitives slice is implemented and independently reviewed; straight-line primitive
 lowering is implemented and independently reviewed. Primitive normal-flow analysis and lowering

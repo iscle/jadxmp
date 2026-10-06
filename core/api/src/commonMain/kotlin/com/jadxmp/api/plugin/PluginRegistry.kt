@@ -40,7 +40,7 @@ interface PassPlugin {
 /**
  * The static plugin registry handed to a [com.jadxmp.api.Decompiler]. Holds the ordered input plugins
  * (first that recognizes an input wins) and any extra pass plugins. Construct one explicitly to add
- * more; [default] gives the built-in configuration (the DEX input plugin, no extra passes).
+ * more; [default] gives the built-in configuration (bundle, native class and DEX input plugins, no extra passes).
  */
 class PluginRegistry(
     val inputPlugins: List<InputPlugin>,
@@ -57,11 +57,12 @@ class PluginRegistry(
 
     companion object {
         /**
-         * The built-in registry: bundle input (APKM/XAPK/APKS) tried first, then plain DEX input;
+         * The built-in registry: bundle input (APKM/XAPK/APKS), native single classes, then DEX;
          * standard passes only. Bundle detection is content-first and rejects a plain APK, so ordering
-         * bundle before DEX only diverts a *real* bundle — a plain `.apk`/`.dex`/`.jar` still lands on
-         * [DexInputPlugin] unchanged. More can be registered by callers.
+         * bundle before DEX only diverts a *real* bundle. [JvmInputPlugin] claims only class-file
+         * magic; APK/DEX and DEX-containing JAR input still falls through to [DexInputPlugin].
+         * Class-only JAR loading remains unsupported. More plugins can be registered by callers.
          */
-        fun default(): PluginRegistry = PluginRegistry(inputPlugins = listOf(BundleInputPlugin, DexInputPlugin))
+        fun default(): PluginRegistry = PluginRegistry(inputPlugins = listOf(BundleInputPlugin, JvmInputPlugin, DexInputPlugin))
     }
 }

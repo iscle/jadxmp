@@ -38,6 +38,7 @@ kotlin {
             api(projects.core.ir)
             api(projects.core.input)
             implementation(projects.core.inputDex)
+            implementation(projects.core.inputJvm)
             implementation(projects.core.pipeline)
             // api: core:codegen's CodeMetadata is exposed on DecompiledClass (UI consumes it).
             api(projects.core.codegen)

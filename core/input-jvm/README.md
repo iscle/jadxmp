@@ -1,9 +1,9 @@
 # JVM input
 
-This module is the multiplatform foundation for native `.class` and `.jar` input. It is not yet
-registered with `core:api` by default. The class-only `JvmInput.loadClass(name, bytes)` entry produces
-native input for an explicitly supplied facade plugin; archive loading and general JVM lowering
-remain incomplete.
+This module is the multiplatform foundation for native `.class` and `.jar` input. Single-class
+input is registered with `core:api` by default through `JvmInputPlugin`, which recognizes class-file
+magic independently of the filename. The class-only `JvmInput.loadClass(name, bytes)` entry also
+remains usable directly. Class-only archive loading and general JVM lowering remain incomplete.
 
 The initial parser follows the [JVMS class-file format](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
 through Java 21 (major 65). Newer versions receive an explicit unsupported-version diagnostic.
@@ -71,7 +71,8 @@ array component class. Kotlin reference-array checks use the exact array Class a
 the operand once and handling null; an erased `is Array<*>` check would be incorrect. The original
 pinned jadx drops one unused throwing cast; that measured mismatch remains explicit in the test
 while both candidate languages must retain the original ClassCastException.
-The default input registry remains unchanged. JVM synchronization and field modifier bits remain
+Default-facade tests cover actual javac execution through both backends, unrelated bytes with a
+`.class` suffix, malformed recognized input, and reload after a failed load. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the
 original Class rather than Companion, and volatile/transient backing-field annotations. Dedicated
 runtime tests check monitor identity/release and field reflection/serialization; unsupported synthetic

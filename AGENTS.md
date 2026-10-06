@@ -24,7 +24,7 @@ changed input, crashes, extra errors or changed signal profiles fail the gate. D
 ```
 core:binary-io   bytes, LEB128, MUTF8, inflate, zip, FileSystem (kotlinx-io) — the only IO module
 core:input(-dex)  parse DEX/APK → normalized input model
-core:input-jvm    native class adapter + primitive lowering; full JVM/JAR support pending
+core:input-jvm    default native single-class input + bounded lowering; full JVM/JAR support pending
 core:ir          IR: InsnNode, ArgType lattice, node model, region tree
 core:pipeline    pass framework + CFG/SSA/type-inference/structuring/naming (the engine)
 core:codegen(-java/-kotlin)  CodeWriter + metadata; Java & Kotlin backends

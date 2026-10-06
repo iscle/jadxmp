@@ -113,7 +113,7 @@ branches, loops and switches pass native javac bytes through the complete pipeli
 then recompile and execute numeric edge cases without D8. The adapter retains lexical metadata, typed
 field constants and lazy per-method failure isolation; unsupported semantic attributes are diagnosed
 instead of silently dropped. Independent tests pass on JVM/JS/Wasm. General bytecode lowering, archive
-loading and default registry integration remain incomplete. The combined-suite counts above precede
+loading remains incomplete. Default registry integration now recognizes single native class files. The combined-suite counts above precede
 these additional reference and native-input tests.
 
 ## Kotlin validation after the combined snapshot
@@ -183,7 +183,7 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
    metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
-   archive loading and default facade registration are still required for full class/JAR support.
+   archive loading is still required for full class/JAR support; single-class default registration is implemented.
    Kotlin now preserves instance/static method monitor identity and volatile/transient backing-field
    flags in targeted runtime tests, including exceptional monitor release and serialization. Synthetic
    enum modifier combinations that Kotlin cannot regenerate remain explicit errors; broader modifier
