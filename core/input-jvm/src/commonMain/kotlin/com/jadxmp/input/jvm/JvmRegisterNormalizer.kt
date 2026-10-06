@@ -43,7 +43,9 @@ internal object JvmRegisterNormalizer {
         private val registerCount = parameterBase + incomingWords
         private var frame = JvmFrame(code.maxLocals, code.maxStack)
         private val referenceTypes = mutableMapOf<String, JvmFrameValue.Reference>()
-        private val constantOperands = JvmConstantOperands(constants, limits.maxConstantWork, ::reference)
+        private var operandWork = 0L
+        private val constantOperands = JvmConstantOperands(constants, ::chargeOperandWork, ::reference)
+        private val arrayOperands = JvmArrayOperands(::chargeOperandWork, ::reference)
         private val returnFrameType = if (descriptor.returnType == "V") null else valueType(descriptor.returnType)
         private val instructions = mutableListOf<JvmNormalizedInstruction>()
         private var emitting = true
@@ -111,6 +113,25 @@ internal object JvmRegisterNormalizer {
                 in 0x4b..0x4e -> storeReference(opcode - 0x4b)
                 in 0x15..0x18 -> load((raw.operand as JvmOperand.Local).index, TYPES[opcode - 0x15])
                 in 0x1a..0x29 -> load((opcode - 0x1a) % 4, TYPES[(opcode - 0x1a) / 4])
+                in 0x2e..0x35 -> {
+                    val index = pop(JvmFrameValue.IntValue)
+                    val (arrayType, array) = popReference()
+                    val load = arrayOperands.load(arrayType, opcode)
+                    // Both inputs are snapshots in the stack bank. A wide result may reuse both
+                    // popped words: ARRAY_GET reads its arguments before committing the result.
+                    val result = push(load.result)
+                    if (arrayType == JvmFrameValue.NullValue) {
+                        // The verifier has a normal frame, but execution cannot complete this
+                        // instruction normally. Both inputs were evaluated before the mandated
+                        // NPE; throwing this proven null avoids inventing an array component type.
+                        emit(Opcode.THROW, intArrayOf(array))
+                    } else {
+                        emit(load.opcode, intArrayOf(result, array, index))
+                        // baload's result is computational Int even for Boolean arrays. Make
+                        // the 0/1 boundary explicit before arbitrary JVM numeric consumers.
+                        if (load.opcode == Opcode.AGET_BOOLEAN) emit(Opcode.BOOLEAN_TO_INT, intArrayOf(result, result))
+                    }
+                }
                 in 0x36..0x39 -> store((raw.operand as JvmOperand.Local).index, TYPES[opcode - 0x36])
                 in 0x3b..0x4a -> store((opcode - 0x3b) % 4, TYPES[(opcode - 0x3b) / 4])
                 in 0x57..0x5f -> permutation(STACK_OPERATIONS[opcode - 0x57])
@@ -171,7 +192,9 @@ internal object JvmRegisterNormalizer {
                         check(destination == source) // CHECK_CAST reads and overwrites this stack word.
                         emit(Opcode.CHECK_CAST, intArrayOf(destination), indexedOperand = target.operand)
                     } else {
-                        emit(Opcode.INSTANCE_OF, intArrayOf(push(JvmFrameValue.IntValue), source), indexedOperand = target.operand)
+                        val result = push(JvmFrameValue.IntValue)
+                        emit(Opcode.INSTANCE_OF, intArrayOf(result, source), indexedOperand = target.operand)
+                        emit(Opcode.BOOLEAN_TO_INT, intArrayOf(result, result))
                     }
                 }
                 0xc6, 0xc7 -> {
@@ -219,6 +242,11 @@ internal object JvmRegisterNormalizer {
                 }
                 else -> fail("unsupported register normalization opcode 0x${opcode.toString(16)}")
             }
+        }
+
+        private fun chargeOperandWork(amount: Long) {
+            operandWork += amount
+            if (operandWork > limits.maxConstantWork) fail("JVM constant operand work limit exceeded")
         }
 
         private fun loadConstant(opcode: Int) {

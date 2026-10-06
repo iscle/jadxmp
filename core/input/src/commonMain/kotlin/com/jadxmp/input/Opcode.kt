@@ -74,6 +74,8 @@ public enum class Opcode {
     CMP_LONG,
 
     // --- primitive conversions ---
+    /** Format-neutral conversion: registers [destination Int, source Boolean], false→0 / true→1. */
+    BOOLEAN_TO_INT,
     INT_TO_LONG,
     INT_TO_FLOAT,
     INT_TO_DOUBLE,

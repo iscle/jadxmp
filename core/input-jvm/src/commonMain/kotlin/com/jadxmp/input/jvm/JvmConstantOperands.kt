@@ -5,7 +5,7 @@ import com.jadxmp.io.ByteReaderException
 /** Eager, bounded per-method resolution. No mutable constant-pool reader escapes in an instruction. */
 internal class JvmConstantOperands(
     private val pool: JvmConstantPool,
-    private val maxWork: Long,
+    private val charge: (Long) -> Unit,
     private val reference: (String) -> JvmFrameValue.Reference,
 ) {
     private val constants = mutableMapOf<Int, Constant>()
@@ -14,7 +14,6 @@ internal class JvmConstantOperands(
     // its semantic value once, not once per instruction, alias, or control-flow worklist revisit.
     private val classNames = mutableMapOf<Int, JvmFrameValue.Reference>()
     private val strings = mutableMapOf<Int, String>()
-    private var work = 0L
 
     sealed interface Constant {
         val frameType: JvmFrameValue
@@ -62,11 +61,6 @@ internal class JvmConstantOperands(
             reference(if (name.startsWith('[')) name else "L$name;")
         }
         Type(JvmIndexedOperand.TypeRef(index, frameType.descriptor), frameType)
-    }
-
-    private fun charge(amount: Long) {
-        work += amount
-        if (work > maxWork) throw ByteReaderException("JVM constant operand work limit exceeded")
     }
 
     private companion object {

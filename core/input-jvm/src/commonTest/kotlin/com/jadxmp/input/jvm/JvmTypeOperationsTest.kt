@@ -27,6 +27,10 @@ class JvmTypeOperationsTest {
         val test = read(normalize("(Ljava/lang/Object;)I", bytes(0x2a, 0xc1, 0, 2, 0x04, 0x60, 0xac), pool, stack = 2))
         assertEquals(listOf(1, 1), test.single { it.opcode == Opcode.INSTANCE_OF }.registers)
         assertEquals(Opcode.ADD_INT, test[test.lastIndex - 1].opcode)
+        val index = test.indexOfFirst { it.opcode == Opcode.INSTANCE_OF }
+        assertEquals(Opcode.BOOLEAN_TO_INT, test[index + 1].opcode)
+        assertEquals(listOf(1, 1), test[index + 1].registers)
+        assertEquals(test[index].fileOffset, test[index + 1].fileOffset)
     }
 
     @Test fun arrayCastsAndClassLiteralsKeepDescriptorsAndNeverInventPrimitiveClassNames() {

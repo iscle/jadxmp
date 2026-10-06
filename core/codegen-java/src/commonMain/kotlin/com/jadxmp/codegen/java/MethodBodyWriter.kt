@@ -495,7 +495,11 @@ internal class MethodBodyWriter(
             }
             IrOpcode.THROW -> {
                 code.add("throw ")
-                emitOperand(insn.getArg(0), Prec.LOWEST)
+                val failure = insn.getArg(0)
+                // A proven null always raises NPE. Keeping a Throwable-typed null local here
+                // would instead impose a checked-exception declaration on the generated method.
+                if (isProvenNullThrow(failure)) code.add("null")
+                else emitOperand(failure, Prec.LOWEST)
             }
             IrOpcode.BREAK -> code.add("break")
             IrOpcode.CONTINUE -> code.add("continue")
@@ -906,6 +910,32 @@ internal class MethodBodyWriter(
     /** A resolved reference type (a `null` literal can be cast to it). */
     private fun IrType.isReferenceType(): Boolean =
         this is IrType.Object || this is IrType.ArrayType || this is IrType.TypeVariable || this is IrType.Wildcard
+
+    private val nullThrowProofs = mutableMapOf<Instruction, Boolean>()
+
+    /** Follow only side-effect-free forwarding of one SSA value, never a call or a phi guess. */
+    private fun isProvenNullThrow(operand: Operand): Boolean {
+        var current = operand
+        val seen = mutableSetOf<Instruction>()
+        fun finish(result: Boolean): Boolean {
+            for (instruction in seen) nullThrowProofs[instruction] = result
+            return result
+        }
+        while (true) {
+            if (current is LiteralOperand) return finish(current.value == 0L)
+            val definition = when (current) {
+                is RegisterOperand -> current.ssaValue?.assign?.parent
+                is InstructionOperand -> current.instruction
+                else -> null
+            } ?: return finish(false)
+            nullThrowProofs[definition]?.let { return finish(it) }
+            if (!seen.add(definition) || definition.argCount != 1) return finish(false)
+            when (definition.opcode) {
+                IrOpcode.CONST, IrOpcode.MOVE, IrOpcode.MOVE_RESULT, IrOpcode.ONE_ARG -> current = definition.getArg(0)
+                else -> return finish(false)
+            }
+        }
+    }
 
     /**
      * True if [op] is a register whose single SSA definition is a `const 0` — i.e. it provably holds

@@ -6,6 +6,7 @@ import com.jadxmp.io.ByteReaderException
 internal data class JvmAnalysisLimits(
     val maxFrameCells: Long = 4_000_000,
     val maxWork: Long = 10_000_000,
+    /** Shared resolution budget for constant-pool operands and derived array component descriptors. */
     val maxConstantWork: Long = 10_000_000,
 )
 

@@ -75,6 +75,18 @@ Native arraylength uses the shared ARRAY_LENGTH instruction for known arrays and
 javac execution checks for all primitive array kinds, reference/nested arrays, null joins, loops,
 unused throwing reads and division/null exception ordering. Non-array frames are rejected; array
 joins conservatively widened to Object still require future hierarchy work.
+All eight native array-load opcodes use exact component frames and shared AGET operations, with
+JVM integer promotion for byte/Boolean/char/short and exact reference/nested-array results. A known
+null receiver becomes a throwing instruction only after its index has been evaluated; ordinary
+nullable arrays retain their typed read. The default-facade runtime matrix checks raw float/double
+bits, identity, bounds/null/index-order failures, unused reads, loops and wide results against the
+original JVM and pinned jadx Java. It also executes a descriptor-only mutation of a javac Boolean
+array getter and byte-array arithmetic methods to verify baload's 0/1 computational Int return,
+addition, bitwise masks, negation, shifts and wide conversion. The normalized BOOLEAN_TO_INT
+operation makes that boundary explicit in shared typed IR, also after native instanceof. Direct
+JVM numeric instanceof consumers are executed through both rebuilt languages and the pinned
+reference; existing null/missing-target resolution controls remain in the type-operation suite.
+Array stores remain unsupported.
 Default-facade tests cover actual javac execution through both backends, unrelated bytes with a
 `.class` suffix, malformed recognized input, and reload after a failed load. JVM synchronization and field modifier bits remain
 in the shared declarations. Kotlin emits instance synchronized annotations, static bodies locking the

@@ -297,6 +297,7 @@ class MethodDecoder(
             Opcode.NOT_LONG -> make(Instruction(IrOpcode.NOT, reg(0, IrType.LONG), listOf(reg(1, IrType.LONG))))
 
             // ---- conversions ----
+            Opcode.BOOLEAN_TO_INT -> make(cast(reg(0, IrType.INT), reg(1, IrType.BOOLEAN)))
             Opcode.INT_TO_LONG -> make(cast(reg(0, IrType.LONG), reg(1, IrType.INT)))
             Opcode.INT_TO_FLOAT -> make(cast(reg(0, IrType.FLOAT), reg(1, IrType.INT)))
             Opcode.INT_TO_DOUBLE -> make(cast(reg(0, IrType.DOUBLE), reg(1, IrType.INT)))

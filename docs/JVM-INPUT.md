@@ -60,7 +60,23 @@ contracts. Native arraylength lowers to the shared ARRAY_LENGTH operation for kn
 and null operands. It preserves unused throwing reads, primitive/reference/multidimensional array
 lengths, null-array joins, loops and exception ordering in both rebuilt languages. A reference joined
 only as Object is insufficient proof of an array and remains diagnosed; precise array hierarchy joins
-are separate work. The shared pipeline retains responsibility for null checks and expression order. Handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
+are separate work. Typed native array loads now lower all eight JVM load opcodes to shared AGET variants. Exact
+component frames distinguish byte and Boolean arrays, retain reference/nested-array types, and
+promote byte/Boolean/char/short results to computational Int in the analyzer. Boolean loads also
+emit the format-neutral BOOLEAN_TO_INT conversion, decoded as typed IR CAST, so arbitrary JVM
+numeric consumers see 0/1 rather than an incidental source Boolean. Native instanceof uses the
+same explicit conversion; direct JVM bytecode execution covers its return, branch, arithmetic,
+bitwise, negation, shift, wide and combined-expression consumers. Shared source coercions
+preserve signed byte/short and unsigned char values. Mismatched components and Object-only joins
+are diagnosed rather than cast. Component descriptors are cached per method and charged to the
+same bounded resolver budget as constant-pool operands, including repeated lookup hashing on JS. A proven-null array lowers to THROW null
+at the load's original position after both operands have been evaluated; original following bytecode
+still undergoes frame validation. The [JVMS aaload verifier rule](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html#jvms-4.10.1.9.aaload)
+defines the null component frame as null. Execution tests compare original classes and the pinned
+jadx output with both candidate languages for raw floating bits, identity, null/bounds failures,
+unused reads, integer promotion, index evaluation and reachable successors beside a throwing null
+path. These tests compare exception types and ordering, not messages or stack traces.
+The shared pipeline retains responsibility for null checks and expression order. Array stores, handlers, calls, allocations, method-type/method-handle/dynamic constants, constructors,
 jsr/ret and unreachable bytecode regions produce explicit unsupported-method diagnostics.
 
 `JvmControlFlow` discovers basic blocks and computes their incoming frames with a worklist.
