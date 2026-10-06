@@ -65,7 +65,9 @@ The isolated adapter now includes the original Java-input plugin and its pinned 
 tests verify discovery of both plugins and direct class/class-only-JAR compilation and execution,
 without D8 conversion. The existing DEX smoke test also passes. The new `core:input-jvm` foundation parses class envelopes, constant pools and raw attributes,
 with common malformed-input tests and javac interoperability tests. It is not registered as an input
-plugin yet: bytecode lowering and class/JAR decompilation remain unimplemented. The combined-suite
+plugin yet. Straight-line primitive lowering now produces normalized register input, with real JVM
+execution comparisons. Shared format-neutral nesting and JVM lexical metadata readers prepare the
+class adapter; general bytecode lowering and class/JAR facade integration remain incomplete. The combined-suite
 counts above precede these additional reference and parser tests.
 
 ## Kotlin validation after the combined snapshot
@@ -122,8 +124,9 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
    execution coverage is missing; the smali gate still measures no-error and recompilation only.
-4. `core:input-jvm` has only its parser foundation; bytecode lowering, metadata and archive integration
-   are still required for class/JAR input support.
+4. `core:input-jvm` has parser/frame foundations, straight-line primitive normalization and lexical
+   declaration metadata. General control-flow/reference lowering, remaining metadata, class adaptation
+   and archive/facade integration are still required for class/JAR input support.
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
 

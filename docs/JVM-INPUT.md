@@ -9,6 +9,15 @@ incomplete. Whole-method frame analysis, general register lowering, and remainin
 changes below are **proposed, not implemented**.
 The fused-result and explicit inline-switch prerequisites have landed separately.
 
+The shared input contract now carries format-neutral `ClassNesting` and member modifiers. DEX
+extracts its annotation representation at its parser boundary; compatibility fallbacks remain for
+older plugins. Explicit top-level metadata suppresses dollar-name nesting, while an explicit missing
+owner never falls back to a different name-derived owner. JVM declaration metadata decodes
+`SourceFile`, the current class's `InnerClasses` entry and `EnclosingMethod` (including initializer
+contexts with method index zero). `NestHost`/`NestMembers` are not lexical enclosure. Names and
+enclosing-method references are retained for later reconstruction; emitting source names and updating
+all references together remains separate work. The class adapter/facade integration is still pending.
+
 The engine remains clean-room and multiplatform. Format decisions follow the
 [JVMS class-file specification](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html)
 and [instruction specification](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html).

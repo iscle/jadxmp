@@ -35,6 +35,12 @@ normalization slice, not general JVM decompilation or complete bytecode verifica
 Direct JVM class-byte tests also verify implicit byte/char/short return narrowing and boolean low-bit
 masking, which must be explicit in normalized register instructions.
 
+Declaration metadata decodes bounded `SourceFile`, `InnerClasses` and `EnclosingMethod` attributes
+into the shared lexical nesting contract. It preserves member modifiers, local/anonymous owners and
+enclosing methods; access-control nests do not imply lexical nesting. This metadata reader is not
+yet wired to a ClassData adapter or the facade. Annotations, signatures and the remaining attributes
+still require semantic decoding; their raw bytes remain in the parsed class model.
+
 All production code is `commonMain`; IO primitives come from `core:binary-io`. No ASM, D8 or
 upstream jadx implementation enters the engine. The original jadx commit remains the behavioral
 oracle in the separate JVM tooling modules.
