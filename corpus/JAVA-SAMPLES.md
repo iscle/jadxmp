@@ -1,71 +1,57 @@
-# Extraction plan — jadx's embedded Java `TestCls` samples
+# Embedded upstream Java samples
 
-jadx's richest accuracy inputs are **not** loose files: they are Java classes
-embedded inside its JUnit integration tests under
-`reference/jadx/jadx-core/src/test/java/jadx/tests/integration/**`. Each test file
-holds one uniform inner class:
+`tools:oracle:upstreamJavaInventory` now extracts inputs from the read-only original
+jadx checkout at `0e232fb3510ec86083af0055470163d3550957cd`:
 
-```java
-public class TestBreakInLoop extends IntegrationTest {
-    public static class TestCls {          //  <-- the sample under decompilation
-        public int f;
-        public void test(int[] a, int b) { ... }
-    }
-
-    @Test
-    public void test() {                   //  <-- the expectation (assertions)
-        JadxAssertions.assertThat(getClassNode(TestCls.class))
-            .code()
-            .containsOne("for (int i = 0; i < a.length; i++) {")
-            ...;
-    }
-}
+```sh
+./gradlew :tools:oracle:upstreamJavaInventory
 ```
 
-At import time this checkout contains:
+This is an **original-fixture viability inventory**, not a decompilation scoreboard.
+The existing Java/Kotlin execution gate and smali differential gate are unchanged.
 
-- **454** files with a `public static class TestCls` block (the samples).
-- **120** of those also define a `public void check()` method — the executable
-  round-trip oracle: `check()` must pass on both the original compiled class and
-  the decompiled-then-recompiled class (accuracy signal 3, "executes identically").
+## Extraction and provenance
 
-These are **not** copied into `corpus/` yet, because a raw `.java` snippet is not a
-decompiler input — it must be compiled to `.class`/`.dex` first, and neither this
-corpus nor the multiplatform `commonTest` sources can run `javac`. Compilation is
-owned by **`tools:oracle`** (JVM-only), which already has the in-process JDK
-compiler wired up.
+The JVM-only extractor uses the JDK's public Java syntax-tree API and source positions,
+so braces in comments, strings and text blocks cannot truncate a sample. It supports one
+public static `TestCls` class directly inside a nongeneric outer class. The sample block,
+including annotations and nested members, is preserved verbatim inside a new public
+outer wrapper with the original package/name. The wrapper omits the upstream harness
+superclass and all other outer members. Dependencies on omitted members remain visible
+as compilation failures; this is not a claim of equivalence for reflective wrapper behavior.
 
-## Planned mechanical extraction (owned by `tools:oracle`)
+Explicit imports are retained when their simple names occur in the sample syntax tree;
+wildcard imports are retained conservatively. The one import mapping is recorded explicitly:
+`jadx.tests.api.utils.assertj.JadxAssertions.assertThat` becomes
+`org.assertj.core.api.Assertions.assertThat`. AssertJ **3.27.7** matches the original
+baseline's test dependency and belongs only to `tools:oracle`. Incompatible custom assertion
+methods fail compilation visibly. No upstream harness implementation is copied.
 
-Do this once a JVM compile helper lands (`tools:oracle` already has `javax.tools`):
+Generated sources/classes live in temporary workspaces, not the clean-room engine. Every
+input Java file receives a tab-separated report row containing its original SHA-256,
+extracted-source SHA-256 when available, status, import mappings and compiler diagnostics.
+The runner verifies the original Git revision and clean checkout before reading samples.
 
-1. **Walk** `reference/jadx/jadx-core/src/test/java/jadx/tests/integration/**`.
-2. For each file, **extract** the `public static class TestCls { … }` block. It is
-   uniform (always that exact declaration), so a brace-matched slice from the
-   `public static class TestCls` token to its closing brace is sufficient; no full
-   Java parser is needed. Preserve any nested `check()` method verbatim.
-3. **Wrap** the block into a compilable top-level unit: emit
-   `class TestCls { … }` (optionally under a per-sample package derived from the
-   jadx test package) into a temp source tree. Carry over the small set of
-   imports each sample uses (most use none; a few use `java.util.*`).
-4. **Compile** to `.class` with `javax.tools.ToolProvider.getSystemJavaCompiler()`
-   (the same in-memory compiler the recompile signal uses).
-5. **Dex** the `.class` (via jadx's own dex-input path is not needed for input;
-   for a `.dex` fixture, use `d8`/`dx` if available, else keep the `.class` and let
-   the JVM front-end consume it). Store the resulting binary under a new
-   `corpus/java-fixtures/<group>/<Name>.{class,dex}` tree.
-6. **Capture the expectation**: the sample's `@Test` body is the human-authored
-   accuracy expectation. Where a sample carries `check()`, also emit a tiny runner
-   descriptor so the oracle can invoke `check()` on both originals and rebuilds.
+## Measured inventory
 
-## Why deferred
+The 2026-10-06 run scans **612** integration Java files at the original pin. With javac
+`--release 11`, an explicit AssertJ-only fixture classpath and isolated JVM checks:
 
-- Keeps this corpus purely declarative (inputs only, no build step here).
-- Compilation policy (JDK level, `-parameters`, debug info on/off) belongs with the
-  oracle so it matches jadx's own fixture generation and stays reproducible.
-- The 120 `check()`-bearing samples are the highest-value slice; extract those
-  first when the helper lands, then the remaining 334.
+| Result | Files |
+| --- | ---: |
+| Extracted, compiled, embedded check passed | 112 |
+| Extracted and compiled, no eligible embedded check | 319 |
+| Extracted, compilation failed | 12 |
+| Extracted and compiled, embedded check failed | 1 |
+| No direct nested TestCls | 163 |
+| Unsupported TestCls form | 5 |
 
-Until then, the directly-usable binaries live in `corpus/binary/`, and the smali /
-raung trees cover the language-neutral construct matrix.
-</content>
+The failed check is `others/TestMethodParametersAttribute.java`: its upstream test requests
+`-parameters`, which this initial uniform compilation profile does not supply. The failure
+stays visible. Other unsupported dependencies include sibling fixture classes, Android/test
+annotations, upstream implementation types, logging and custom assertion methods.
+
+These **112 passing original checks are not 112 decompilation passes**. Next work is profile
+support and source → DEX → reference/candidate Java/Kotlin → compile/check execution, with
+all new failures reported. Only the three original standalone fixtures currently belong to
+`javaFixtureScoreboard`; whole-corpus execution parity is still unmeasured.

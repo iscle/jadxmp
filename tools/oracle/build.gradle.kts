@@ -47,6 +47,9 @@ dependencies {
     // Same D8 version as the pinned original jadx java-convert plugin; verification only.
     implementation("com.android.tools:r8:9.1.31")
 
+    // Assertions in extracted upstream input checks; same version as the original baseline.
+    implementation("org.assertj:assertj-core:3.27.7")
+
     // (d) Kotlin compiler for the kotlinc recompile signal (the Kotlin twin of the javax.tools Java signal).
     // In-process K2JVMCompiler → hermetic, version-pinned, structured diagnostics. JVM-only, tool-scope.
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinCompilerVersion")
@@ -120,4 +123,15 @@ tasks.register<JavaExec>("javaFixtureScoreboard") {
     classpath = sourceSets["main"].runtimeClasspath
     outputs.upToDateWhen { false }
     notCompatibleWithConfigurationCache("accuracy scoreboard must use freshly built decompilers")
+}
+
+// Inventory only: does not add extracted samples to the differential parity denominator.
+tasks.register<JavaExec>("upstreamJavaInventory") {
+    group = "verification"
+    description = "Extract pinned upstream TestCls inputs and report original compilation/check viability."
+    mainClass.set("com.jadxmp.oracle.UpstreamJavaInventoryKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    maxHeapSize = "1g"
+    outputs.upToDateWhen { false }
+    notCompatibleWithConfigurationCache("inventory must verify the current pinned checkout")
 }

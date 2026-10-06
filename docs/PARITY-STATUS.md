@@ -171,3 +171,17 @@ findings. Findings were reproduced, fixed and reviewed again, including CharSequ
 null/index ordering, narrow Kotlin comparisons, legal Java compilation-unit names, unsafe try-range
 widening over direct/wrapped string loads and monitor exits, and test entry-point mistakes. The final
 combined local validation passed after those reviews; remaining blockers are explicit above.
+
+## Upstream Java fixture inventory
+
+The JVM-only `upstreamJavaInventory` now parses the original pinned integration sources,
+preserves embedded input classes and checks, and reports every file with source hashes.
+Of 612 files, 112 extracted originals pass their embedded checks, 319 compile without an
+eligible check, 12 fail compilation, one fails its check, 163 lack a direct TestCls and five
+have unsupported sample forms. The check failure requires an upstream compiler profile
+(`-parameters`) not yet implemented by this inventory. No failures are omitted.
+
+This expands fixture discovery and original-input validation only: the new samples have
+not yet been measured through both decompilers, and the existing parity gates are unchanged.
+See [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for extraction transformations,
+assertion dependency isolation and remaining work.
