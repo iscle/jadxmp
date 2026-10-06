@@ -18,15 +18,15 @@ internal object JavaLiterals {
     private val DOUBLE_EXACT_LONG_RANGE = -(1L shl 53)..(1L shl 53)
     private val FLOAT_EXACT_LONG_RANGE = -(1L shl 24)..(1L shl 24)
 
-    fun format(op: LiteralOperand): String {
+    fun format(op: LiteralOperand, typeName: (String) -> String = { it }): String {
         val v = op.value
         return when (val kind = op.type.primitiveKind()) {
             TypeKind.BOOLEAN -> if (v != 0L) "true" else "false"
             TypeKind.CHAR -> charLiteral(v.toInt())
             TypeKind.BYTE, TypeKind.SHORT, TypeKind.INT -> v.toInt().toString()
             TypeKind.LONG -> v.toString() + "L"
-            TypeKind.FLOAT -> floatLiteral(Float.fromBits(v.toInt()))
-            TypeKind.DOUBLE -> doubleLiteral(Double.fromBits(v))
+            TypeKind.FLOAT -> floatLiteral(v.toInt(), typeName)
+            TypeKind.DOUBLE -> doubleLiteral(v, typeName)
             else -> {
                 // Reference (or still-partial) type: zero is null, otherwise fall back to an int.
                 if (op.type.isReferenceLike()) {
@@ -76,9 +76,16 @@ internal object JavaLiterals {
      * floating-point literal** built purely from its IEEE-754 bits — exact, round-tripping, and the same
      * on JVM, JS and wasm.
      */
-    private fun floatLiteral(f: Float): String {
+    private fun floatLiteral(bits: Int, typeName: (String) -> String): String {
+        // Classify raw bits before host conversion: JS/Wasm floating-point operations may quiet
+        // signalling NaNs. The source must retain the original sign and payload regardless.
+        // A typed null receiver selects the static method in type context: locals/fields named
+        // Float, Double or java cannot capture a source-generated helper call. It is never dereferenced.
+        if (bits and 0x7f800000 == 0x7f800000 && bits and 0x007fffff != 0) {
+            return if (bits == 0x7fc00000) "Float.NaN" else "((${typeName("Float")}) null).intBitsToFloat($bits)"
+        }
+        val f = Float.fromBits(bits)
         when {
-            f.isNaN() -> return "Float.NaN"
             f == Float.POSITIVE_INFINITY -> return "Float.POSITIVE_INFINITY"
             f == Float.NEGATIVE_INFINITY -> return "Float.NEGATIVE_INFINITY"
         }
@@ -88,9 +95,12 @@ internal object JavaLiterals {
         return hexFloat(f)
     }
 
-    private fun doubleLiteral(d: Double): String {
+    private fun doubleLiteral(bits: Long, typeName: (String) -> String): String {
+        if (bits and 0x7ff0000000000000L == 0x7ff0000000000000L && bits and 0x000fffffffffffffL != 0L) {
+            return if (bits == 0x7ff8000000000000L) "Double.NaN" else "((${typeName("Double")}) null).longBitsToDouble(${bits}L)"
+        }
+        val d = Double.fromBits(bits)
         when {
-            d.isNaN() -> return "Double.NaN"
             d == Double.POSITIVE_INFINITY -> return "Double.POSITIVE_INFINITY"
             d == Double.NEGATIVE_INFINITY -> return "Double.NEGATIVE_INFINITY"
         }

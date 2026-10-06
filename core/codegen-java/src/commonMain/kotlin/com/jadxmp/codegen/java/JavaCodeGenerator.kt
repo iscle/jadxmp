@@ -405,7 +405,7 @@ class JavaCodeGenerator {
             when {
                 // A `static final` field's compile-time constant is emitted as a declaration initializer
                 // (so `static final int X;` doesn't fail as "might not have been initialized").
-                const != null -> code.add(" = ").add(renderFieldConst(const))
+                const != null -> code.add(" = ").add(renderFieldConst(const, cls))
                 // A `final` field with NO constant that is never assigned anywhere (no `<clinit>`/ctor put
                 // is reconstructed for it) would otherwise emit as a blank final — which javac rejects
                 // ("variable might not have been initialized"). An unassigned field holds exactly its
@@ -415,8 +415,8 @@ class JavaCodeGenerator {
             code.add(";").newLine()
         }
 
-        private fun renderFieldConst(const: IrFieldConst): String = when (const) {
-            is IrFieldConst.Primitive -> JavaLiterals.format(LiteralOperand(const.bits, const.type))
+        private fun renderFieldConst(const: IrFieldConst, cls: IrClass): String = when (const) {
+            is IrFieldConst.Primitive -> JavaLiterals.format(LiteralOperand(const.bits, const.type)) { types.literalTypeName(it, cls) }
             is IrFieldConst.Str -> JavaLiterals.stringLiteral(const.value)
         }
 

@@ -40,6 +40,63 @@ internal class JavaTypeRenderer(
         else -> render(type)
     }
 
+    private val literalScopeNames = HashMap<com.jadxmp.ir.node.IrClass, Set<String>>()
+    private val literalPackageNames = HashMap<String, Set<String>>()
+    private val literalReservedNames = setOf("java", "Float", "Double")
+
+    /** Resolve source-generated wrapper references in type context, including inherited shadows. */
+    fun literalTypeName(simpleName: String, context: com.jadxmp.ir.node.IrClass): String {
+        val fullName = "java.lang.$simpleName"
+        val imported = classNameOf(IrType.objectType(fullName))
+        val scope = literalScopeNames.getOrPut(context) { literalNamesInScope(context) }
+        val pkg = JavaSourceName.sourcePackage(context)
+        val siblings = literalPackageNames.getOrPut(pkg) {
+            (root ?: context.root).classes.asSequence().filter { it.outerClass == null }
+                .mapNotNull { cls -> literalReservedName(cls)?.takeIf { JavaSourceName.sourcePackage(cls) == pkg } }.toSet()
+        }
+        // Imports are still being discovered in pass 1; unlike immutable model scopes they must be
+        // checked each time. The collector query is constant-time and never copies/sorts imports.
+        val packageShadow = "java" in scope || "java" in siblings || imports.isSimpleNameClaimed("java")
+        if (packageShadow && (simpleName in scope || simpleName in siblings || imported != simpleName)) {
+            val reason = "cannot resolve NaN helper owner $fullName in shadowed source scope"
+            flagError(context, reason)
+            // Keep the payload in the surrounding expression and prevent a call to a user type.
+            // This deliberately invalid cast is an honest unsupported output, never clean parity.
+            // Include the marker here too: a late-discovered import can first expose a conflict in
+            // pass 2, after the class-level error header has already been written.
+            return "void /* JADXMP ERROR: $reason */"
+        }
+        // Prefer qualification: even an external base absent from the model can inherit Float/Double.
+        return if (packageShadow) imported else fullName
+    }
+
+    private fun literalNamesInScope(context: com.jadxmp.ir.node.IrClass): Set<String> {
+        val names = HashSet<String>()
+        val pending = ArrayDeque<com.jadxmp.ir.node.IrClass>()
+        val visited = HashSet<com.jadxmp.ir.node.IrClass>()
+        pending.add(context)
+        while (pending.isNotEmpty()) {
+            val owner = pending.removeLast()
+            if (!visited.add(owner)) continue
+            literalReservedName(owner)?.let(names::add)
+            owner.innerClasses.mapNotNullTo(names, ::literalReservedName)
+            owner.outerClass?.let(pending::add)
+            for (type in listOfNotNull(owner.superType) + owner.interfaces) {
+                val name = (type as? IrType.Object)?.className ?: continue
+                (root ?: context.root).findClass(name)?.let(pending::add)
+            }
+        }
+        return names
+    }
+
+    private fun literalReservedName(cls: com.jadxmp.ir.node.IrClass): String? {
+        // Disambiguation scans package siblings. A suffix cannot turn another base into any of
+        // these names, so do that work only for possible matches, not every ancestor/package peer.
+        val base = aliasMap.aliasOf(ClassNodeRef(cls.fullName)) ?: JavaIdentifiers.sanitize(cls.shortName)
+        if (base !in literalReservedNames) return null
+        return JavaSourceName.sourceSimpleName(cls, aliasMap).takeIf { it in literalReservedNames }
+    }
+
     private fun renderObject(type: IrType.Object): String {
         // Sanitize the displayed name segments (a class/package named `do`, `1a`, etc. must still emit
         // valid Java); the ImportCollector keeps the raw name for clash detection and identity.

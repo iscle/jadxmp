@@ -621,7 +621,7 @@ internal class MethodBodyWriter(
                     if (def != null) emitInsnExpr(def, minPrec) else emitRegister(op)
                 }
             }
-            is LiteralOperand -> code.add(JavaLiterals.format(op))
+            is LiteralOperand -> code.add(JavaLiterals.format(op) { types.literalTypeName(it, method.declaringClass) })
             is InstructionOperand -> emitInsnExpr(op.instruction, minPrec)
         }
     }
@@ -1035,7 +1035,7 @@ internal class MethodBodyWriter(
         for (i in 0 until insn.size) {
             emitOperand(insn.array, Prec.PRIMARY)
             code.add("[").add(i.toString()).add("] = ")
-            code.add(JavaLiterals.format(LiteralOperand(insn.elements[i], elemType)))
+            code.add(JavaLiterals.format(LiteralOperand(insn.elements[i], elemType)) { types.literalTypeName(it, method.declaringClass) })
             code.add(";").newLine()
         }
     }

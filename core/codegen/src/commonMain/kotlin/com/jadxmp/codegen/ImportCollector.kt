@@ -59,6 +59,9 @@ class ImportCollector(private val currentPackage: String = "") {
         }
     }
 
+    /** Whether a top-level type has claimed this simple name, without sorting/copying imports. */
+    fun isSimpleNameClaimed(simpleName: String): Boolean = simpleName in claimed
+
     /** The `import` targets (top-level FQNs), sorted for deterministic output. */
     fun imports(): List<String> = importsSet.sorted()
 
