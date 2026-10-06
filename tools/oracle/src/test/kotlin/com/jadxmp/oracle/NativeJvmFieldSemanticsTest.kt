@@ -67,10 +67,10 @@ class NativeJvmFieldSemanticsTest {
                             val originalField = originalClass.getDeclaredField("f$index")
                             val field = cls.getDeclaredField("f$index").apply { isAccessible = true }
                             assertEquals(originalField.type.name, field.type.name)
-                            // Existing Kotlin source-property ABI differs from the original public
-                            // field ABI. Keep this limitation measured, not counted as ABI parity.
+                            // Public mutable fields in this complete ordinary-class scope now retain
+                            // their raw ABI; a separate unchanged Java client pins field linkage too.
                             assertTrue(Modifier.isPublic(originalField.modifiers))
-                            assertEquals(!isKotlin, Modifier.isPublic(field.modifiers))
+                            assertTrue(Modifier.isPublic(field.modifiers))
                             val value = values[index]
                             invoke(originalClass, null, "put$index", arrayOf(originalClass, originalField.type), originalReceiver, value)
                             invoke(owner, companion, "put$index", arrayOf(cls, field.type), receiver, value)

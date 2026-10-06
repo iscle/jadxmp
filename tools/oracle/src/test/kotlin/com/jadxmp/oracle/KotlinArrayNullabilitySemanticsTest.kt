@@ -224,13 +224,17 @@ class KotlinArrayNullabilitySemanticsTest {
                 val failure = runCatching { target.javaClass.getMethod(name).invoke(target) }.exceptionOrNull()
                 assertTrue(failure is InvocationTargetException && failure.cause is NullPointerException, "$name: $failure")
             }
-            assertEquals(1, target.javaClass.getMethod("getCounter").invoke(target), "check-cast null must not fail before the following field write")
+            val counter = cls.getDeclaredField("counter")
+            assertEquals(java.lang.reflect.Modifier.PUBLIC or java.lang.reflect.Modifier.STATIC, counter.modifiers)
+            assertEquals(Int::class.javaPrimitiveType, counter.type)
+            assertEquals(cls, counter.declaringClass)
+            assertEquals(1, counter.getInt(null), "check-cast null must not fail before the following field write")
             val character = target.javaClass.getMethod("character", arrayOfNulls<CharSequence>(0).javaClass, Int::class.javaPrimitiveType)
             for (values in listOf(null, arrayOfNulls<CharSequence>(1))) {
-                target.javaClass.getMethod("setCounter", Int::class.javaPrimitiveType).invoke(target, 0)
+                counter.setInt(null, 0)
                 val failure = runCatching { character.invoke(target, values, 0) }.exceptionOrNull()
                 assertTrue(failure is InvocationTargetException && failure.cause is NullPointerException)
-                assertEquals(if (values == null) 0 else 1, target.javaClass.getMethod("getCounter").invoke(target))
+                assertEquals(if (values == null) 0 else 1, counter.getInt(null))
             }
             assertEquals('b', character.invoke(target, arrayOf<CharSequence>("abc"), 1))
             val nested = target.javaClass.getMethod("nested", arrayOfNulls<IntArray>(0).javaClass)
@@ -252,12 +256,16 @@ class KotlinArrayNullabilitySemanticsTest {
             val nullClone = runCatching { copy.invoke(target, null) }.exceptionOrNull()
             assertTrue(nullClone is InvocationTargetException && nullClone.cause is NullPointerException)
             val instance = cls.getConstructor().newInstance()
-            assertEquals(null, cls.getMethod("getValues").invoke(instance))
+            val field = cls.getDeclaredField("values")
+            assertEquals(java.lang.reflect.Modifier.PUBLIC, field.modifiers)
+            assertEquals(IntArray::class.java, field.type)
+            assertEquals(cls, field.declaringClass)
+            assertEquals(null, field.get(instance))
             val values = intArrayOf(1, 2)
-            cls.getMethod("setValues", IntArray::class.java).invoke(instance, values)
-            assertSame(values, cls.getMethod("getValues").invoke(instance))
-            cls.getMethod("setValues", IntArray::class.java).invoke(instance, null)
-            assertEquals(null, cls.getMethod("getValues").invoke(instance))
+            field.set(instance, values)
+            assertSame(values, field.get(instance))
+            field.set(instance, null)
+            assertEquals(null, field.get(instance))
         }
     }
 

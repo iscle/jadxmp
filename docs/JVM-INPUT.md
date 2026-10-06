@@ -134,9 +134,14 @@ unloaded inherited names. See [field binding limits](FIELD-BINDING-LIMITS.md) fo
 The final/ConstantValue native exclusions above remain unchanged.
 
 Unmodified javac fixtures retain the existing constructor diagnostic; tests allocate default-state
-receivers without invoking either constructor and claim method execution only. Kotlin's existing
-property emission changes public field ABI to private backing fields/accessors; reflection controls
-record this as a limitation, not binary-field parity. The pinned reference fails recompilation for
+receivers without invoking either constructor and claim method execution only. Kotlin now projects
+eligible public mutable fields in ordinary classes as raw JVM fields through an aliased `@JvmField`.
+Unchanged precompiled Java callers verify instance/static owner, descriptor, visibility, defaults,
+volatile/transient flags and the absence of invented accessors. This requires complete name scope
+and exact field spelling; final/ConstantValue, synthetic, enum/interface/object/data-class, renamed,
+and generated inherited-instance-property hiding cases remain outside this first ABI projection.
+The existing ordinary-property fallback in those cases does not establish binary-field parity.
+The pinned reference fails recompilation for
 raw narrowing/Boolean field stores and inlines a raw external ConstantValue read, losing its original
 class-initialization effect. Both measurements remain explicit; unsupported candidate accesses keep
 diagnostics and healthy sibling methods. No corpus policy is changed.

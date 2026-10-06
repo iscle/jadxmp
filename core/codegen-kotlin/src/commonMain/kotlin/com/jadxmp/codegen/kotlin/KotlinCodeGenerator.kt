@@ -73,10 +73,11 @@ class KotlinCodeGenerator {
         val imports = KotlinImports(packageName, cls, aliasMap, constructorNames)
         val inheritance = KotlinInheritancePlan()
         val invocationBindings = InvocationSourceBinding(cls.root)
+        val rawFields = KotlinRawFieldPlan(imports, aliasMap)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -94,7 +95,7 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings, constructorNames, rawFields).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -111,6 +112,7 @@ class KotlinCodeGenerator {
         private val inheritance: KotlinInheritancePlan = KotlinInheritancePlan(),
         private val invocationBindings: InvocationSourceBinding,
         private val constructorNames: KotlinConstructorNamePlan,
+        private val rawFields: KotlinRawFieldPlan,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -140,6 +142,7 @@ class KotlinCodeGenerator {
             // equals/hashCode/toString are KEPT in the body — a user may override them (see
             // isGeneratedDataMember) and signature alone can't distinguish that from the default.
             val dataShape = if (kind == ClassKind.CLASS) detectDataClass(cls) else null
+            val rawFieldContainer = kind == ClassKind.CLASS && dataShape == null
             emitDeclarationHeader(cls, kind, topLevel, dataShape)
             code.add(" {").newLine()
             code.incIndent()
@@ -242,7 +245,7 @@ class KotlinCodeGenerator {
                 wrote = true
             }
             for (f in instanceFields) {
-                emitProperty(cls, f)
+                emitProperty(cls, f, rawFieldContainer = rawFieldContainer)
                 wrote = true
             }
             for (m in objectInits) {
@@ -268,7 +271,7 @@ class KotlinCodeGenerator {
             }
             if (hasCompanion) {
                 if (wrote) code.newLine()
-                emitCompanion(cls, staticFields, clinit, staticMethods, enumSuppressed)
+                emitCompanion(cls, staticFields, clinit, staticMethods, enumSuppressed, rawFieldContainer)
                 wrote = true
             }
 
@@ -584,10 +587,17 @@ class KotlinCodeGenerator {
             }
         }
 
-        private fun emitProperty(cls: IrClass, field: IrField, staticInit: StaticInitContext? = null) {
+        private fun emitProperty(cls: IrClass, field: IrField, staticInit: StaticInitContext? = null, rawFieldContainer: Boolean = false) {
             // User comment before the property definition (any form below), mirroring the Java backend's
             // field comment. Empty map ⇒ nothing emitted, byte-identical.
             emitUserComment(FieldNodeRef(cls.fullName, field.name))
+            if (rawFieldContainer) when (rawFields.decision(field)) {
+                KotlinRawFieldPlan.Decision.RAW_FIELD ->
+                    code.add("@field:").add(imports.aliasedClass(KotlinRawFieldPlan.ANNOTATION)).newLine()
+                KotlinRawFieldPlan.Decision.WORK_LIMIT ->
+                    code.emitErrorMarker(field, "raw public field ABI proof work limit exceeded")
+                KotlinRawFieldPlan.Decision.OUTSIDE_SCOPE, KotlinRawFieldPlan.Decision.INCOMPLETE_NAME_SCOPE -> Unit
+            }
             emitFieldAnnotations(field)
             // A `static final` field whose value is a non-literal single unconditional `<clinit>` store is
             // rendered `val X = <the store's RHS>` (the store is suppressed in the init block). Kotlin
@@ -945,6 +955,7 @@ class KotlinCodeGenerator {
             clinit: IrMethod?,
             staticMethods: List<IrMethod>,
             enumSuppressed: Set<Instruction>,
+            rawFieldContainer: Boolean,
         ) {
             // The companion is itself a (Kotlin) nested class; give its definition a ref so its NodeEnd
             // is balanced for nodeAt, matching how every other body-scope is recorded.
@@ -958,7 +969,7 @@ class KotlinCodeGenerator {
             val staticInit = StaticInitContext(clinit, suppressed)
             var wrote = false
             for (f in staticFields) {
-                emitProperty(cls, f, staticInit)
+                emitProperty(cls, f, staticInit, rawFieldContainer)
                 wrote = true
             }
             if (clinit != null && (MissingMethodBody.isRequired(clinit) ||

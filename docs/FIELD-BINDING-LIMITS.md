@@ -81,3 +81,31 @@ field/type shadows, class initialization and effects. Static-only classes execut
 The Kotlin instance-method case with incomplete scope remains explicitly diagnosed and fails
 recompilation; its healthy sibling and static methods are preserved. Final/ConstantValue native
 accesses remain unsupported so source constant folding cannot erase JVM initialization effects.
+
+## Kotlin public mutable field ABI
+
+Ordinary classes with complete loaded lexical/member scope can emit exact public mutable fields
+using a reserved `kotlin.jvm.JvmField` import alias. Both instance fields and static fields emitted
+in companions retain their original declaring class, descriptor and public/static/volatile/transient
+flags. `KotlinPublicFieldAbiSemanticsTest` executes unchanged precompiled Java clients against original,
+pinned-reference and generated Kotlin classes. It checks all primitive and representative reference
+field types, default values, initialization, reference identity, signed zero, Kotlin-keyword field
+names and real getter/setter methods. Raw-field projection removes invented property accessors;
+existing actual methods remain callable with their original semantics. Loaded annotation-type/member
+name collisions and static/instance hiding across different containers are covered separately.
+
+This is a bounded projection, not general field ABI parity. `KotlinRawFieldPlan.Decision` distinguishes
+exact raw-field proof from outside-scope declarations, incomplete name scope and exhausted work.
+Final/ConstantValue, non-public, synthetic, enum, interface, object/data-class, renamed or duplicate
+raw-name declarations remain outside the projection. No guessed annotation spelling is introduced
+when inherited names are unavailable. Those ordinary-property fallbacks can still produce private
+backing fields/accessors and cannot satisfy an unchanged Java field caller.
+
+Generated instance-property hiding is a concrete remaining blocker. Original Java `Base { public int
+value; }` and `Child extends Base { public int value; }` have independent fields and execute correctly,
+as does the pinned Java output. A Kotlin child with `@JvmField` can hide a field in an external Java
+base, but Kotlin rejects the same property relationship when both owners are generated Kotlin. The
+runtime test keeps the original/reference execution and the candidate compilation failure visible;
+it does not suppress or rename either declaration or count fallback as preserved ABI. Solving this
+requires a broader source representation than adding an annotation. Foreign-owner binding and raw
+ConstantValue initialization hazards described above remain unchanged.

@@ -51,11 +51,11 @@ class CompareSemanticsTest {
             assertEquals(4, cls.getMethod("nested", Float::class.javaPrimitiveType, Float::class.javaPrimitiveType)
                 .invoke(target, Float.NaN, 1f), "comparison expression precedence")
             assertEquals(-1, cls.getMethod("ordered").invoke(target), "left operand must execute first")
-            // Kotlin exposes mutable properties through accessors, Java exposes the actual field.
-            val count = if (kotlin) {
-                cls.getMethod("getCounter").invoke(target)
-            } else cls.getField("counter").get(null)
-            assertEquals(2, count, "operands must be evaluated exactly once")
+            val counter = outerClass.getDeclaredField("counter")
+            assertEquals(java.lang.reflect.Modifier.PUBLIC or java.lang.reflect.Modifier.STATIC, counter.modifiers)
+            assertEquals(Int::class.javaPrimitiveType, counter.type)
+            assertEquals(outerClass, counter.declaringClass)
+            assertEquals(2, counter.getInt(null), "operands must be evaluated exactly once")
         }
     }
 

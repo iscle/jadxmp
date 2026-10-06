@@ -173,7 +173,11 @@ class KotlinPrimitiveSemanticsTest {
                 }
             }
             assertEquals(1, methods.getMethod("ordered").invoke(companion))
-            assertEquals(1, methods.getMethod("getCounter").invoke(companion), "boolean operand evaluated once")
+            val counter = cls.getDeclaredField("counter")
+            assertEquals(java.lang.reflect.Modifier.PUBLIC or java.lang.reflect.Modifier.STATIC, counter.modifiers)
+            assertEquals(Int::class.javaPrimitiveType, counter.type)
+            assertEquals(cls, counter.declaringClass)
+            assertEquals(1, counter.getInt(null), "boolean operand evaluated once")
         }
     }
 
