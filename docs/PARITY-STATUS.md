@@ -53,6 +53,27 @@ each of JVM, JS Node/browser and Wasm Node/browser, plus 15 focused oracle tests
 passed 159 oracle tests, both enforced Java gates with zero regressions, and the unchanged default
 Kotlin smali result of 83/209 compiling and 80 unflagged.
 
+## Expanded measurement after native array reads (engine `20014ae`)
+
+Hosted CI measured all 612 original-source rows with `metadata_profile=none`. Candidate Java
+now compiles **292 of 431** eligible inputs, up from 289; **138 reference-better Java cases** remain,
+down from 141. The new compilations are `TestNullInline`, `TestWrongCode2` and
+`TestTypeResolver24`. The pure-null throw repair included with native array reads makes these
+outputs legal Java. None has an evaluated original execution check, so these gains establish
+compilation only. All 612 provenance, extraction, preparation and transformation records are
+unchanged; every other reference/Java/Kotlin signal matches the preceding `141ca21` report.
+Java execution remains 69/112 passing original checks; Kotlin remains 212/431 compilations
+and 33/112 passing checks. Full parity and production readiness remain unachieved.
+
+## Source overload binding
+
+Shared source binding now retains exact loaded overload descriptors when source arguments have
+narrower reference types, with bounded per-output analysis. The pinned original overload check
+and targeted execution matrices compare both languages against original behavior. A separate
+missing-parent control repairs Java's failure signal but records Kotlin's pre-existing linkage
+limitation explicitly; it is not counted as parity. See [INVOCATION-BINDING.md](INVOCATION-BINDING.md).
+These targeted checks do not replace the full-corpus counts above with an unmeasured new total.
+
 ## Latest fixture-context and forwarding validation
 
 The smali gate covers **211 physical sources in 209 fixture contexts**: **201 parity

@@ -6,6 +6,7 @@ import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
 import com.jadxmp.codegen.ImportCollector
+import com.jadxmp.codegen.InvocationSourceBinding
 import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
@@ -131,6 +132,7 @@ internal class MethodBodyWriter(
     // Deobfuscation/user rename overrides, applied to member call/read sites and renamed-class type refs
     // in this body. [AliasMap.EMPTY] (the default) ⇒ the byte-identical no-deobfuscation path.
     private val aliasMap: AliasMap = AliasMap.EMPTY,
+    private val invocationBindings: InvocationSourceBinding = InvocationSourceBinding(method.declaringClass.root),
 ) {
     private val types = JavaTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -1387,6 +1389,11 @@ internal class MethodBodyWriter(
     private fun emitArgList(insn: Instruction, firstArgIndex: Int, paramTypes: List<IrType> = emptyList()) {
         code.add("(")
         var emitted = 0
+        val bindings = if (insn is InvokeInstruction && paramTypes == insn.methodRef.paramTypes) {
+            invocationBindings.arguments(insn.methodRef,
+                if (firstArgIndex > 0) insn.instanceArg?.let(::operandType) else null,
+                (firstArgIndex until insn.argCount).map { operandType(insn.getArg(it)) })
+        } else emptySet()
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
             val arg = insn.getArg(i)
@@ -1400,6 +1407,11 @@ internal class MethodBodyWriter(
                     emitTypeRef(target)
                     code.add(") null")
                 }
+            } else if (emitted in bindings && target != null) {
+                code.add("(")
+                emitTypeRef(target)
+                code.add(") ")
+                emitOperand(arg, Prec.UNARY)
             } else {
                 emitCoerced(arg, target, Prec.LOWEST)
             }

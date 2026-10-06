@@ -6,6 +6,7 @@ import com.jadxmp.codegen.AliasMap
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.InvocationSourceBinding
 import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
@@ -94,6 +95,7 @@ internal class MethodBodyWriter(
     // in [KotlinMemberAliases]/[KotlinTypeRenderer], which short-circuit on the empty map before any lookup).
     private val aliasMap: AliasMap = AliasMap.EMPTY,
     private val nullability: KotlinReferenceNullability = KotlinReferenceNullability(method.declaringClass.root),
+    private val invocationBindings: InvocationSourceBinding = InvocationSourceBinding(method.declaringClass.root),
 ) {
     private val types = KotlinTypeRenderer(imports, aliasMap, method.declaringClass.root)
 
@@ -1432,6 +1434,7 @@ internal class MethodBodyWriter(
         }
         if (emitProjectedInvoke(invoke)) return
         val receiver = invoke.instanceArg
+        val bindings = invocationBindings(invoke, if (kind == InvokeKind.STATIC) 0 else 1)
         if (kind != InvokeKind.STATIC && kind != InvokeKind.SUPER && receiver != null &&
             nullability.isNullable(method, receiver)
         ) {
@@ -1440,7 +1443,17 @@ internal class MethodBodyWriter(
                 code.add(values[0]).add("!!.")
                 code.attachReference(MethodNodeRef(className(target.declaringType), target.name, target.paramTypes.map { it.toString() }))
                 code.add(KotlinMemberAliases.aliasForMethodRef(root, target, aliasMap))
-                code.add("(").add(values.drop(1).joinToString(", ")).add(")")
+                code.add("(")
+                values.drop(1).forEachIndexed { index, value ->
+                    if (index > 0) code.add(", ")
+                    code.add(value)
+                    if (index in bindings) {
+                        code.add(" as ")
+                        emitTypeRef(target.paramTypes[index])
+                        code.add("?")
+                    }
+                }
+                code.add(")")
             }
             return
         }
@@ -1620,15 +1633,21 @@ internal class MethodBodyWriter(
         },
     )
 
+    private fun invocationBindings(insn: InvokeInstruction, firstArgIndex: Int): Set<Int> =
+        invocationBindings.arguments(insn.methodRef,
+            if (firstArgIndex > 0) insn.instanceArg?.let(::operandType) else null,
+            (firstArgIndex until insn.argCount).map { operandType(insn.getArg(it)) })
+
     private fun emitArgList(insn: Instruction, firstArgIndex: Int, preserveReferenceTypes: Boolean = false) {
         code.add("(")
         var emitted = 0
+        val bindings = if (insn is InvokeInstruction) invocationBindings(insn, firstArgIndex) else emptySet()
         val projectedWrapper = insn is InvokeInstruction && !KotlinJvmBoxedTypes.hasGeneratedDeclaration(root, insn.methodRef)
         for (i in firstArgIndex until insn.argCount) {
             if (emitted > 0) code.add(", ")
             val expectedType = (insn as? InvokeInstruction)?.methodRef?.paramTypes?.getOrNull(i - firstArgIndex)
             val argument = insn.getArg(i)
-            emitArgument(argument, expectedType, preserveReferenceTypes, projectedWrapper)
+            emitArgument(argument, expectedType, preserveReferenceTypes || emitted in bindings, projectedWrapper)
             emitted++
         }
         code.add(")")

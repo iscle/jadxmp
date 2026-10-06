@@ -1019,4 +1019,35 @@ class JavaEnumTest {
             .containsOne("public class Plain {")
             .containsOne("public int x;")
     }
+    @Test fun overloadBudgetFailureInEnumArgumentsKeepsHealthyMembers() {
+        val cls = irClass("e.ManyConstants", accessFlags = Flags.PUBLIC or Flags.FINAL or ACC_ENUM, superType = enumSuper)
+        val type = IrType.objectType(cls.fullName)
+        val ownerName = "p".repeat(30_000) + ".Owner"
+        val owner = irClass(ownerName, root = cls.root)
+        for (parameter in listOf(IrType.OBJECT, IrType.STRING)) {
+            owner.method("use", returnType = IrType.INT, argTypes = listOf(parameter), accessFlags = Flags.PUBLIC or Flags.STATIC)
+        }
+        val constants = (0 until 200).map { Ssa(it, type) }
+        val instructions = mutableListOf<Instruction>()
+        for ((index, value) in constants.withIndex()) {
+            val name = "C$index"
+            enumField(cls, name, type, enumConst)
+            val call = staticInvoke(IrType.objectType(ownerName), "use", IrType.INT, listOf(IrType.OBJECT), listOf(strLit("value")), reg(500 + index, IrType.INT))
+            instructions.add(ctorCall(type, listOf(IrType.STRING, IrType.INT, IrType.INT),
+                listOf(strLit(name), intLit(index), expr(call)), value.def()))
+            instructions.add(staticPut(fieldRef(cls, name, type), value.use()))
+        }
+        val arrayType = IrType.array(type)
+        val values = Ssa(201, arrayType)
+        enumField(cls, "\$VALUES", arrayType, staticFinal or 0x1000).add(AttrFlag.SYNTHETIC)
+        instructions.add(filledNewArray(arrayType, constants.map { it.use() }, values.def()))
+        instructions.add(staticPut(fieldRef(cls, "\$VALUES", arrayType), values.use()))
+        clinitOf(cls, *instructions.toTypedArray())
+        cls.method("healthy", returnType = IrType.INT, accessFlags = Flags.PUBLIC) { body(ret(intLit(7))) }
+        val output = generate(cls)
+        kotlin.test.assertTrue(output.contains("JADXMP ERROR:"))
+        kotlin.test.assertTrue(cls.contains(AttrFlag.HAS_ERROR))
+        assertThatCode(output).containsOne("return 7;")
+    }
+
 }

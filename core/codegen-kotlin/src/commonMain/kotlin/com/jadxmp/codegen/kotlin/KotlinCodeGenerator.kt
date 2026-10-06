@@ -7,6 +7,7 @@ import com.jadxmp.codegen.CodeNodeRef
 import com.jadxmp.codegen.CodeWriter
 import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
+import com.jadxmp.codegen.InvocationSourceBinding
 import com.jadxmp.codegen.MissingMethodBody
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
@@ -70,10 +71,11 @@ class KotlinCodeGenerator {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = KotlinImports(packageName, cls, aliasMap)
         val inheritance = KotlinInheritancePlan()
+        val invocationBindings = InvocationSourceBinding(cls.root)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings).emitClass(cls, topLevel = true)
         imports.finishDiscovery()
 
         // Pass 2: real output with the header.
@@ -91,7 +93,7 @@ class KotlinCodeGenerator {
             }
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, inheritance, invocationBindings).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -106,6 +108,7 @@ class KotlinCodeGenerator {
         private val root: IrRoot? = null,
         private val commentMap: CommentMap = CommentMap.EMPTY,
         private val inheritance: KotlinInheritancePlan = KotlinInheritancePlan(),
+        private val invocationBindings: InvocationSourceBinding,
     ) {
         private val types = KotlinTypeRenderer(imports, aliasMap, root)
         private val nullability = KotlinReferenceNullability(root)
@@ -586,9 +589,17 @@ class KotlinCodeGenerator {
             // A `static final` field whose value is a non-literal single unconditional `<clinit>` store is
             // rendered `val X = <the store's RHS>` (the store is suppressed in the init block). Kotlin
             // cannot reassign a `val` in `init {}`, so this is what makes such a field compile at all.
-            if (staticInit != null && tryEmitInlinedStaticFinal(cls, field, staticInit)) {
-                code.newLine()
-                return
+            if (staticInit != null) {
+                var inlined = false
+                // Commit suppression only after the initializer renders successfully. On failure,
+                // rollback its partial expression and retain the store in the residual init block.
+                guardMember(field, { "field '${field.name}' initializer failed to render" }) {
+                    inlined = tryEmitInlinedStaticFinal(cls, field, staticInit)
+                }
+                if (inlined) {
+                    code.newLine()
+                    return
+                }
             }
             val isFinal = KotlinModifiers.has(field.accessFlags, KotlinModifiers.FINAL)
             val const = field.constValue
@@ -687,7 +698,10 @@ class KotlinCodeGenerator {
             if (field.accessFlags and staticFinal != staticFinal) return false
             if (field.constValue != null) return false // a compile-time literal is handled as `const val`
             val store = singleUnconditionalStore(clinit, cls.fullName, field.name) ?: return false
-            val writer = MethodBodyWriter(code, imports, clinit, NameGenerator(), emptyList(), aliasMap = aliasMap, nullability = nullability)
+            val writer = MethodBodyWriter(
+                code, imports, clinit, NameGenerator(), emptyList(),
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+            )
             val toSuppress = writer.planStaticFinalInline(store, staticInit.suppressed) ?: return false
             code.add(KotlinModifiers.visibility(field.accessFlags))
             code.add("val ")
@@ -823,7 +837,10 @@ class KotlinCodeGenerator {
             // honest body marker when the delegation can't be faithfully hoisted (rule 4), leaving the body
             // path unchanged. The SAME writer must render header then body so variable naming/ids stay in
             // sync between the two.
-            val writer = MethodBodyWriter(code, imports, method, methodNames, paramNames, aliasMap = aliasMap, nullability = nullability)
+            val writer = MethodBodyWriter(
+                code, imports, method, methodNames, paramNames,
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+            )
             if (isConstructor) writer.emitConstructorDelegationHeader(inheritance.constructorDelegations(cls).value[method])
             code.add(" ")
             emitBody(writer)
@@ -966,7 +983,10 @@ class KotlinCodeGenerator {
             code.attachDefinition(methodRef(cls, method))
             code.add("init {").newLine()
             code.incIndent()
-            MethodBodyWriter(code, imports, method, NameGenerator(), emptyList(), suppressed, aliasMap = aliasMap, nullability = nullability).writeBody()
+            MethodBodyWriter(
+                code, imports, method, NameGenerator(), emptyList(), suppressed,
+                aliasMap = aliasMap, nullability = nullability, invocationBindings = invocationBindings,
+            ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
             code.add("}").newLine()

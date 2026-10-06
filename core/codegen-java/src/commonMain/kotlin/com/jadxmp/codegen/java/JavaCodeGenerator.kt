@@ -9,6 +9,7 @@ import com.jadxmp.codegen.CodegenKeys
 import com.jadxmp.codegen.CommentMap
 import com.jadxmp.codegen.FieldNodeRef
 import com.jadxmp.codegen.ImportCollector
+import com.jadxmp.codegen.InvocationSourceBinding
 import com.jadxmp.codegen.MethodNodeRef
 import com.jadxmp.codegen.NameGenerator
 import com.jadxmp.codegen.emitLineComment
@@ -61,10 +62,11 @@ class JavaCodeGenerator {
     ): CodeInfo {
         val packageName = cls.fullName.substringBeforeLast('.', "")
         val imports = ImportCollector(packageName)
+        val invocationBindings = InvocationSourceBinding(cls.root)
 
         // Pass 1: populate imports (output discarded). Comments touch no imports, but the same emitter is
         // used so both passes make identical name/variable choices (the comment injection is a no-op here).
-        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
+        ClassEmitter(CodeWriter(), imports, aliasMap, cls.root, commentMap, invocationBindings).emitClass(cls, topLevel = true)
 
         // Pass 2: real output with the header.
         val code = CodeWriter()
@@ -77,7 +79,7 @@ class JavaCodeGenerator {
             for (imp in importList) code.add("import ").add(JavaIdentifiers.sanitizeQualified(imp)).add(";").newLine()
             code.newLine()
         }
-        ClassEmitter(code, imports, aliasMap, cls.root, commentMap).emitClass(cls, topLevel = true)
+        ClassEmitter(code, imports, aliasMap, cls.root, commentMap, invocationBindings).emitClass(cls, topLevel = true)
         return code.finish()
     }
 
@@ -100,6 +102,7 @@ class JavaCodeGenerator {
         private val aliasMap: AliasMap = AliasMap.EMPTY,
         private val root: IrRoot? = null,
         private val commentMap: CommentMap = CommentMap.EMPTY,
+        private val invocationBindings: InvocationSourceBinding,
     ) {
         private val types = JavaTypeRenderer(imports, aliasMap, root)
 
@@ -287,7 +290,11 @@ class JavaCodeGenerator {
                 // backing field's binary name when there is one (a fake constant has none — use the name).
                 code.attachDefinition(FieldNodeRef(cls.fullName, c.field?.name ?: c.name))
                 code.add(c.name)
-                if (c.args.isNotEmpty()) emitEnumConstantArgs(cls, e, c)
+                if (c.args.isNotEmpty()) {
+                    guardMember(cls, { "enum constant '${c.name}' arguments failed to render" }) {
+                        emitEnumConstantArgs(cls, e, c)
+                    }
+                }
                 when {
                     i < e.constants.lastIndex -> code.add(",")
                     hasMore -> code.add(";")
@@ -299,7 +306,10 @@ class JavaCodeGenerator {
         private fun emitEnumConstantArgs(cls: IrClass, e: EnumReconstruction, c: EnumReconstruction.EnumConstant) {
             val clinit = e.clinit
             val writer = clinit?.let {
-                MethodBodyWriter(code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns, aliasMap = aliasMap)
+                MethodBodyWriter(
+                    code, imports, it, NameGenerator(), emptyList(), e.suppressedClinitInsns,
+                    aliasMap = aliasMap, invocationBindings = invocationBindings,
+                )
             }
             // A resolved plan (folded `new T[]{…}` arrays + backward inter-constant NAME references +
             // inlined expressions) renders directly; its support instructions are already suppressed from
@@ -327,6 +337,7 @@ class JavaCodeGenerator {
             MethodBodyWriter(
                 code, imports, method, NameGenerator(), emptyList(),
                 e.suppressedClinitInsns, e.constantResultFields, ctx.refRewrites, aliasMap,
+                invocationBindings = invocationBindings,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -367,7 +378,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames, suppressed,
-                enumRewrites = ctx.refRewrites, aliasMap = aliasMap,
+                enumRewrites = ctx.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
@@ -548,7 +559,7 @@ class JavaCodeGenerator {
             code.incIndent()
             MethodBodyWriter(
                 code, imports, method, methodNames, paramNames,
-                enumRewrites = ctx?.refRewrites, aliasMap = aliasMap,
+                enumRewrites = ctx?.refRewrites, aliasMap = aliasMap, invocationBindings = invocationBindings,
             ).writeBody()
             code.decIndent()
             code.attachNodeEnd()
