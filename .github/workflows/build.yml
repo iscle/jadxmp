@@ -97,12 +97,25 @@ jobs:
           mkdir -p build/reports/oracle
           ./gradlew :tools:oracle:kotlinScoreboard --console=plain --stacktrace 2>&1 | tee build/reports/oracle/kotlin.log
 
+      # Newly measured upstream source cases expose additional parity gaps. The existing
+      # enforced gates remain unchanged; this step requires complete measurement, not parity.
+      - name: Record expanded upstream round trips (informational)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build/reports/oracle
+          ./gradlew :tools:oracle:upstreamJavaRoundTrips --console=plain --stacktrace 2>&1 | tee build/reports/oracle/upstream-roundtrips.log
+
       - name: Upload accuracy reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: accuracy-reports
-          path: 'build/reports/oracle/*.log'
+          path: |
+            build/reports/oracle/*.log
+            tools/oracle/build/reports/upstream-java-roundtrips.tsv
           if-no-files-found: ignore
 
       - name: Upload test reports

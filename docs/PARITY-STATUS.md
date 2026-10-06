@@ -3,6 +3,19 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
+## Expanded original-source round trips (engine `121c666`)
+
+All 612 pinned integration Java files now receive a result row. Of 431 eligible compiled
+originals, reference Java recompiles 411, candidate Java 289, and candidate Kotlin 211.
+Of 112 passing original checks, rebuilt reference Java passes 108, candidate Java 67,
+and candidate Kotlin 32. The other 319 compiled originals have no evaluated execution check.
+All original extraction, compilation and check failures remain in the report.
+
+This exposes **143 Java reference-better cases beyond the existing smali gate**. Those failures
+remain production blockers. The additive reporting task records them without changing the
+existing gates or declaring parity; CI keeps its full evidence. See
+[../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for the profile, limits and reproduction.
+
 ## Latest fixture-context and forwarding validation
 
 The smali gate covers **211 physical sources in 209 fixture contexts**: **201 parity
@@ -164,9 +177,10 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 2. Kotlin has 126 fixture contexts with compiler errors or no output, plus three compilable outputs carrying
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
-3. Upstream Java embedded `check()` fixtures are now inventoried: 443 extracted and 112 passing
-   original checks. Broad source-to-DEX-to-rebuilt execution coverage is still missing; the smali gate
-   still measures no-error and recompilation only.
+3. Expanded upstream round trips expose 143 Java reference-better cases, with only 67 Java and
+   32 Kotlin passing rebuilt checks out of 112 passing originals at engine `121c666`. These failures,
+   unsupported extractions and compiler profiles remain unresolved. The smali gate still measures
+   no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
    metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
    archive loading and default facade registration are still required for full class/JAR support.
@@ -210,8 +224,8 @@ eligible check, 12 fail compilation, one fails its check, 163 lack a direct Test
 have unsupported sample forms. The check failure requires an upstream compiler profile
 (`-parameters`) not yet implemented by this inventory. No failures are omitted.
 
-This expands fixture discovery and original-input validation only: the new samples have
-not yet been measured through both decompilers, and the existing parity gates are unchanged.
+The subsequent expanded measurement above runs these eligible originals through both decompilers
+and both candidate languages. Existing parity gates remain unchanged; new failures remain visible.
 See [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for extraction transformations,
 assertion dependency isolation and remaining work.
 

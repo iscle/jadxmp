@@ -48,7 +48,7 @@ Sources, all copied into a fenced `corpus/` tree (kept isolated for licensing cl
 - **9 `.raung`** inputs.
 - Binary samples (`hello.dex`, sample APKs) from `jadx-core/src/test/resources/`.
 - **Three original Java fixtures** under `corpus/java/semantics`: arithmetic, loops, and floating-point comparisons. Each has an executable `check()`.
-- `upstreamJavaInventory` parses all pinned integration Java sources and reports extracted-original compilation/check viability. Its first run finds 112 passing original checks; these are not decompilation coverage. See [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for the complete denominator and visible failures.
+- `upstreamJavaInventory` parses all pinned integration Java sources and reports extracted-original compilation/check viability. Its first run finds 112 passing original checks. `upstreamJavaRoundTrips` then measures all eligible originals through D8, both decompilers, both candidate languages and rebuilt checks; its newly exposed failures are recorded as additive coverage, not passing parity. See [../corpus/JAVA-SAMPLES.md](../corpus/JAVA-SAMPLES.md) for the complete denominator and visible failures.
 
 Corpus growth: every bug we fix and every open-jadx-issue we address adds a new sample with an inline expectation, so the suite encodes our accuracy frontier, not just jadx's.
 

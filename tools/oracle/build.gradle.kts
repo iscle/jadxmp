@@ -54,7 +54,7 @@ dependencies {
     // In-process K2JVMCompiler → hermetic, version-pinned, structured diagnostics. JVM-only, tool-scope.
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:$kotlinCompilerVersion")
 
-    testImplementation(projects.core.pipeline) // Tests inject metadata through the public pass-plugin contract.
+    implementation(projects.core.pipeline) // Preserve pipeline cancellation in failure-isolated measurement.
     testImplementation(projects.core.codegenKotlin)
     testImplementation(projects.core.inputJvm)
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
@@ -134,4 +134,17 @@ tasks.register<JavaExec>("upstreamJavaInventory") {
     maxHeapSize = "1g"
     outputs.upToDateWhen { false }
     notCompatibleWithConfigurationCache("inventory must verify the current pinned checkout")
+}
+
+// Broader coverage discovery; existing enforced gates remain unchanged and failures stay visible.
+tasks.register<JavaExec>("upstreamJavaRoundTrips") {
+    group = "verification"
+    description = "Measure original upstream Java fixtures through reference Java and candidate Java/Kotlin compilation/checks."
+    mainClass.set("com.jadxmp.oracle.UpstreamJavaRoundTripRunnerKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    maxHeapSize = "2g"
+    systemProperty("jadxmp.upstream.report", layout.buildDirectory.file("reports/upstream-java-roundtrips.tsv").get().asFile.absolutePath)
+    System.getProperty("jadxmp.upstream.filter")?.let { systemProperty("jadxmp.upstream.filter", it) }
+    outputs.upToDateWhen { false }
+    notCompatibleWithConfigurationCache("measurement must verify the pinned checkout and use fresh decompilers")
 }
