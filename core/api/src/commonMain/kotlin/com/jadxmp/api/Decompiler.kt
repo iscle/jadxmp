@@ -22,6 +22,7 @@ import com.jadxmp.pipeline.AnalysisPipeline
 import com.jadxmp.pipeline.BuildCfgPass
 import com.jadxmp.pipeline.model.ModelBuilder
 import com.jadxmp.pipeline.pass.CancellationCheck
+import com.jadxmp.pipeline.pass.CancellationSignal
 import com.jadxmp.pipeline.pass.PassContext
 import com.jadxmp.pipeline.pass.PassRunner
 import kotlinx.coroutines.CancellationException
@@ -138,15 +139,25 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         commentMap = CommentMap.EMPTY
         val loader = try {
             args.registry.load(name, bytes) ?: ListCodeLoader(emptyList())
+        } catch (cancelled: CancellationSignal) {
+            throw cancelled
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             loadDiagnostics.add("failed to load '$name': ${e.message ?: e.toString()}")
             ListCodeLoader(emptyList())
         }
-        inputClasses = indexInput(loader)
+        // Keep every public view empty until preparation succeeds. Cancellation can occur in
+        // plugin metadata, model construction or root passes after the raw index is already built.
+        val loadedInputs = indexInput(loader)
         // Resources decode independently of classes and are fault-isolated: a hostile/malformed container
         // that trips a zip-guard or has no readable resources degrades to null, never failing the load.
-        resourcesInternal = try {
+        val loadedResources = try {
             ApkResources.decode(bytes)
+        } catch (cancelled: CancellationSignal) {
+            throw cancelled
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             loadDiagnostics.add("failed to read resources from '$name': ${e.message ?: e.toString()}")
             null
@@ -154,12 +165,16 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         val built = ModelBuilder.build(loader)
         runner.runRoot(built)
         built[IrAttrs.ERROR]?.let { loadDiagnostics.add("root preparation failed: ${it.message}") }
-        root = built
         // Build the deobfuscation auto-map once for this model — empty unless opted in via
         // [DecompilerArgs.deobfuscation]. The effective [aliasMap] is then derived from it plus the (empty)
         // user store; with deobfuscation off this yields [AliasMap.EMPTY] by identity (byte-identical load).
-        deobfOverrides = if (args.deobfuscation) Deobfuscator.buildOverrides(built) else emptyMap()
-        rebuildAliasMap()
+        val loadedOverrides = if (args.deobfuscation) Deobfuscator.buildOverrides(built) else emptyMap()
+        val loadedAliases = AliasMap.of(loadedOverrides)
+        inputClasses = loadedInputs
+        resourcesInternal = loadedResources
+        deobfOverrides = loadedOverrides
+        aliasMap = loadedAliases
+        root = built
         return built.classes.size
     }
 
@@ -584,6 +599,10 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         for (cls in loader.classes) {
             val name = try {
                 binaryName(cls.type)
+            } catch (cancelled: CancellationSignal) {
+                throw cancelled
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 continue
             }

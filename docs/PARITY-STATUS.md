@@ -229,3 +229,11 @@ assert that their parameter-name collision setup actually ran; all pass with tha
 The isolated API/pipeline JVM, JavaScript and Wasm tests, existing three-source execution gate
 and 211-input Java differential gate pass. Independent review completed with no remaining
 must-fix findings. These checks do not establish whole-project production readiness.
+
+Input loading now propagates both coroutine and pipeline cancellation unchanged, including
+cancellation from plugin recognition, lazy loader probes and raw descriptor indexing. Input
+indexes, resources, the prepared model and aliases are published together only after preparation
+succeeds. Cancellation during model or root preparation leaves class, member, smali and resource
+views empty; a later healthy load succeeds. Common tests cover replacing an already loaded input,
+exception identity and ordinary parser failures retaining their diagnostics. This is a load-stage
+guarantee; it does not claim cancellation coverage for every parser or rendering operation.
