@@ -120,7 +120,15 @@ class InputCancellationTest {
         val engine = engine(input = { error("bad input envelope") })
         assertEquals(0, engine.load("bad", byteArrayOf()))
         assertTrue(engine.diagnostics.single().contains("bad input envelope"))
+        assertEquals(1, engine.decompileAll().errorCount)
         assertTrue(engine.classNames.isEmpty())
+    }
+
+    @Test fun rootPreparationErrorIsCountedOnceDespiteItsLoadDiagnostic() {
+        val engine = engine(input = { FixtureClass() }, root = { error("bad root preparation") })
+        assertEquals(1, engine.load("root-failure", byteArrayOf()))
+        assertTrue(engine.diagnostics.single().contains("bad root preparation"))
+        assertEquals(1, engine.decompileAll().errorCount)
     }
 
     private fun loadHealthy(engine: Decompiler) {
@@ -139,6 +147,7 @@ class InputCancellationTest {
         assertNull(engine.resources)
         assertTrue(engine.decompileAll().classes.isEmpty())
         assertTrue(engine.diagnostics.isEmpty(), "Cancellation must not become an input error")
+        assertEquals(0, engine.decompileAll().errorCount)
     }
 
     private fun cancellations() = listOf(CancellationSignal("stop"), CancellationException("stop"))

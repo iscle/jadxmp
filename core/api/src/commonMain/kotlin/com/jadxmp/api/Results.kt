@@ -44,7 +44,8 @@ data class ClassMetadata(
 /** Everything one [Decompiler] produced for a loaded input. */
 data class DecompilationResult(
     val classes: List<DecompiledClass>,
-    /** Total decompilation errors across all classes (sum of each class's [ClassMetadata.errorCount]). */
+    /** Fatal input failures, root preparation errors, and each class's [ClassMetadata.errorCount].
+     * Resource diagnostics remain available separately through [Decompiler.diagnostics]. */
     val errorCount: Int,
 ) {
     val classNames: List<String> get() = classes.map { it.fullName }

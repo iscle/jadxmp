@@ -99,6 +99,9 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     private val usageIndexCache = LinkedHashMap<OutputFormat, UsageIndex>()
     private val runner: PassRunner = buildRunner()
     private val loadDiagnostics = ArrayList<String>()
+    // Fatal input failures have no class node to carry an error attribute. Keep them separate
+    // from resource diagnostics and root errors, which have their own reporting paths.
+    private var inputErrorCount = 0
     private var resourcesInternal: ApkResources? = null
 
     /** Diagnostics recorded while loading (e.g. a malformed/hostile container that could not be read). */
@@ -125,6 +128,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
         // Failed/cancelled preparation must never expose the previous or a half-prepared model.
         root = null
         loadDiagnostics.clear()
+        inputErrorCount = 0
         cache.clear()
         usageIndexCache.clear()
         resourcesInternal = null
@@ -145,6 +149,7 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
             throw cancelled
         } catch (e: Exception) {
             loadDiagnostics.add("failed to load '$name': ${e.message ?: e.toString()}")
+            inputErrorCount = 1
             ListCodeLoader(emptyList())
         }
         // Keep every public view empty until preparation succeeds. Cancellation can occur in
@@ -442,9 +447,9 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
      * point for non-coroutine callers such as the oracle harness.
      */
     fun decompileAll(): DecompilationResult {
-        val model = root ?: return DecompilationResult(emptyList(), 0)
+        val model = root ?: return DecompilationResult(emptyList(), inputErrorCount)
         val classes = model.classes.filter { it.outerClass == null }.map { decompileClass(it.fullName)!! }
-        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
+        return DecompilationResult(classes, inputErrorCount + classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
     }
 
     /**
@@ -460,10 +465,10 @@ class Decompiler(val args: DecompilerArgs = DecompilerArgs()) {
     suspend fun decompileAllParallel(
         scheduler: DecompilerScheduler = DecompilerScheduler(args.parallelism),
     ): DecompilationResult {
-        val model = root ?: return DecompilationResult(emptyList(), 0)
+        val model = root ?: return DecompilationResult(emptyList(), inputErrorCount)
         val topLevel = model.classes.filter { it.outerClass == null }
         val classes = scheduler.map(topLevel) { cls, check -> decompileNow(model, cls, args.outputFormat, check) }
-        return DecompilationResult(classes, classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
+        return DecompilationResult(classes, inputErrorCount + classes.sumOf { it.metadata.errorCount } + if (model.contains(AttrFlag.HAS_ERROR)) 1 else 0)
     }
 
     /**

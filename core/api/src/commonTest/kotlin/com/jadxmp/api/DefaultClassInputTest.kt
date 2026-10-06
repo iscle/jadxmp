@@ -30,9 +30,11 @@ class DefaultClassInputTest {
         assertEquals(1, engine.load("Empty.class", emptyInterface))
         assertEquals(0, engine.load("broken.class", emptyInterface.copyOf(7)))
         assertTrue(engine.diagnostics.any { "failed to load" in it })
+        repeat(2) { assertEquals(1, engine.decompileAll().errorCount, "failed input must not look successful") }
         assertNull(engine.classInfo("sample.Empty"))
         assertEquals(1, engine.load("Empty.class", emptyInterface))
         assertTrue(engine.diagnostics.isEmpty())
+        assertEquals(0, engine.decompileAll().errorCount, "reload clears the input failure")
     }
 
     // javac --release 17 -g:none: package sample; public interface Empty {}
