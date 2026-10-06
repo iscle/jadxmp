@@ -15,6 +15,8 @@ public data class ClassDeclarationData(
     public val genericSignature: String? = null,
     public val nesting: ClassNesting? = null,
     public val innerAccessFlags: Int? = null,
+    /** Null means unavailable; an empty list positively describes no declared member types. */
+    public val memberTypes: List<MemberTypeDeclarationData>? = null,
 )
 
 public data class FieldDeclarationData(
@@ -30,4 +32,11 @@ public data class MethodDeclarationData(
     public val returnType: String,
     public val accessFlags: Int,
     public val genericSignature: String? = null,
+)
+
+/** Exact member type identity from declaration metadata; no dollar-name nesting inference. */
+public data class MemberTypeDeclarationData(
+    public val type: String,
+    public val innerName: String,
+    public val accessFlags: Int,
 )

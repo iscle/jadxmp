@@ -26,6 +26,7 @@ internal object JvmDeclarationReader {
             genericSignature = JvmGenericSignatures.read(file.attributes, file.constants),
             nesting = metadata.nesting,
             innerAccessFlags = metadata.innerAccessFlags,
+            memberTypes = metadata.memberTypes,
         )
     }
 }

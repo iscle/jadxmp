@@ -9,6 +9,33 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class JvmClassMetadataJavacTest {
+    @Test fun declaredInventoryExposesUnusedExternalTypeNameDecoysWithoutLoadingBodies() {
+        val directory = Files.createTempDirectory("jadxmp-member-inventory").toFile()
+        try {
+            val source = directory.resolve("Base.java").apply { writeText("""
+                package external;
+                public class Base {
+                    public @interface Tag { }
+                    protected static class android { public static class support { } }
+                    private class Hidden { }
+                    void unused() { class Local { } }
+                }
+                class Empty { }
+            """.trimIndent()) }
+            assertEquals(0, checkNotNull(ToolProvider.getSystemJavaCompiler()).run(null, null, null,
+                "--release", "17", "-d", directory.path, source.path))
+            fun declaration(name: String) = JvmInput.readDeclaration(directory.resolve("external/$name.class").readBytes())
+            val base = declaration("Base")
+            val members = checkNotNull(base.memberTypes).associateBy { it.innerName }
+            assertEquals(setOf("Tag", "android", "Hidden"), members.keys)
+            assertEquals("Lexternal/Base\$Tag;", members.getValue("Tag").type)
+            assertEquals(0x2609, members.getValue("Tag").accessFlags)
+            assertEquals(0x000c, members.getValue("android").accessFlags)
+            assertEquals(emptyList(), declaration("Empty").memberTypes)
+            assertEquals(ClassNesting.Nested("Lexternal/Base;", innerName = "Tag"), declaration("Base\$Tag").nesting)
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun matchingInnerEntriesForDistinctClassConstantsAreAcceptedByTheJvm() {
         val bytes = ClassBytes().apply {
             u4(0xcafebabeL); u2(0); u2(61); u2(10)

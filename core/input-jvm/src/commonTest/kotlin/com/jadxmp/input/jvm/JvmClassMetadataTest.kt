@@ -9,6 +9,23 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 
 class JvmClassMetadataTest {
+    @Test fun memberInventoryKeepsOnlyExactDeclaredOwnerRowsAndKnownEmpty() {
+        val outer = file(attribute("InnerClasses", 3,
+            2, 4, 5, 9, 14, 4, 5, 9, 13, 2, 5, 1)).copy(name = "example/Outer")
+        val members = JvmClassMetadata.read(outer).memberTypes
+        assertEquals(1, members.size)
+        assertEquals("Lexample/Outer\$Inner;", members.single().type)
+        assertEquals("Inner", members.single().innerName)
+        assertEquals(9, members.single().accessFlags)
+        assertEquals(emptyList(), JvmClassMetadata.read(file()).memberTypes)
+        assertEquals(emptyList(), JvmDeclarationReader.read(file()).memberTypes)
+    }
+
+    @Test fun contradictoryDeclaredMemberAliasesAreRejected() {
+        val outer = file(attribute("InnerClasses", 2, 2, 4, 5, 9, 14, 4, 5, 1)).copy(name = "example/Outer")
+        assertFailsWith<ByteReaderException> { JvmClassMetadata.read(outer) }
+    }
+
     @Test fun repeatedAliasesReuseLongMetadataNames() {
         val count = 5000
         val prefix = "a".repeat(4096)

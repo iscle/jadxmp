@@ -2,6 +2,7 @@ package com.jadxmp.input.jvm
 
 import com.jadxmp.input.ClassNesting
 import com.jadxmp.input.MethodRef
+import com.jadxmp.input.MemberTypeDeclarationData
 import com.jadxmp.io.ByteReader
 import com.jadxmp.io.ByteReaderException
 
@@ -10,6 +11,7 @@ internal data class JvmClassMetadata(
     val sourceFile: String?,
     val nesting: ClassNesting?,
     val innerAccessFlags: Int?,
+    val memberTypes: List<MemberTypeDeclarationData>,
 ) {
     companion object {
         fun read(file: ClassFile): JvmClassMetadata {
@@ -17,7 +19,8 @@ internal data class JvmClassMetadata(
             val sourceFile = single(file, "SourceFile")?.let { attribute ->
                 decode(attribute) { file.constants.utf8(readU16BE()) }
             }
-            val inner = single(file, "InnerClasses")?.let { readInnerClasses(file, it, names) }
+            val rows = single(file, "InnerClasses")?.let { readInnerClasses(file, it, names) }
+            val inner = rows?.own
             val enclosing = single(file, "EnclosingMethod")?.let { attribute ->
                 decode(attribute) {
                     val owner = names.className(readU16BE())
@@ -42,7 +45,7 @@ internal data class JvmClassMetadata(
                 inner != null -> null
                 else -> ClassNesting.TopLevel
             }
-            return JvmClassMetadata(sourceFile, nesting, inner?.flags)
+            return JvmClassMetadata(sourceFile, nesting, inner?.flags, rows?.members ?: emptyList())
         }
 
         private fun single(file: ClassFile, name: String): JvmAttribute? {
@@ -51,11 +54,12 @@ internal data class JvmClassMetadata(
             return attributes.singleOrNull()
         }
 
-        private fun readInnerClasses(file: ClassFile, attribute: JvmAttribute, names: Names): Inner? = decode(attribute) {
+        private fun readInnerClasses(file: ClassFile, attribute: JvmAttribute, names: Names): InnerRows = decode(attribute) {
             val count = readU16BE()
             requireAvailable(count.toLong() * 8)
             var own: Inner? = null
             val seen = HashSet<Int>()
+            val declarations = LinkedHashMap<Name, Inner>()
             repeat(count) {
                 val classIndex = readU16BE()
                 if (!seen.add(classIndex)) invalid("duplicate InnerClasses entry")
@@ -67,16 +71,19 @@ internal data class JvmClassMetadata(
                 val innerName = if (nameIndex == 0) null else names.text(nameIndex)
                 if (file.majorVersion >= 51 && innerName == null && outer != null) invalid("anonymous class has member owner")
                 val flags = readU16BE()
-                if (name.isCurrent) {
-                    // Reserved bits are ignored as required by JVMS 4.7.6.
-                    val entry = Inner(outer, innerName, flags and 0x761f)
-                    // Distinct Class constants may name the same class. Their declaration metadata
-                    // must agree, but rejecting matching rows would reject valid JVM class files.
-                    if (own != null && own != entry) invalid("contradictory InnerClasses entries for current class")
-                    own = entry
-                }
+                // Interned Name keys make repeated CP aliases O(1), including web targets.
+                val entry = Inner(outer, innerName, flags and 0x761f)
+                val previous = declarations[name]
+                if (previous != null && previous != entry) invalid("contradictory InnerClasses entries")
+                declarations[name] = entry
+                if (name.isCurrent) own = entry
             }
-            own
+            val members = declarations.mapNotNull { (type, entry) ->
+                if (entry.owner?.isCurrent != true) return@mapNotNull null
+                val sourceName = entry.name ?: invalid("declared member has no inner name")
+                MemberTypeDeclarationData("L${type.value};", sourceName.value, entry.flags)
+            }
+            InnerRows(own, members)
         }
 
         private inline fun <T> decode(attribute: JvmAttribute, read: ByteReader.() -> T): T {
@@ -89,17 +96,22 @@ internal data class JvmClassMetadata(
         private fun invalid(message: String): Nothing = throw ByteReaderException("invalid JVM class metadata: $message")
     }
 
+    private data class InnerRows(val own: Inner?, val members: List<MemberTypeDeclarationData>)
+
     private data class Inner(val owner: Name?, val name: Name?, val flags: Int)
 
     /** Canonical identities keep repeated long shared UTF8 names out of the per-entry comparisons. */
     private class Name(val value: String, val isCurrent: Boolean)
 
     private class Names(private val file: ClassFile) {
+        private var remainingText = 10_000_000L
         private val byIndex = HashMap<Int, Name>()
         private val byValue = HashMap<String, Name>()
 
         fun text(index: Int): Name = byIndex.getOrPut(index) {
             val value = file.constants.utf8(index)
+            remainingText -= value.length.toLong() + file.name.length + 1
+            if (remainingText < 0) throw ByteReaderException("invalid JVM class metadata: name work limit exceeded")
             byValue.getOrPut(value) { Name(value, value == file.name) }
         }
 
