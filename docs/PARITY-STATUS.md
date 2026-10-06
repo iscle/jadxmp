@@ -3,7 +3,38 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
-## Expanded original-source round trips (engine `30fbba0`)
+## Current expanded measurement (engine `51e11d1`)
+
+[Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37421011776) completed the JVM,
+JS and Wasm engine tests and all accuracy reports against the unchanged original jadx pin.
+The metadata-free report contains all **612 input rows**, including original failures and
+unsupported extractions. Of 431 eligible inputs, Java compiles **292** and Kotlin **231**;
+rebuilt checks pass for **70/112** Java and **38/112** Kotlin cases. The other 319 eligible
+inputs have no evaluated original check. **137 Java reference-better cases remain**.
+
+Compared with the complete `5942949` report, the only measured signal change is Kotlin
+`others/TestWrongCode2.java`: compilation fails before the constructor/name-collision fix and
+succeeds afterward, with warnings. This fixture has no evaluated original check. Its
+`CONFLICTING_OVERLOADS` suppression warning explicitly says future compiler behavior is not
+guaranteed; see [KOTLIN-NAME-COLLISIONS.md](KOTLIN-NAME-COLLISIONS.md). All 612 input/extraction
+hashes, original classifications, preparation and transformation records, every reference/Java
+signal, and every other Kotlin signal are unchanged. No-error totals remain Java 401 and Kotlin 312.
+
+The same run passes the tracked smali and three-source semantic gates. Smali counts remain
+201 parity, five improvements, zero regressions, two existing divergences and one required
+invalid-input diagnostic across 209 contexts; Kotlin compiles 83, including 80 unflagged.
+Native mutable field lowering and canonical floating annotation constants also have targeted
+execution tests, but do not constitute general JVM-input or annotation-emission parity.
+
+The earlier `74e5a65` hosted JVM test run failed on x86 canonical NaN bits. `51e11d1` replaces
+compiler-dependent arithmetic NaNs with canonical wrapper constants and passes that strict test;
+the earlier failed run is not counted as successful validation. Build reliability work also
+documents the separate Kotlin/Wasm incremental linker issue in [WASM-BUILD.md](WASM-BUILD.md).
+
+The sections below retain earlier measurements with their engine commits; their totals must not
+be combined with the current report or with the opt-in external metadata profile.
+
+## Earlier expanded original-source round trips (engine `30fbba0`)
 
 All 612 pinned integration Java files now receive a result row. Of 431 eligible compiled
 originals, reference Java recompiles 411, candidate Java 289, and candidate Kotlin 212.
@@ -145,7 +176,7 @@ dependency was removed: shared source metadata belongs to `core:ir`, with identi
 compatibility keys for callers. JVM verification tools remain isolated: the built desktop distribution
 contains none of the oracle, reference, smali, D8, or Kotlin compiler tool jars.
 
-## Latest combined validation (commit `5c3df54`)
+## Historical combined validation (commit `5c3df54`)
 
 | Check | Result |
 | --- | --- |
@@ -268,12 +299,13 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 2. Kotlin has 126 fixture contexts with compiler errors or no output, plus three compilable outputs carrying
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
-3. Expanded upstream round trips expose 141 Java reference-better cases, with only 69 Java and
-   33 Kotlin passing rebuilt checks out of 112 passing originals at engine `30fbba0`. These failures,
+3. Expanded upstream round trips expose 137 Java reference-better cases, with only 70 Java and
+   38 Kotlin passing rebuilt checks out of 112 passing originals at engine `51e11d1`. These failures,
    unsupported extractions and compiler profiles remain unresolved. The smali gate still measures
    no-error and recompilation only.
-4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
-   metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
+4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, typed array access,
+   one-dimensional allocations, exact owned mutable field access, lexical declaration metadata and
+   typed field constants. Broader reference/exception lowering, constructors, remaining metadata,
    archive loading is still required for full class/JAR support; single-class default registration is implemented.
    Kotlin now preserves instance/static method monitor identity and volatile/transient backing-field
    flags in targeted runtime tests, including exceptional monitor release and serialization. Synthetic
@@ -282,8 +314,9 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
 6. Declaration annotations, generic signatures and other source metadata need end-to-end
-   reconstruction. The input SPI carries annotations, but ModelBuilder currently consumes them only
-   for legacy DEX enclosure; a successfully compiled output does not prove metadata preservation.
+   reconstruction. Typed annotation headers, values, defaults and parameter sets now reach IR with
+   explicit failure states and bounded copying; source emission remains in development. A successfully
+   compiled output does not prove metadata preservation. See [ANNOTATION-METADATA.md](ANNOTATION-METADATA.md).
 
 ## Reproduce
 
