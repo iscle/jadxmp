@@ -43,6 +43,7 @@ class TypeInference(
     private val cancellation: CancellationCheck = CancellationCheck.None,
 ) {
     private val values: List<SsaValue> get() = method.ssaValues
+    private val rawConstants = RawConstantViews(cancellation)
 
     fun run() {
         if (values.isEmpty()) return
@@ -53,6 +54,7 @@ class TypeInference(
         refineBitwiseBooleans()
         backtrackAmbiguous()
         repairRemaining()
+        materializeArrayConstantViews()
         writeBack()
         retypeConstantOperands()
         ReturnTypeValidation(method, cancellation).run()
@@ -317,6 +319,20 @@ class TypeInference(
         if (parent.opcode == IrOpcode.MOVE && parent.argCount > 0 && parent.getArg(0) === use) {
             return parent.result?.ssaValue?.type ?: use.type
         }
+        if (parent.opcode == IrOpcode.ARRAY_PUT && parent.argCount == 3 && parent.getArg(0) === use) {
+            // DEX aput/aput-wide share int/float and long/double encodings. The actual
+            // primitive array determines how the stored bits are interpreted, just as aget
+            // determines its result. Propagate this bound before constants default to integers.
+            // Reference stores deliberately retain their original type: a runtime array-store
+            // check must not become a narrower cast on the value.
+            val element = sourceType(parent.getArg(1)).arrayElement
+            if (element is IrType.Primitive) {
+                // A single DEX constant can supply both float/int or double/long stores.
+                // Its bits acquire a separate view at each consumer, not one global SSA type.
+                if (rawConstants.supports(use, element)) return use.type
+                return element
+            }
+        }
         return use.type
     }
 
@@ -427,6 +443,18 @@ class TypeInference(
     }
 
     // ---- finalize -----------------------------------------------------------
+
+    private fun materializeArrayConstantViews() {
+        for (block in method.blocks) for (insn in block.instructions) {
+            if (insn.opcode != IrOpcode.ARRAY_PUT || insn.argCount != 3) continue
+            val use = insn.getArg(0) as? RegisterOperand ?: continue
+            val element = sourceType(insn.getArg(1)).arrayElement ?: continue
+            val literal = rawConstants.literal(use, element) ?: continue
+            insn.setArg(0, literal)
+            use.ssaValue?.removeUse(use)
+            use.ssaValue = null
+        }
+    }
 
     private fun writeBack() {
         for (v in values) {
