@@ -18,6 +18,12 @@ internal class JavaCompilation private constructor(
     }
 
     companion object {
+        // Package descriptors are real expected binary units even when they carry no annotations.
+        // This applies symmetrically to originals, reference output and candidate output. It does
+        // not bypass the exact expected-class check below (empty/comment-only units still fail).
+        private val baseOptions = listOf("-proc:none", "-Xpkginfo:always")
+        val compilerProfile: String get() = "javac options=" + baseOptions.joinToString(" ")
+
         fun compile(
             classes: List<DecompiledClass>,
             classpath: List<File> = emptyList(),
@@ -49,7 +55,7 @@ internal class JavaCompilation private constructor(
                     fm.setLocation(StandardLocation.CLASS_OUTPUT, listOf(output))
                     if (classpath.isNotEmpty()) fm.setLocation(StandardLocation.CLASS_PATH, classpath)
                     val options = buildList {
-                        add("-proc:none")
+                        addAll(baseOptions)
                         if (release != null) { add("--release"); add(release.toString()) }
                     }
                     val ok = compiler.getTask(null, fm, diagnostics, options, null, fm.getJavaFileObjectsFromFiles(sourceFiles)).call()

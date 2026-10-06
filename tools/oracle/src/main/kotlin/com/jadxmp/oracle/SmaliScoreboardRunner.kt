@@ -182,6 +182,7 @@ internal fun renderSmaliReport(
 ): String = buildString {
     val scored = board.samples
     appendLine("=== jadxmp smali differential scoreboard (jadx-${ReferenceDecompiler.DEFAULT_JADX_VERSION} vs jadxmp core:api) ===")
+    appendLine(JavaCompilation.compilerProfile)
     appendLine("smali files discovered : $physicalInputs")
     appendLine("fixture contexts       : $totalDiscovered")
     appendLine("assembled + scored     : ${scored.size}")

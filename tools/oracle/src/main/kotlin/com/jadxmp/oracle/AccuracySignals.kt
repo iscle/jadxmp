@@ -62,7 +62,9 @@ object AccuracySignals {
      * **A green exit is not enough** (F1): empty or comment-only Java compiles with exit 0 while
      * producing ZERO `.class` files, so a decompiler that emitted nothing would score a false PASS.
      * We therefore additionally require every expected top-level class to have produced its
-     * `<simpleName>.class` in the output dir; a missing one fails the signal.
+     * `<simpleName>.class` in the output dir; a missing one fails the signal. The symmetric
+     * `-Xpkginfo:always` javac profile produces a package descriptor for a genuine unannotated
+     * `package-info.java`; empty/comment-only output still fails this same artifact check.
      *
      * Requires a **JDK** at runtime (`ToolProvider.getSystemJavaCompiler()` is null on a JRE); the
      * module pins a JDK toolchain for exactly this reason.

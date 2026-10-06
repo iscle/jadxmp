@@ -28,6 +28,7 @@ internal object UpstreamRoundTripReport {
         appendLine("status=COMPLETE")
         append(metadataHeader(metadataEvidence))
         appendLine("baseline=${ReferenceDecompiler.DEFAULT_JADX_VERSION}; javac release=11; AssertJ=3.27.7; D8=9.1.31")
+        appendLine(JavaCompilation.compilerProfile)
         appendLine("discovered=$discovered selected=${rows.size} scope=${filter ?: "ALL"}")
         appendLine("This expands measured coverage; it does not replace or relax the existing accuracy gates.")
         appendLine("original: " + rows.groupingBy { it.originalStatus }.eachCount().toSortedMap().entries.joinToString { "${it.key}=${it.value}" })

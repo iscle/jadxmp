@@ -208,6 +208,7 @@ class Scoreboard {
     fun render(): String = buildString {
         val n = results.size
         appendLine("=== jadxmp accuracy scoreboard ===")
+        appendLine(JavaCompilation.compilerProfile)
         appendLine("samples: $n")
         appendLine()
         appendLine("reference (jadx) signal pass counts:")
