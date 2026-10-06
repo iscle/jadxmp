@@ -17,7 +17,11 @@ remain live elsewhere. Hidden name/ordinal parameters cannot feed explicit user 
 parameter variables. The exact, single-use entry-name literal is compiler-regenerated metadata; other
 string producers retain their resolution order and multiplicity, and unused prefix strings are not
 silently discarded. Canonical `values`, `valueOf`, and values-array construction are checked before
-the compiler replaces them. Filled-array and empty-array helper forms are covered; other array
+the compiler replaces them. The backing array may use either exact entry-field reads or the exact SSA results of the already
+constructed and stored entries, in the same slot order. Such register reads are terminal values in
+the array proof: constructors and their effects are never inlined or repeated. Reordered, duplicate,
+unknown, wrapped-construction, and indirect-copy array elements are rejected; remaining uses of any
+suppressed value still reject reconstruction. Filled-array and empty-array helper forms are covered; other array
 initialization forms remain unsupported. Arbitrary anonymous entry subclasses, constructor control
 flow outside this proof, missing or inconsistent descriptors, and unsafe relocation remain explicit
 reconstruction failures. Hidden backing-array/helper references and extra writes to entry fields are
@@ -55,3 +59,9 @@ jadx execute it, but Kotlin rejects companion access while entries initialize. S
 initialization dependencies receive a reconstruction diagnostic. Reentry through arbitrary external
 factories and the wider companion-initialization model remain broader Kotlin limitations. The tests
 do not establish all enum behavior, annotation parity, or full public-final-field JVM ABI parity.
+
+A standalone raw-smali execution fixture retains constructor results across the entry stores into
+`$VALUES`, including significant long bits and nullable text. Original Java, pinned reference Java,
+and candidate Kotlin agree on entry identity, clone identity, descriptor shape, constructor/argument
+trace, and failure identity when the second argument throws. Three fresh parallel facade runs also
+match sequential output and execution. This extension does not change annotation projection.

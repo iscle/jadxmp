@@ -7,6 +7,48 @@ import com.jadxmp.ir.type.IrType
 import kotlin.test.*
 
 class KotlinEnumConstructionPlanTest {
+    @Test fun valuesArrayMayReuseExactAlreadyStoredEntryLocals() {
+        for (count in 1..2) {
+            val fixture = Fixture()
+            val (array, values) = fixture.useEntryLocals(count)
+            val plan = assertNotNull(fixture.plan())
+            assertEquals(count, plan.entries.size)
+            assertTrue(array in plan.consumedInitializers)
+            assertEquals(count, plan.entries.values.toSet().size)
+            assertTrue(values.all { value -> plan.entries.values.any { it === value.assign.parent } })
+        }
+    }
+
+    @Test fun reusedEntryArrayRejectsWrongOrderDuplicatesUnknownOrWrappedConstruction() {
+        for (mutation in 0..5) {
+            val fixture = Fixture()
+            val (array, values) = fixture.useEntryLocals(2)
+            fun read(value: SsaValue) = reg(value.regNum, fixture.type).also { it.ssaValue = value }
+            when (mutation) {
+                0 -> { array.setArg(0, read(values[1])); array.setArg(1, read(values[0])) }
+                1 -> array.setArg(1, read(values[0]))
+                2 -> array.setArg(0, lit(0, fixture.type))
+                3 -> array.setArg(0, expr(fixture.construction))
+                4 -> array.setArg(0, reg(values[0].regNum, fixture.type).also {
+                    it.ssaValue = SsaValue(values[0].regNum, 99, reg(values[0].regNum, fixture.type))
+                })
+                5 -> array.setArg(0, expr(Instruction(IrOpcode.MOVE, args = listOf(read(values[0])))))
+            }
+            assertNull(fixture.plan(), "mutation $mutation")
+        }
+    }
+
+    @Test fun entryLocalReuseCannotHideRemainingUsesOrInterveningEffects() {
+        for (beforeArray in listOf(false, true)) {
+            val fixture = Fixture()
+            val (_, values) = fixture.useEntryLocals(1)
+            val read = reg(values[0].regNum, fixture.type).also { it.ssaValue = values[0] }
+            val statements = fixture.clinit.blocks.single().instructions
+            statements.add(if (beforeArray) 2 else statements.lastIndex, effect(read))
+            assertNull(fixture.plan())
+        }
+    }
+
     @Test fun unrelatedLazyBodiesCannotChangeTheOutputPlanButNestedBodiesAreChecked() {
         val fixture = Fixture()
         val sibling = IrClass(fixture.cls.root, "sample.Other", Flags.PUBLIC)
@@ -246,9 +288,32 @@ class KotlinEnumConstructionPlanTest {
                 InvokeKind.STATIC, args = listOf(expr(TypeInstruction(IrOpcode.CONST_CLASS, type)), reg(0, IrType.STRING).also { it.ssaValue = argument }))
             valueOf.body(Instruction(IrOpcode.RETURN, args = listOf(expr(TypeInstruction(IrOpcode.CHECK_CAST, type, args = listOf(expr(invoke)))))))
         }
+        fun useEntryLocals(count: Int): Pair<TypeInstruction, List<SsaValue>> {
+            val statements = clinit.blocks.single().instructions
+            statements.clear()
+            val values = mutableListOf<SsaValue>()
+            repeat(count) { index ->
+                val field = if (index == 0) entry else IrField(cls, "SECOND", type,
+                    Flags.PUBLIC or Flags.STATIC or Flags.FINAL or Flags.ENUM).also(cls.fields::add)
+                val call = if (index == 0) construction else InvokeInstruction(construction.methodRef,
+                    InvokeKind.DIRECT, args = listOf(expr(ConstStringInstruction(field.name)), intLit(index), lit(8, IrType.LONG)),
+                    opcode = IrOpcode.CONSTRUCTOR)
+                val result = reg(20 + index, type)
+                call.result = result
+                val value = SsaValue(result.regNum, 0, result)
+                values.add(value)
+                statements.add(call)
+                statements.add(put(field, reg(value.regNum, type).also { it.ssaValue = value }))
+            }
+            val contents = TypeInstruction(IrOpcode.FILLED_NEW_ARRAY, array,
+                args = values.map { value -> reg(value.regNum, type).also { it.ssaValue = value } })
+            statements.add(put(valuesField, expr(contents)))
+            statements.add(Instruction(IrOpcode.RETURN))
+            return contents to values
+        }
         private fun put(field: IrField, operand: Operand) = FieldInstruction(FieldRef(type, field.name, field.type), true, true, args = listOf(operand))
         fun read(field: IrField) = expr(FieldInstruction(FieldRef(type, field.name, field.type), true, false))
         fun plan(budget: KotlinEnumConstructionPlan.Budget = KotlinEnumConstructionPlan.Budget()) =
-            KotlinEnumConstructionPlan.analyze(cls, listOf(entry), clinit, valuesField, budget)
+            KotlinEnumConstructionPlan.analyze(cls, cls.fields.filter { it.accessFlags and Flags.ENUM != 0 }, clinit, valuesField, budget)
     }
 }

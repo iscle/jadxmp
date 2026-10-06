@@ -166,8 +166,9 @@ internal class KotlinEnumConstructionPlan private constructor(
                 entries[field] = construction
                 start = index + 1
             }
-            ensureNoRemainingReads(statements.drop(start), consumed)
-            val helpers = consumeValues(statements, start, entries.keys.toList(), valuesField, consumed)
+            // The backing array may still read an already stored entry's exact SSA result.
+            // Its dedicated proof consumes only those uses; all later liveness is checked afterward.
+            val helpers = consumeValues(statements, start, entries, valuesField, consumed)
             checkHiddenReferences(clinit, consumed, helpers, valuesField, entries.keys)
             return KotlinEnumConstructionPlan(entries, delegations, consumed, initializedFields(delegations, bodies))
         }
@@ -246,8 +247,16 @@ internal class KotlinEnumConstructionPlan private constructor(
             return result
         }
 
-        private fun consumeValues(statements: List<Instruction>, start: Int, fields: List<IrField>, valuesField: IrField,
+        private fun consumeValues(statements: List<Instruction>, start: Int, entries: Map<IrField, InvokeInstruction>, valuesField: IrField,
             consumed: MutableSet<Instruction>): Set<IrMethod> {
+            val fields = entries.keys.toList()
+            val entryValues = mutableMapOf<IrField, SsaValue>()
+            for ((field, construction) in entries) {
+                work()
+                val result = construction.result ?: continue
+                val value = result.ssaValue ?: continue
+                if (value.assign === result && result.parent === construction) entryValues[field] = value
+            }
             val arrayType = IrType.array(ownType)
             requireProof(valuesField.type == arrayType && valuesField.accessFlags and
                 (KotlinModifiers.PRIVATE or KotlinModifiers.STATIC or KotlinModifiers.FINAL) ==
@@ -258,13 +267,18 @@ internal class KotlinEnumConstructionPlan private constructor(
                 return read.isStatic && !read.isPut && read.fieldRef.declaringType == ownType &&
                     read.fieldRef.name == field.name && read.fieldRef.type == field.type && read.argCount == 0
             }
-            fun array(operand: Operand): Boolean {
+            fun array(operand: Operand, allowEntryLocals: Boolean = false): Boolean {
                 val instruction = ExpressionTrace(null).definition(ExpressionTrace(null).origin(operand)) as? TypeInstruction ?: return false
                 if (instruction.referencedType != arrayType) return false
                 if (instruction.opcode == IrOpcode.NEW_ARRAY && fields.isEmpty() && instruction.argCount == 1)
                     return (ExpressionTrace(null).origin(instruction.getArg(0)) as? LiteralOperand)?.value == 0L
                 if (instruction.opcode != IrOpcode.FILLED_NEW_ARRAY || instruction.argCount != fields.size) return false
-                return fields.indices.all { fieldRead(instruction.getArg(it), fields[it]) }
+                return fields.indices.all {
+                    work()
+                    val operand = instruction.getArg(it)
+                    fieldRead(operand, fields[it]) || (allowEntryLocals && operand is RegisterOperand &&
+                        operand.ssaValue != null && operand.ssaValue === entryValues[fields[it]])
+                }
             }
             fun returned(method: IrMethod): Operand {
                 val body = statements(method)
@@ -286,13 +300,15 @@ internal class KotlinEnumConstructionPlan private constructor(
                 matchesField(statement, valuesField)
             } ?: throw Unsupported()
             val store = statements[storeIndex]
-            val trace = ExpressionTrace(null, allowEmptyArray = true)
+            // These values have already been evaluated and stored in their corresponding entries.
+            // Treat their reads as terminals, never recursively inline/repeat their constructors.
+            val trace = ExpressionTrace(null, allowEmptyArray = true, availableValues = entryValues.values.toSet())
             val producer = trace.definition(trace.origin(store.getArg(0)))
             if (producer is InvokeInstruction) {
                 requireProof(helper != null && producer.opcode == IrOpcode.INVOKE && producer.isStatic && producer.argCount == 0 &&
                     producer.methodRef.declaringType == ownType && producer.methodRef.name == helper.name &&
                     producer.methodRef.paramTypes.isEmpty() && producer.methodRef.returnType == arrayType)
-            } else requireProof(array(store.getArg(0)))
+            } else requireProof(array(store.getArg(0), allowEntryLocals = true))
             trace.visit(store.getArg(0)); trace.validate(statements.subList(start, storeIndex), store.args)
             consumed.addAll(trace.definitions); consumed.add(store)
             ensureNoRemainingReads(statements.drop(storeIndex + 1), consumed)
@@ -423,7 +439,8 @@ internal class KotlinEnumConstructionPlan private constructor(
             }
         }
 
-        private inner class ExpressionTrace(val method: IrMethod?, val allowEmptyArray: Boolean = false) {
+        private inner class ExpressionTrace(val method: IrMethod?, val allowEmptyArray: Boolean = false,
+            val availableValues: Set<SsaValue> = emptySet()) {
             var regeneratedName: ConstStringInstruction? = null
             val definitions = linkedSetOf<Instruction>()
             private fun pure(instruction: Instruction): Boolean = instruction.opcode in PURE || instruction === regeneratedName
@@ -442,6 +459,7 @@ internal class KotlinEnumConstructionPlan private constructor(
             fun visit(operand: Operand, depth: Int = 0) {
                 work(); requireProof(depth < 32)
                 if (operand is LiteralOperand) return
+                if (operand is RegisterOperand && operand.ssaValue in availableValues) return
                 if (operand is RegisterOperand && operand.ssaValue?.assign?.parent == null) {
                     requireProof(method != null && (operand.ssaValue === method.thisArg ||
                         operand.ssaValue?.contains(AttrFlag.METHOD_ARGUMENT) == true)); return
