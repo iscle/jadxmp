@@ -83,6 +83,9 @@ Every module-owning agent (see `.claude/agents/`) is **test-first**:
 - CI matrix builds and runs `commonTest` on jvm + wasmJs + js for every `core:*` module (proving portability *and* correctness on all targets), then runs `tools:oracle` on JVM as the regression gate.
 - The oracle scoreboard is published as a build artifact so accuracy trends are visible over time.
 
+The current Kotlin/Wasm incremental linker workaround and its removal checks are
+documented in [WASM-BUILD.md](WASM-BUILD.md). It does not disable any test target.
+
 ## Original baseline and current limits
 
 The canonical pin is `tools/jadx-reference/baseline.properties`. The reference adapter verifies
