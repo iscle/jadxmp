@@ -11,7 +11,7 @@ public interface FieldData : FieldRef {
 
     public val annotations: List<AnnotationData>
 
-    /** The constant value for a `static final` field, or null. */
+    /** The encoded initializer for a static field, or null; the field need not be final. */
     public val constValue: EncodedValue?
 }
 

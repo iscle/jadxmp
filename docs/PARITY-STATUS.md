@@ -65,10 +65,11 @@ The isolated adapter now includes the original Java-input plugin and its pinned 
 tests verify discovery of both plugins and direct class/class-only-JAR compilation and execution,
 without D8 conversion. The existing DEX smoke test also passes. The new `core:input-jvm` foundation parses class envelopes, constant pools and raw attributes,
 with common malformed-input tests and javac interoperability tests. It is not registered as an input
-plugin yet. Straight-line primitive lowering now produces normalized register input, with real JVM
-execution comparisons. Shared format-neutral nesting and JVM lexical metadata readers prepare the
-class adapter; general bytecode lowering and class/JAR facade integration remain incomplete. The combined-suite
-counts above precede these additional reference and parser tests.
+plugin yet. Primitive arithmetic, branch, loop and switch lowering now produce normalized register
+input, with real JVM execution comparisons and bounded frame analysis. Shared format-neutral nesting,
+JVM lexical metadata and typed field constants prepare the class adapter; general bytecode lowering
+and class/JAR facade integration remain incomplete. The combined-suite counts above precede these
+additional reference and parser tests.
 
 ## Kotlin validation after the combined snapshot
 
@@ -124,11 +125,14 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Most upstream Java `check()` fixtures have not been extracted. Whole-corpus original-versus-rebuilt
    execution coverage is missing; the smali gate still measures no-error and recompilation only.
-4. `core:input-jvm` has parser/frame foundations, straight-line primitive normalization and lexical
-   declaration metadata. General control-flow/reference lowering, remaining metadata, class adaptation
-   and archive/facade integration are still required for class/JAR input support.
+4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, lexical declaration
+   metadata and typed field constants. Reference/exception lowering, constructors, remaining metadata,
+   class adaptation and archive/facade integration are still required for class/JAR input support.
 5. ktlint, detekt, ABI validation and Kover remain planned. Broader real-APK, performance, robustness,
    GUI behavior and packaged-application validation are also required.
+6. Declaration annotations, generic signatures and other source metadata need end-to-end
+   reconstruction. The input SPI carries annotations, but ModelBuilder currently consumes them only
+   for legacy DEX enclosure; a successfully compiled output does not prove metadata preservation.
 
 ## Reproduce
 

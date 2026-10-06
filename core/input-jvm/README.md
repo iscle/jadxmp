@@ -45,6 +45,11 @@ enclosing methods; access-control nests do not imply lexical nesting. This metad
 yet wired to a ClassData adapter or the facade. Annotations, signatures and the remaining attributes
 still require semantic decoding; their raw bytes remain in the parsed class model.
 
+Field constants decode `ConstantValue` into typed input values, including narrowing, wide values,
+strings and signed zero. Only static fields receive these initializers, whether final or not;
+instance-field initialization belongs to constructor bytecode. Direct JVM execution checks cover
+these distinctions. The class adapter still needs to expose the decoded field values.
+
 All production code is `commonMain`; IO primitives come from `core:binary-io`. No ASM, D8 or
 upstream jadx implementation enters the engine. The original jadx commit remains the behavioral
 oracle in the separate JVM tooling modules.
