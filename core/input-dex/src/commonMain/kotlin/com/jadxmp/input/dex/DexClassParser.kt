@@ -76,6 +76,7 @@ internal class DexClassParser(private val dex: Dex) {
 
         val fields = ArrayList<FieldData>()
         val methods = ArrayList<MethodData>()
+        val annotationDefaults = DexAnnotationDefaults(type, classAnnotations, accessFlags) { methods }
 
         if (classDataOff != 0) {
             val data = dex.cursor(classDataOff)
@@ -92,8 +93,8 @@ internal class DexClassParser(private val dex: Dex) {
 
             readFields(data, type, staticFieldsSize, fieldAnnOffsets, annotations, staticInit, fields)
             readFields(data, type, instanceFieldsSize, fieldAnnOffsets, annotations, emptyList(), fields)
-            readMethods(data, directMethodsSize, methodAnnOffsets, paramAnnOffsets, annotations, methods)
-            readMethods(data, virtualMethodsSize, methodAnnOffsets, paramAnnOffsets, annotations, methods)
+            readMethods(data, directMethodsSize, methodAnnOffsets, paramAnnOffsets, annotations, annotationDefaults, methods)
+            readMethods(data, virtualMethodsSize, methodAnnOffsets, paramAnnOffsets, annotations, annotationDefaults, methods)
         }
 
         return DexClassData(
@@ -143,6 +144,7 @@ internal class DexClassParser(private val dex: Dex) {
         annOffsets: Map<Int, Int>,
         paramAnnOffsets: Map<Int, Int>,
         annotations: AnnotationsParser,
+        annotationDefaults: DexAnnotationDefaults,
         out: MutableList<MethodData>,
     ) {
         var methodId = 0
@@ -158,7 +160,7 @@ internal class DexClassParser(private val dex: Dex) {
             val capturedMethodId = methodId
             val provider: () -> CodeReader? =
                 if (codeOff == 0) { { null } } else { { DexCodeReader(dex, codeOff, capturedMethodId) } }
-            out.add(DexMethodData(ref, accessFlags, methodAnnotations, parameterAnnotations, provider))
+            out.add(DexMethodData(ref, accessFlags, methodAnnotations, parameterAnnotations, provider) { annotationDefaults.value(ref.name) })
         }
     }
 

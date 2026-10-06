@@ -9,6 +9,7 @@ import com.jadxmp.input.MethodRef
 import com.jadxmp.ir.attr.AttrFlag
 import com.jadxmp.ir.attr.DecompileError
 import com.jadxmp.ir.attr.IrAttrs
+import com.jadxmp.ir.attr.SourceAttributes
 import com.jadxmp.ir.node.IrClass
 import com.jadxmp.ir.node.IrField
 import com.jadxmp.ir.node.IrFieldConst
@@ -135,8 +136,11 @@ object ModelBuilder {
             superType = superType,
             interfaces = interfaces,
         )
+        val annotations = if (readCode) AnnotationModel() else null
+        annotations?.let { cls[SourceAttributes.ANNOTATIONS] = it.annotations { data.annotations } }
         for (f in data.fields) {
             val field = IrField(cls, f.name, Descriptors.parseType(f.type), f.accessFlags)
+            annotations?.let { field[SourceAttributes.ANNOTATIONS] = it.annotations { f.annotations } }
             field.constValue = toFieldConst(f.constValue)
             cls.fields.add(field)
         }
@@ -149,6 +153,11 @@ object ModelBuilder {
                 argTypes = ref.parameterTypes.map { Descriptors.parseType(it) },
                 accessFlags = m.accessFlags,
             )
+            annotations?.let {
+                method[SourceAttributes.ANNOTATIONS] = it.annotations { m.annotations }
+                method[SourceAttributes.PARAMETER_ANNOTATIONS] = it.parameters(ref.parameterTypes.size) { m.parameterAnnotations }
+                method[SourceAttributes.ANNOTATION_DEFAULT] = it.default { m.annotationDefault }
+            }
             try {
                 val reader = if (readCode) m.codeReader else null
                 if (reader != null) {

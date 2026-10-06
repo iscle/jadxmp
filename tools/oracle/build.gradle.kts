@@ -56,6 +56,7 @@ dependencies {
 
     implementation(projects.core.pipeline) // Preserve pipeline cancellation in failure-isolated measurement.
     testImplementation(projects.core.codegenKotlin)
+    testImplementation(projects.core.inputDex) // Verify annotation metadata through the actual DEX adapter.
     implementation(projects.core.inputJvm) // Explicit declaration-only classpath measurement profile.
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")

@@ -37,6 +37,9 @@ public interface MethodData {
     /** Annotations per parameter, indexed by parameter position; entries may be empty lists. */
     public val parameterAnnotations: List<List<AnnotationData>>
 
+    /** Annotation element default, or null when absent. Malformed metadata may throw on access. */
+    public val annotationDefault: EncodedValue? get() = null
+
     /** The method body, or null when the method has no code (abstract/native). */
     public val codeReader: CodeReader?
 }

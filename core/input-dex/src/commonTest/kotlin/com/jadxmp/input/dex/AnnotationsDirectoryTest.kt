@@ -61,4 +61,13 @@ class AnnotationsDirectoryTest {
         assertEquals(1, classAnns.size)
         assertEquals("LAnn;", classAnns[0].annotationType)
     }
+    @Test
+    fun buildVisibilityIsRetainedWhenPresentInDex() {
+        val item = itemBytes.copyOf().also { it[0] = 0 }
+        val buildDex = Dex(base + buildBytes { i32(1); i32(itemOff); raw(item) }, "build", 0)
+        val annotation = AnnotationsParser(buildDex).annotationList(setOff).single()
+        assertEquals(AnnotationVisibility.BUILD, annotation.visibility)
+        assertEquals(EncodedValue(EncodedValueType.INT, 42), annotation.values["value"])
+    }
+
 }

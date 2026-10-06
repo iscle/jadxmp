@@ -17,21 +17,21 @@ class FakeMethodData(
     override val accessFlags: Int = 0,
     override val genericSignature: String? = null,
     override val codeReader: CodeReader? = null,
-) : MethodData {
-    override val annotations: List<AnnotationData> get() = emptyList()
-    override val parameterAnnotations: List<List<AnnotationData>> get() = emptyList()
-}
+    override val annotations: List<AnnotationData> = emptyList(),
+    override val parameterAnnotations: List<List<AnnotationData>> = emptyList(),
+    override val annotationDefault: EncodedValue? = null,
+) : MethodData
 
 class FakeFieldData(
     private val fieldRef: FakeFieldRef,
     override val accessFlags: Int = 0,
     override val genericSignature: String? = null,
     override val constValue: EncodedValue? = null,
+    override val annotations: List<AnnotationData> = emptyList(),
 ) : FieldData {
     override val declaringClassType: String get() = fieldRef.declaringClassType
     override val name: String get() = fieldRef.name
     override val type: String get() = fieldRef.type
-    override val annotations: List<AnnotationData> get() = emptyList()
 }
 
 class FakeClassData(

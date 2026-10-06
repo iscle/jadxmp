@@ -95,7 +95,9 @@ internal class DexMethodData(
     override val annotations: List<AnnotationData>,
     override val parameterAnnotations: List<List<AnnotationData>>,
     private val codeProvider: () -> CodeReader?,
+    private val defaultProvider: () -> EncodedValue? = { null },
 ) : MethodData {
+    override val annotationDefault: EncodedValue? get() = defaultProvider()
     override val genericSignature: String? get() = DexGenericSignature.read(annotations)
     override val codeReader: CodeReader? by lazy(codeProvider)
 }
