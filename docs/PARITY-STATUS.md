@@ -3,7 +3,33 @@
 Measured 2026-10-06. **Full jadx parity and production readiness are not achieved.**
 The tracked Java differential gate now passes; substantial Kotlin and input-support work remains.
 
-## Current expanded measurement (engine `2ea7e4d`)
+## Current expanded measurement (engine `5a2407b`)
+
+[Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37428139996) passed JVM, JS and Wasm
+engine tests, all accuracy reports, four desktop packaging jobs and web build/deployment.
+The metadata-free report retains all **612 rows** and the original jadx pin. Kotlin now compiles
+**235/431** eligible inputs and passes **40/112** original checks, up from 231 and 38 at `2ea7e4d`.
+Java remains at **292/431 compilations**, **70/112 checks**, and **137 reference-better cases**.
+
+Kotlin gains compilation for `TestEnumUsesOtherEnum`, `TestEnums`, `TestEnums3` and `TestEnums6`.
+The last two also gain passing rebuilt checks; their compiler results retain warnings. The first two
+have no evaluated original check. `TestInnerEnums` loses an error marker but still fails compilation
+and execution, so it is not a compilation or semantic gain. Kotlin's no-error total rises to 316.
+All input/extraction hashes, original/preparation/transformation records, and reference/Java signals
+are unchanged; no previously passing Kotlin signal is lost. The earlier complete `c546cbf` report
+has the same 612 classifications and signals as `5a2407b`.
+
+The enum proof preserves argument effects, constructor delegation and exact entry identity, including
+reusing an already constructed entry in the backing array. Independent runtime checks cover failure
+identity and repeated parallel output; see [KOTLIN-ENUM-CONSTRUCTORS.md](KOTLIN-ENUM-CONSTRUCTORS.md).
+These tests do not establish full enum or annotation parity.
+
+This measurement uses the earlier javac profile (`-proc:none`). Its smali totals remain 201 parity,
+five improvements, zero regressions, two existing divergences and one required invalid-input
+diagnostic across 209 contexts. Kotlin still compiles 83, including 80 unflagged. Compiler-profile
+changes must be identified separately from decompiler gains when comparing later reports.
+
+## Earlier expanded measurement (engine `2ea7e4d`)
 
 [Hosted CI](https://github.com/iscle/jadxmp/actions/runs/37423333166) completed the JVM,
 JS and Wasm engine tests and all accuracy reports against the unchanged original jadx pin.
@@ -306,7 +332,7 @@ These are execution checks for the asserted cases, not whole-corpus equivalence 
    error markers. Broader generic/override nullability, Java varargs, class/field reconstruction and
    broader control-flow output need work. Compilation alone is insufficient evidence of correctness.
 3. Expanded upstream round trips expose 137 Java reference-better cases, with only 70 Java and
-   38 Kotlin passing rebuilt checks out of 112 passing originals at engine `2ea7e4d`. These failures,
+   40 Kotlin passing rebuilt checks out of 112 passing originals at engine `5a2407b`. These failures,
    unsupported extractions and compiler profiles remain unresolved. The smali gate still measures
    no-error and recompilation only.
 4. `core:input-jvm` has parser/frame foundations, primitive normal-flow lowering, typed array access,
